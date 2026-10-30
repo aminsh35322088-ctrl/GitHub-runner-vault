@@ -341,6 +341,12 @@ export const credentialAudit = sqliteCore.sqliteTable('credential_audit', {
   sqliteCore.index('credential_audit_credential_idx').on(table.credentialId),
 ])
 
+export const vaultSetting = sqliteCore.sqliteTable('vault_setting', {
+  key: sqliteCore.text('key').primaryKey().notNull(),
+  value: sqliteCore.text('value').notNull(),
+  updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
+})
+
 export const relations = defineRelations(
   { user, session, account, verification, org, orgMember, orgInvitation, project, environment, secretEvent, apiToken, apiTokenEnvironment, deviceCode, oauthDomain, memberAccess },
   (r) => ({
