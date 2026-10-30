@@ -10,3 +10,6 @@ Changes made here are tracked in this repository's history and are not endorsed 
 
 This is a private repository for the owner's credential vault. Do not redistribute it
 until the upstream license text has been confirmed.
+
+Upstream CI workflows (`.github/workflows/app-ci.yml`, `cli-ci.yml`) were removed from this copy:
+they reference upstream release credentials and are not appropriate for this repository.
