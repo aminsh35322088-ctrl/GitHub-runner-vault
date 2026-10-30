@@ -220,10 +220,7 @@ function SidebarContent({
             <DropdownMenuSeparator />
             {/*
               Full navigation to the server route, not authClient.signOut().
-              /logout clears the local session and then redirects to the
-              provider's /sign-out so the SSO session dies too — a client-side
-              signOut only kills the local cookie, leaving the provider able to
-              log you straight back in as the same Google account.
+              /logout clears the local session cookie and returns to /login.
             */}
             <DropdownMenuItem
               onClick={() => {

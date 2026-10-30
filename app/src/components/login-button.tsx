@@ -13,7 +13,7 @@ export function LoginButton({ callbackURL = "/dash" }: { callbackURL?: string })
   async function handleSignIn() {
     setLoading(true)
     await authClient.signIn.social({
-      provider: "sigillo",
+      provider: "github",
       callbackURL,
     })
   }
@@ -24,7 +24,7 @@ export function LoginButton({ callbackURL = "/dash" }: { callbackURL?: string })
       loading={loading}
       size="lg"
     >
-      {loading ? "Redirecting…" : "Sign in with Google"}
+      {loading ? "Redirecting…" : "Sign in with GitHub"}
     </Button>
   )
 }

@@ -12,40 +12,16 @@ import { defineConfig } from 'vite'
 
 const port = parseInt(process.env.PORT || '5188', 10)
 
-// Test-only origin for the OAuth provider. Must match PROVIDER_URL in
-// wrangler.test.jsonc — outboundService below is the only thing that answers it.
-const TEST_PROVIDER_ORIGIN = 'https://provider.invalid'
-
 // Routes every outbound fetch made by the worker under test to this handler.
 //
-// betterAuth's genericOAuth plugin resolves `discoveryUrl` during plugin init
-// and awaits it before any auth endpoint runs. Without this, that fetch went to
-// the real network, where workerd hangs forever on an unresolvable host — it
-// never resolves and never rejects. Every test calling auth.api.* (i.e. every
-// test that creates a user) silently timed out.
+// The vault has no outbound dependencies during tests (GitHub login is not
+// exercised there), so every outbound fetch fails loudly instead of reaching the
+// internet.
 //
 // Anything unrecognized gets a 501 instead of reaching the internet, so tests
 // stay hermetic and a new unmocked dependency fails loudly and instantly
 // instead of hanging.
 function testOutboundService(request: Request): Response {
-  const url = new URL(request.url)
-
-  if (url.origin === TEST_PROVIDER_ORIGIN && url.pathname === '/api/auth/.well-known/openid-configuration') {
-    return Response.json({
-      issuer: TEST_PROVIDER_ORIGIN,
-      authorization_endpoint: `${TEST_PROVIDER_ORIGIN}/api/auth/oauth2/authorize`,
-      token_endpoint: `${TEST_PROVIDER_ORIGIN}/api/auth/oauth2/token`,
-      userinfo_endpoint: `${TEST_PROVIDER_ORIGIN}/api/auth/oauth2/userinfo`,
-      jwks_uri: `${TEST_PROVIDER_ORIGIN}/api/auth/jwks`,
-      response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code', 'refresh_token'],
-      subject_types_supported: ['public'],
-      id_token_signing_alg_values_supported: ['EdDSA'],
-      scopes_supported: ['openid', 'email', 'profile'],
-      code_challenge_methods_supported: ['S256'],
-    })
-  }
-
   return Response.json(
     { error: 'unexpected_outbound_request', url: request.url },
     { status: 501 },

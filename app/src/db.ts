@@ -11,22 +11,35 @@ import { env } from 'cloudflare:workers'
 import * as orm from 'drizzle-orm'
 import { getDb, schema } from 'db'
 import { betterAuth } from 'better-auth/minimal'
-import { genericOAuth, deviceAuthorization, bearer } from 'better-auth/plugins'
+import { deviceAuthorization, bearer } from 'better-auth/plugins'
 import { drizzleAdapter } from 'better-auth-drizzle-adapter'
 import { redirect } from 'spiceflow'
 import { memoize } from './lib/memoize.ts'
+import { GITHUB_PROVIDER_ID, isOwnerAccount, normalizeOwnerId, userHasOwnerAccount } from './lib/owner.ts'
 import { COMMON_EMAIL_DOMAINS, getEmailDomain } from './lib/utils.ts'
 export { COMMON_EMAIL_DOMAINS, getEmailDomain }
 
 // ── Drizzle client via D1 ───────────────────────────────────────────
 export { getDb }
 
-// ── OAuth client registration ───────────────────────────────────────
-// Registers this instance with the provider via RFC 7591 dynamic client
-// registration on first request for a hostname, then caches the client_id by
-// hostname.
+// ── Request origin ──────────────────────────────────────────────────
+// PUBLIC_ORIGIN (e.g. https://vault.example.workers.dev) pins the origin used
+// for OAuth callbacks and trusted origins. Set it in production so no request
+// header can influence where the sign-in flow redirects.
+
+function pinnedOrigin(): string | null {
+  const raw = (env as { PUBLIC_ORIGIN?: string }).PUBLIC_ORIGIN
+  if (!raw) return null
+  const url = new URL(raw)
+  if (url.protocol !== 'https:' && url.hostname !== 'localhost' && !url.hostname.endsWith('.localhost')) {
+    throw new Error('PUBLIC_ORIGIN must be https (or a localhost address for development)')
+  }
+  return url.origin
+}
 
 export function getRequestOrigin(request: Request): string {
+  const pinned = pinnedOrigin()
+  if (pinned) return pinned
   const publicOrigin = getPublicOriginOverride(request)
   if (publicOrigin) {
     return publicOrigin
@@ -36,6 +49,8 @@ export function getRequestOrigin(request: Request): string {
 }
 
 function getRequestHost(request: Request): string {
+  const pinned = pinnedOrigin()
+  if (pinned) return new URL(pinned).host.toLowerCase()
   const publicOrigin = getPublicOriginOverride(request)
   if (publicOrigin) {
     return new URL(publicOrigin).host.toLowerCase()
@@ -103,123 +118,48 @@ function getPublicOriginOverride(request: Request): string | null {
   return traforoUrl
 }
 
-const listOAuthHosts = memoize({
-  namespace: 'oauth-hosts',
-  fn: async (): Promise<string[] | null> => {
-    const db = getDb()
-    const rows = await db.select({ host: schema.oauthDomain.host })
-      .from(schema.oauthDomain)
-      .orderBy(schema.oauthDomain.createdAt)
-    if (rows.length === 0) return null
-    return rows.map((row) => row.host)
-  },
-})
-
-// Better Auth trusts the current request host plus previously registered hosts.
-// This is safe in the current Cloudflare Workers setup because the host is tied
-// to Cloudflare routing, not an arbitrary forged incoming Host header:
-// - Custom Domains require an exact hostname match to invoke the worker:
-//   https://developers.cloudflare.com/workers/configuration/routing/custom-domains/
-// - Workers/resolveOverride keep Host aligned with the URL for security reasons:
-//   https://developers.cloudflare.com/workers/runtime-apis/request/
-// - Cloudflare explicitly says forged Host headers are blocked to prevent
-//   bypassing other customers' security settings:
-//   https://news.ycombinator.com/item?id=25058579
-// If ingress ever moves outside that model (extra proxies, wildcard SaaS
-// routing, etc.), revisit this and add an explicit app-level allowlist instead
-// of trusting DB entries.
-async function readOAuthClientId(host: string): Promise<string | null> {
-  const db = getDb()
-  const [row] = await db.select({ oauthClientId: schema.oauthDomain.oauthClientId })
-    .from(schema.oauthDomain)
-    .where(orm.eq(schema.oauthDomain.host, host))
-    .limit(1)
-  return row?.oauthClientId ?? null
-}
-
-const lookupOAuthClientId = memoize({
-  namespace: 'oauth-client',
-  fn: readOAuthClientId,
-})
-
-export async function ensureOAuthClient(request: Request): Promise<string> {
-  const pathname = new URL(request.url).pathname
-  const host = getRequestHost(request)
-  const hostname = host.split(':')[0] ?? host
-  const isLocal = isLocalHost(hostname)
-  const isOAuthCallback = pathname.startsWith('/api/auth/callback/')
-  const cachedClientId = isLocal && isOAuthCallback
-    ? await readOAuthClientId(host)
-    : await lookupOAuthClientId(host)
-
-  if (cachedClientId && (!isLocal || isOAuthCallback)) {
-    return cachedClientId
-  }
-
-  // Allow *.workers.dev hosts so self-hosters can use the app immediately
-  // after deploying via `npx sigillo self-host`, before adding a custom
-  // domain. The Cache API (memoize) won't work on *.workers.dev but auth and
-  // the rest of the app function correctly.
-
-  const origin = getRequestOrigin(request)
-  // The redirect_uri MUST exactly match what genericOAuth sends to the provider's
-  // /authorize endpoint (the provider does a strict string compare; a mismatch
-  // yields `invalid_redirect`). Since better-auth 1.7, genericOAuth is registered
-  // as a social provider and uses the CORE callback route `/api/auth/callback/:id`,
-  // NOT the old `/api/auth/oauth2/callback/:id`. Keep this path in sync with the
-  // `isOAuthCallback` check above if better-auth ever changes the callback route.
-  const callbackUrl = new URL('/api/auth/callback/sigillo', origin).toString()
-  // Localhost callback URLs are cheap disposable registrations. Refresh them on
-  // sign-in requests so stale provider-side client ids never break local login,
-  // but keep the cached id during the OAuth callback so the code exchange uses
-  // the same client that started the flow.
-  const res = await fetch(`${env.PROVIDER_URL}/api/auth/oauth2/register`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      client_name: `Sigillo Self-Hosted (${origin})`,
-      redirect_uris: [callbackUrl],
-      grant_types: ['authorization_code', 'refresh_token'],
-      response_types: ['code'],
-      scope: 'openid email profile',
-      token_endpoint_auth_method: 'none',
-    }),
-  })
-  if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`OAuth client registration failed: ${res.status} ${body}`)
-  }
-  const { client_id }: { client_id: string } = await res.json()
-
-  const db = getDb()
-  await db.insert(schema.oauthDomain)
-    .values({ host, oauthClientId: client_id })
-    .onConflictDoUpdate({
-      target: schema.oauthDomain.host,
-      set: { oauthClientId: client_id, updatedAt: Date.now() },
-    })
-
-  return client_id
-}
-
 // ── BetterAuth ──────────────────────────────────────────────────────
 
 export async function getAuth(request: Request) {
   const db = getDb()
-  const host = getRequestHost(request)
-  const clientId = await ensureOAuthClient(request)
-  const trustedOrigins = ((await listOAuthHosts()) ?? []).map((host) => originFromHost(host))
-  trustedOrigins.push(originFromHost(host))
+  const origin = getRequestOrigin(request)
+  const githubId = (env as { GITHUB_CLIENT_ID?: string }).GITHUB_CLIENT_ID
+  const githubSecret = (env as { GITHUB_CLIENT_SECRET?: string }).GITHUB_CLIENT_SECRET
+  const ownerId = normalizeOwnerId((env as { OWNER_GITHUB_ID?: string }).OWNER_GITHUB_ID)
   return betterAuth({
-    baseURL: getRequestOrigin(request),
+    baseURL: origin,
     secret: env.BETTER_AUTH_SECRET,
     database: drizzleAdapter(db, { provider: 'sqlite' }),
-    trustedOrigins: Array.from(new Set(trustedOrigins)),
+    // Only the origin of this deployment. No registered-host list, no wildcard.
+    trustedOrigins: [origin],
     // Enable email/password signup in tests so tests can create users via
-    // auth.api.signUpEmail() and get bearer tokens without needing the
-    // OAuth provider. No-op in production since the UI only shows genericOAuth.
+    // auth.api.signUpEmail() and get bearer tokens without needing GitHub.
     // VITEST var is set in wrangler.test.jsonc, propagated to process.env by nodejs_compat.
     emailAndPassword: { enabled: !!process.env.VITEST },
+    // Without a configured GitHub OAuth app there is simply no provider, so
+    // sign-in fails closed instead of falling back to anything weaker.
+    socialProviders: githubId && githubSecret
+      ? { github: { clientId: githubId, clientSecret: githubSecret } }
+      : {},
+    // The GitHub access token is only needed to read the profile once at sign-in.
+    account: { encryptOAuthTokens: true },
+    // Refuse to even link a GitHub account that is not the owner. resolveSession
+    // enforces the same rule again on every request (defence in depth).
+    databaseHooks: {
+      account: {
+        create: {
+          before: async (account) => {
+            if (account.providerId === GITHUB_PROVIDER_ID && !isOwnerAccount(
+              { providerId: account.providerId, accountId: String(account.accountId) },
+              ownerId,
+            )) {
+              throw new Error('This vault only accepts its owner')
+            }
+            return { data: account }
+          },
+        },
+      },
+    },
     session: {
       cookieCache: {
         enabled: true,
@@ -227,31 +167,8 @@ export async function getAuth(request: Request) {
       },
     },
     plugins: [
-      genericOAuth({
-        config: [
-          {
-            providerId: 'sigillo',
-            clientId,
-            clientSecret: '',
-            // Auto-discover all endpoints from the provider's OIDC metadata
-            discoveryUrl: `${env.PROVIDER_URL}/api/auth/.well-known/openid-configuration`,
-            scopes: ['openid', 'email', 'profile'],
-            pkce: true,
-            // Always let the user pick which Google account to use. Without
-            // this the provider silently reuses its own session (and the
-            // consent step is auto-accepted for first-party clients), so
-            // pressing "Sign in with Google" never showed a choice — you got
-            // whichever account the provider last saw. The provider maps
-            // prompt=select_account onto its /select-account route, which
-            // restarts the Google sign-in and then resumes the authorize flow
-            // via /oauth2/continue.
-            prompt: 'select_account',
-          },
-        ],
-      }),
       deviceAuthorization({ verificationUri: '/device', schema: {} }),
       bearer(),
-
     ],
   })
 }
@@ -283,6 +200,18 @@ export function getSession(request: Request): Promise<Session | null> {
   return promise
 }
 
+// Every session, whether a browser cookie or a CLI bearer token, must belong to
+// a user with the owner's GitHub account linked. The vitest environment has no
+// GitHub accounts, so it is exempt (see owner.ts).
+async function sessionUserIsOwner(userId: string): Promise<boolean> {
+  if (process.env.VITEST) return true
+  const accounts = await getDb()
+    .select({ providerId: schema.account.providerId, accountId: schema.account.accountId })
+    .from(schema.account)
+    .where(orm.eq(schema.account.userId, userId))
+  return userHasOwnerAccount(accounts, (env as { OWNER_GITHUB_ID?: string }).OWNER_GITHUB_ID)
+}
+
 async function resolveSession(request: Request): Promise<Session | null> {
   const hasCookie = request.headers.has('cookie')
   const hasAuthorization = request.headers.has('authorization')
@@ -293,6 +222,7 @@ async function resolveSession(request: Request): Promise<Session | null> {
   const auth = await getAuth(request)
   const session = await auth.api.getSession({ headers: request.headers })
   if (!session) return null
+  if (!(await sessionUserIsOwner(session.user.id))) return null
   return { userId: session.user.id, user: { id: session.user.id, name: session.user.name, email: session.user.email, emailVerified: session.user.emailVerified } }
 }
 

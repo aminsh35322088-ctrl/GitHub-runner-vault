@@ -16,7 +16,6 @@
     }
   ],
   "vars": {
-    "PROVIDER_URL": "https://provider.invalid",
     "VITEST": "true"
   }
 }

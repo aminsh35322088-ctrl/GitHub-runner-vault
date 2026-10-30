@@ -14,7 +14,7 @@ import { Head, Link, ProgressBar, router } from 'spiceflow/react'
 import { env } from 'cloudflare:workers'
 import { initStrada, trace } from '@strada.sh/sdk'
 import {
-  getDb, getAuth, getSession, getRequestOrigin, ensureOAuthClient,
+  getDb, getAuth, getSession, getRequestOrigin,
   requirePageSession,
   requirePageOrgMember,
   getOrgIdForProject,
@@ -611,25 +611,16 @@ export const app = new Spiceflow({ tracer })
   })
 
   // ── Sign out ────────────────────────────────────────────────────
-  // Clears the local session, then hands off to the provider so the SSO
-  // session at PROVIDER_URL dies too. Signing out only here is not enough:
-  // the provider would still hold a live session and the next sign-in would
-  // silently reuse it, making it impossible to switch Google accounts.
-  //
-  // This is a full navigation (not authClient.signOut() in the browser)
-  // because the second half has to be a cross-origin redirect the browser
-  // follows, so the provider can set its own expired Set-Cookie.
+  // Clears the local session and returns to the login page. There is no
+  // upstream SSO session to terminate: the only identity provider is GitHub,
+  // and signing out of this vault never touches the owner's GitHub session.
   .get('/logout', async ({ request }) => {
     const origin = getRequestOrigin(request)
-    const providerSignOut = new URL('/sign-out', env.PROVIDER_URL)
-    providerSignOut.searchParams.set('client_id', await ensureOAuthClient(request))
-    providerSignOut.searchParams.set('post_logout_redirect_uri', new URL('/login', origin).toString())
-
-    const res = new Response(null, { status: 302, headers: { Location: providerSignOut.toString() } })
+    const res = new Response(null, { status: 302, headers: { Location: new URL('/login', origin).toString() } })
 
     // signOut throws when there is no session cookie, so only call it when a
     // session actually resolved. Hitting /logout while already signed out is
-    // normal and must still forward to the provider.
+    // normal and must still redirect.
     if (await getSession(request)) {
       const auth = await getAuth(request)
       const { headers } = await auth.api.signOut({ headers: request.headers, returnHeaders: true })

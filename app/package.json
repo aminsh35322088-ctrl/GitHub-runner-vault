@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Self-hostable secret sharing app — authenticates via sigillo provider",
+  "description": "Runner credential vault Worker (GitHub login, owner only)",
   "exports": {
     "./package.json": "./package.json",
     "./src/*": "./src/*"
