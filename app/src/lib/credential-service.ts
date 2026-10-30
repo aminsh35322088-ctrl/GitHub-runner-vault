@@ -11,7 +11,7 @@ import {
   decryptCredentialValue, encryptCredentialValue,
 } from './credential-crypto.ts'
 import { parseCredentialDoc, readStoredDoc } from './credential-docs.ts'
-import { normalizeAllowedHosts, readAllowedHosts, reservedName, validCredentialName } from './credential-input.ts'
+import { normalizeAllowedHosts, normalizeAuthStyle, readAllowedHosts, reservedName, validCredentialName, type AuthScheme } from './credential-input.ts'
 import { availability, publicReason } from './credential-policy.ts'
 import { createEnrollmentLink, type CreatedLink } from './enrollment.ts'
 
@@ -24,7 +24,7 @@ const MAX_PERMANENT_MS = 3 * 365 * 24 * 3600_000
 
 export type ServiceError =
   | 'invalid_name' | 'reserved_name' | 'invalid_doc' | 'exists' | 'not_found'
-  | 'invalid_value' | 'invalid_hosts' | 'invalid_expiry' | 'hosts_required' | 'unavailable'
+  | 'invalid_value' | 'invalid_hosts' | 'invalid_auth_style' | 'invalid_expiry' | 'hosts_required' | 'unavailable'
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ServiceError; detail?: string }
 
@@ -115,6 +115,9 @@ export type StoreInput = {
   visible: boolean
   delivery: 'proxy' | 'inject'
   allowedHosts: unknown
+  /** Header and scheme the proxy uses upstream. Defaults to `Authorization: Bearer`. */
+  authHeader?: string
+  authScheme?: AuthScheme
   now: number
 }
 
@@ -144,8 +147,13 @@ export async function storeCredentialValue(db: Db, key: CryptoKey, input: StoreI
   // without hosts is allowed because injection does not talk to the network itself.
   if (input.delivery === 'proxy' && hosts.hosts.length === 0) return { ok: false, error: 'hosts_required' }
 
+  const style = normalizeAuthStyle(input.authHeader ?? 'Authorization', input.authScheme ?? 'Bearer')
+  if (!style.ok) return { ok: false, error: 'invalid_auth_style', detail: style.error }
+
   const { encrypted, iv } = await encryptCredentialValue(key, row.id, KEY_VERSION, value)
   await db.update(schema.credential).set({
+    authHeader: style.header,
+    authScheme: style.scheme,
     valueEncrypted: encrypted,
     valueIv: iv,
     keyVersion: KEY_VERSION,
@@ -175,6 +183,8 @@ const METADATA_COLUMNS = {
   lifetime: schema.credential.lifetime,
   delivery: schema.credential.delivery,
   allowedHosts: schema.credential.allowedHosts,
+  authHeader: schema.credential.authHeader,
+  authScheme: schema.credential.authScheme,
   externallyManaged: schema.credential.externallyManaged,
   validation: schema.credential.validation,
   expiresAt: schema.credential.expiresAt,
@@ -266,7 +276,7 @@ export async function registerExternallyManaged(db: Db, input: { name: string; s
 // ── The only place a value is decrypted ───────────────────────────────
 
 export type ValueResult =
-  | { ok: true; value: string; credential: { id: string; name: string; delivery: 'proxy' | 'inject'; allowedHosts: string[] } }
+  | { ok: true; value: string; credential: { id: string; name: string; delivery: 'proxy' | 'inject'; allowedHosts: string[]; authHeader: string; authScheme: AuthScheme } }
   | { ok: false; reason: string }
 
 /**
@@ -280,6 +290,7 @@ export async function readCredentialValue(db: Db, key: CryptoKey, name: string, 
     id: schema.credential.id, name: schema.credential.name, status: schema.credential.status, visible: schema.credential.visible,
     expiresAt: schema.credential.expiresAt, externallyManaged: schema.credential.externallyManaged,
     delivery: schema.credential.delivery, allowedHosts: schema.credential.allowedHosts,
+    authHeader: schema.credential.authHeader, authScheme: schema.credential.authScheme,
     valueEncrypted: schema.credential.valueEncrypted, valueIv: schema.credential.valueIv, keyVersion: schema.credential.keyVersion,
   }).from(schema.credential).where(orm.eq(schema.credential.name, name)).limit(1)
   if (!row) return { ok: false, reason: 'unavailable' }
@@ -293,6 +304,9 @@ export async function readCredentialValue(db: Db, key: CryptoKey, name: string, 
   return {
     ok: true,
     value,
-    credential: { id: row.id, name: row.name, delivery: row.delivery, allowedHosts: readAllowedHosts(row.allowedHosts) },
+    credential: {
+      id: row.id, name: row.name, delivery: row.delivery, allowedHosts: readAllowedHosts(row.allowedHosts),
+      authHeader: row.authHeader, authScheme: row.authScheme,
+    },
   }
 }

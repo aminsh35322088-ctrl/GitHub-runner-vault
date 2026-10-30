@@ -183,6 +183,21 @@ describe('storing a value', () => {
   })
 })
 
+describe('auth style', () => {
+  test('custom header and scheme are stored; forbidden headers are refused', async () => {
+    const { db, key, now } = await setup()
+    const req = await requestRegistration(db, { name: uniqueName(), service: 's', purpose: 'p', doc, requestedBy: 'r', now })
+    if (!req.ok) throw new Error('unexpected')
+    const base = { credentialId: req.value.credentialId, value: SECRET, lifetime: 'permanent' as const, expiresAt: null, visible: true, delivery: 'proxy' as const, allowedHosts: ['api.a.com'], now }
+    for (const header of ['Host', 'Cookie', 'Content-Length', 'X-Forwarded-For', 'cf-connecting-ip', 'bad header', '']) {
+      expect(await storeCredentialValue(db, key, { ...base, authHeader: header, authScheme: 'Bearer' })).toMatchObject({ ok: false, error: 'invalid_auth_style' })
+    }
+    expect(await storeCredentialValue(db, key, { ...base, authHeader: 'X-Auth-Key', authScheme: 'Raw' })).toMatchObject({ ok: true })
+    const row = await getCredentialForOwner(db, req.value.credentialId)
+    expect(row).toMatchObject({ authHeader: 'X-Auth-Key', authScheme: 'Raw' })
+  })
+})
+
 describe('runner registry visibility rules', () => {
   test('active + visible appears; hidden, disabled and expired do not', async () => {
     const { db, now, name, id } = await activeCredential()
@@ -236,7 +251,7 @@ describe('reading a value for use', () => {
     const { db, key, now, name, id } = await activeCredential()
     const first = await readCredentialValue(db, key, name, now)
     expect(first).toMatchObject({ ok: true, value: SECRET })
-    if (first.ok) expect(first.credential).toMatchObject({ delivery: 'proxy', allowedHosts: ['api.cloudflare.com'] })
+    if (first.ok) expect(first.credential).toMatchObject({ delivery: 'proxy', allowedHosts: ['api.cloudflare.com'], authHeader: 'Authorization', authScheme: 'Bearer' })
 
     await setEnabled(db, id, false, now)
     expect(await readCredentialValue(db, key, name, now)).toEqual({ ok: false, reason: 'unavailable' })

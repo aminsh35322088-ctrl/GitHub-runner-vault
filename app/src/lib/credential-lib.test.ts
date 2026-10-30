@@ -305,3 +305,18 @@ describe('credential table constraints', () => {
     await expect(db.delete(schema.credentialAudit).where(orm.eq(schema.credentialAudit.id, id))).rejects.toThrow()
   })
 })
+
+import { formatAuthValue, normalizeAuthStyle } from './credential-input.ts'
+
+describe('auth style helpers', () => {
+  test('formats the header value for each scheme', () => {
+    expect(formatAuthValue('Bearer', 'tok')).toBe('Bearer tok')
+    expect(formatAuthValue('Token', 'tok')).toBe('Token tok')
+    expect(formatAuthValue('Raw', 'tok')).toBe('tok')
+  })
+  test('unknown schemes are refused', () => {
+    expect(normalizeAuthStyle('Authorization', 'Basic').ok).toBe(false)
+    expect(normalizeAuthStyle('Authorization', undefined).ok).toBe(false)
+    expect(normalizeAuthStyle('Authorization', 'Bearer').ok).toBe(true)
+  })
+})

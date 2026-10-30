@@ -62,3 +62,34 @@ export function readAllowedHosts(json: string): string[] {
     return []
   }
 }
+
+// ── How the proxy presents the value upstream ───────────────────────────
+
+export const AUTH_SCHEMES = ['Bearer', 'Token', 'Raw'] as const
+export type AuthScheme = (typeof AUTH_SCHEMES)[number]
+
+const HEADER_NAME = /^[A-Za-z][A-Za-z0-9-]{0,63}$/
+// Headers that control framing, routing or identity of the proxied request. The value
+// may only ever go into an authentication-style header, never one of these.
+const FORBIDDEN_AUTH_HEADERS = new Set([
+  'host', 'content-length', 'content-type', 'content-encoding', 'cookie', 'set-cookie', 'connection',
+  'transfer-encoding', 'upgrade', 'te', 'trailer', 'proxy-authorization', 'proxy-authenticate',
+  'expect', 'forwarded', 'via', 'origin', 'referer', 'user-agent', 'accept', 'range',
+])
+
+export type AuthStyleResult = { ok: true; header: string; scheme: AuthScheme } | { ok: false; error: string }
+
+export function normalizeAuthStyle(header: unknown, scheme: unknown): AuthStyleResult {
+  if (typeof header !== 'string' || !HEADER_NAME.test(header.trim())) return { ok: false, error: 'invalid header name' }
+  const name = header.trim()
+  const lower = name.toLowerCase()
+  if (FORBIDDEN_AUTH_HEADERS.has(lower) || lower.startsWith('x-forwarded-') || lower.startsWith('cf-') || lower.startsWith('proxy-') || lower.startsWith('sec-')) {
+    return { ok: false, error: 'header not allowed for credentials' }
+  }
+  if (typeof scheme !== 'string' || !(AUTH_SCHEMES as readonly string[]).includes(scheme)) return { ok: false, error: 'invalid scheme' }
+  return { ok: true, header: name, scheme: scheme as AuthScheme }
+}
+
+export function formatAuthValue(scheme: AuthScheme, value: string): string {
+  return scheme === 'Raw' ? value : `${scheme} ${value}`
+}
