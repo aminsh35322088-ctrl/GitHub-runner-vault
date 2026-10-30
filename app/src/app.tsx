@@ -26,6 +26,7 @@ import {
   getProjectMemberAccess,
 } from './db.ts'
 import { apiApp } from './api.ts'
+import { runnerApp } from './runner-api.ts'
 import { rememberCacheOrigin } from './lib/memoize.ts'
 import { cn } from 'sigillo-app/src/lib/utils'
 import { CreateOrgForm } from 'sigillo-app/src/components/create-org-form'
@@ -694,6 +695,7 @@ export const app = new Spiceflow({ tracer })
 
   // ── REST API (separate sub-app) ─────────────────────────────────
   .use(apiApp)
+  .use(runnerApp)
 
   // ── Holocron docs/landing page ────────────────────────────────
   // Mounted last so all explicit routes above take priority.

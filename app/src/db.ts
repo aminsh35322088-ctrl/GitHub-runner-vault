@@ -27,7 +27,7 @@ export { getDb }
 // for OAuth callbacks and trusted origins. Set it in production so no request
 // header can influence where the sign-in flow redirects.
 
-function pinnedOrigin(): string | null {
+export function pinnedOrigin(): string | null {
   const raw = (env as { PUBLIC_ORIGIN?: string }).PUBLIC_ORIGIN
   if (!raw) return null
   const url = new URL(raw)

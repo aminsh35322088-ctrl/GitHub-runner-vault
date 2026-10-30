@@ -27,6 +27,9 @@
   "vars": {
     "PUBLIC_ORIGIN": "",
     "OWNER_GITHUB_ID": "",
+    // Runner trust policy (owner/name of the Lab repo and its numeric id). Empty = runner API refuses with 503.
+    "RUNNER_REPOSITORY": "",
+    "RUNNER_REPOSITORY_ID": "",
   },
   "secrets": {
     "required": ["BETTER_AUTH_SECRET", "ENCRYPTION_KEY", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"],
