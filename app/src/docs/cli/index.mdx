@@ -1,0 +1,43 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: "CLI Reference"
+description: "All sigillo CLI commands and options"
+icon: lucide:terminal
+---
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| [`login`](/docs/cli/login) | Authenticate to Sigillo with device flow |
+| [`logout`](/docs/cli/logout) | Remove saved auth for a scope |
+| [`me`](/docs/cli/me) | Show current user info |
+| [`setup`](/docs/cli/setup) | Save default project and env for the current directory (stored in ~/.sigillo, not in the repo) |
+| [`run`](/docs/cli/run) | Run a command with secrets injected |
+| [`secrets`](/docs/cli/secrets) | List secrets for the configured env |
+| [`secrets get`](/docs/cli/secrets-get) | Get a secret value |
+| [`secrets set`](/docs/cli/secrets-set) | Set a secret value (omit value for a masked prompt or stdin) |
+| [`secrets delete`](/docs/cli/secrets-delete) | Delete a secret |
+| [`secrets download`](/docs/cli/secrets-download) | Download all secrets in a chosen format |
+| [`orgs`](/docs/cli/orgs) | List organizations |
+| [`orgs create`](/docs/cli/orgs-create) | Create an organization |
+| [`projects`](/docs/cli/projects) | List projects across organizations |
+| [`projects create`](/docs/cli/projects-create) | Create a project |
+| [`projects get`](/docs/cli/projects-get) | Get project details |
+| [`projects update`](/docs/cli/projects-update) | Update a project |
+| [`projects delete`](/docs/cli/projects-delete) | Delete a project |
+| [`environments`](/docs/cli/environments) | List envs for the configured project |
+| [`environments create`](/docs/cli/environments-create) | Create an env |
+| [`environments get`](/docs/cli/environments-get) | Get env details by id or slug |
+| [`environments rename`](/docs/cli/environments-rename) | Rename an env by id or slug |
+| [`environments delete`](/docs/cli/environments-delete) | Delete an env by id or slug |
+| [`self-host`](/docs/cli/self-host) | Deploy Sigillo to your own Cloudflare account (npm package only) |
+
+## Global Options
+
+| Option | Description |
+|--------|-------------|
+| `-h, --help` | Display this message |
+| `-v, --version` | Display version number |
+| `--token [token]` | Auth token override |
+| `--api-url [url]` | API URL override (default: https://sigillo.dev) |

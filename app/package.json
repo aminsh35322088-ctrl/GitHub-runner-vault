@@ -1,0 +1,79 @@
+{
+  "name": "sigillo-app",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hostable secret sharing app — authenticates via sigillo provider",
+  "exports": {
+    "./package.json": "./package.json",
+    "./src/*": "./src/*"
+  },
+  "scripts": {
+    "dev": "pnpm db:migrate:local && tuistory launch -s sigillo-app-dev --attach 'pnpm vite dev'",
+    "prebuild": "pnpm generate:install",
+    "build": "vite build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:prod": "echo \"D1 pre-migration timestamp: $(date +%s)\" && wrangler d1 migrations apply DB --remote",
+    "db:migrate:preview": "echo \"D1 pre-migration timestamp: $(date +%s)\" && wrangler d1 migrations apply DB --remote --env preview",
+    "deployment": "pnpm db:migrate:preview && CLOUDFLARE_ENV=preview pnpm build && wrangler deploy --env preview",
+    "deployment:prod": "pnpm db:migrate:prod && pnpm build && wrangler deploy",
+    "bundle:selfhost": "tsx scripts/build-selfhost-bundle.ts",
+    "openapi": "tsx scripts/generate-openapi.ts",
+    "generate:install": "tsx scripts/generate-install-script.ts",
+    "generate:cli-docs": "tsx scripts/generate-cli-docs.ts"
+  },
+  "dependencies": {
+    "@ascii-kit/font": "^0.0.6",
+    "@ascii-kit/fonts-flf": "^0.0.6",
+    "@base-ui/react": "^1.6.0",
+    "@holocron.so/vite": "^0.36.0",
+    "@strada.sh/sdk": "^0.5.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@tanstack/react-table": "^8.21.3",
+    "better-auth": "^1.7.0-beta.4",
+    "better-auth-drizzle-adapter": "^1.2.1",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "db": "workspace:^",
+    "drizzle-orm": "1.0.0-rc.1",
+    "lucide-react": "^1.27.0",
+    "prismjs": "^1.29.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "spiceflow": "1.26.0-rsc.18",
+    "superjson": "^2.2.6",
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4.3.3",
+    "ulid": "latest",
+    "vaul": "^1.1.2",
+    "zod": "latest"
+  },
+  "cloudflare": {
+    "bindings": {
+      "BETTER_AUTH_SECRET": {
+        "description": "Any random string used to sign auth sessions and cookies. No length or format requirement. Generate with `openssl rand -base64 32`."
+      },
+      "ENCRYPTION_KEY": {
+        "description": "**Optional.** Must be exactly 32 bytes, base64-encoded (44 characters). Used for AES-256-GCM encryption of secrets at rest. Generate with `openssl rand -base64 32`. If omitted, a key is derived from BETTER_AUTH_SECRET automatically."
+      }
+    }
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.47.0",
+    "@cloudflare/vitest-pool-workers": "^0.18.8",
+    "@types/node": "^25.6.0",
+    "@types/prismjs": "^1.26.6",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "blake3-wasm": "2.1.5",
+    "tsx": "^4.23.1",
+    "typescript": "latest",
+    "vite": "latest",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.114.0"
+  }
+}

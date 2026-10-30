@@ -1,0 +1,11 @@
+node_modules
+dist
+*.tsbuildinfo
+.DS_Store
+tmp
+.wrangler
+.dev.vars
+.env*
+.zig-cache
+zig-out
+dummy-non-existing-folder

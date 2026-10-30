@@ -1,0 +1,63 @@
+{
+  "name": "sigillo",
+  "version": "0.14.2",
+  "type": "module",
+  "description": "CLI for Sigillo — self-hostable secret manager. Manage secrets, environments, and configs from the terminal.",
+  "bin": "./dist/bin.js",
+  "files": [
+    "dist",
+    "zig",
+    "build.zig",
+    "build.zig.zon",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "cli": "zig build -Dtarget=aarch64-macos && ./zig-out/bin/sigillo",
+    "build:zig": "zig build",
+    "build:native": "tsx scripts/build.ts",
+    "build:native:macos": "tsx scripts/build.ts darwin-arm64 darwin-x64",
+    "install:local": "tsx scripts/build.ts",
+    "generate:client": "tsx scripts/generate-client.ts",
+    "test": "pnpm exec vitest run",
+    "test:e2e": "pnpm exec vitest run test/e2e.test.ts",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "if [ -z \"$CI\" ]; then echo 'ERROR: Do not publish manually. Push to main and let CI handle it. Watch CI at https://github.com/remorses/sigillo/actions' && exit 1; fi"
+  },
+  "keywords": [
+    "secrets",
+    "env",
+    "environment",
+    "variables",
+    "doppler",
+    "vault",
+    "config",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/remorses/sigillo.git",
+    "directory": "cli"
+  },
+  "homepage": "https://github.com/remorses/sigillo",
+  "bugs": {
+    "url": "https://github.com/remorses/sigillo/issues"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.8.3",
+    "vitest": "^4.1.5"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.7.0",
+    "goke": "^6.14.1",
+    "zod": "^4.4.3"
+  }
+}

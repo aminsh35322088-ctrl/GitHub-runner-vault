@@ -1,0 +1,35 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: "run"
+description: "Run a command with secrets injected"
+icon: lucide:play
+---
+
+Run a command with secrets injected
+
+## Usage
+
+```sh
+sigillo run <...cmd>
+```
+
+## Options
+
+| Option | Description |
+|--------|-------------|
+| `--command [cmd]` | Run a shell command string |
+| `--mount [path]` | Write secrets to a new owner-only file (must not exist), deleted when the command exits |
+| `--mount-format [fmt]` | Format for mounted file: env, env-no-quotes, json, yaml, docker, dotnet-json (default: env) |
+| `--disable-redaction` | Print child output without secret redaction |
+| `-p, --project [id]` | Project ID override |
+| `--env [slug]` | Env slug override (e.g. dev, prod) |
+| `-c, --config [slug]` | Env slug override |
+
+## Global Options
+
+| Option | Description |
+|--------|-------------|
+| `-h, --help` | Display this message |
+| `-v, --version` | Display version number |
+| `--token [token]` | Auth token override |
+| `--api-url [url]` | API URL override (default: https://sigillo.dev) |

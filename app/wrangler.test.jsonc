@@ -1,0 +1,22 @@
+// Wrangler config for vitest. Uses the app entry directly instead of the
+// spiceflow/cloudflare-entrypoint virtual module (which only exists at
+// vite build time). D1 binding uses a dummy database_id since miniflare
+// provides an in-memory D1 for tests.
+{
+  "name": "sigillo-app-test",
+  "compatibility_date": "2026-04-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "./src/app.tsx",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "test-db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "../db/drizzle-app"
+    }
+  ],
+  "vars": {
+    "PROVIDER_URL": "https://provider.invalid",
+    "VITEST": "true"
+  }
+}

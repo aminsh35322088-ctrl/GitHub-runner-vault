@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "noEmit": true,
+    "lib": ["ESNext", "DOM"],
+    "types": [],
+    // Vite-bundled worker like app/ — bundler resolution with the workerd
+    // condition. The inherited nodenext resolution caused TS2883 "type cannot
+    // be named" errors through better-auth's symlinked pnpm deps.
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "customConditions": ["workerd"]
+  },
+  "include": ["src", "worker-configuration.d.ts"]
+}

@@ -1,0 +1,45 @@
+{
+  "name": "sigillo-provider",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Middleman OAuth provider for sigillo — exposes Google auth via BetterAuth oauthProvider",
+  "scripts": {
+    "dev": "pnpm db:migrate:local && vite dev --port 5432",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types",
+    "db:generate": "drizzle-kit generate --config drizzle.config.ts && tsx ../db/scripts/flatten-migrations.ts ./drizzle",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:prod": "echo \"D1 pre-migration timestamp: $(date +%s)\" && wrangler d1 migrations apply DB --remote",
+    "db:migrate:preview": "echo \"D1 pre-migration timestamp: $(date +%s)\" && wrangler d1 migrations apply DB --remote --env preview",
+    "deployment": "pnpm db:migrate:preview && CLOUDFLARE_ENV=preview pnpm build && wrangler deploy --env preview",
+    "deployment:prod": "pnpm db:migrate:prod && pnpm build && wrangler deploy"
+  },
+  "dependencies": {
+    "@better-auth/oauth-provider": "1.7.0-beta.4",
+    "@opentelemetry/api": "^1.9.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "better-auth": "^1.7.0-beta.4",
+    "better-auth-drizzle-adapter": "^1.2.1",
+    "drizzle-orm": "1.0.0-rc.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "sigillo-app": "workspace:^",
+    "spiceflow": "1.26.0-rsc.18",
+    "tailwindcss": "^4.3.3",
+    "ulid": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.47.0",
+    "@types/node": "^25.6.0",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "drizzle-kit": "1.0.0-rc.1",
+    "typescript": "latest",
+    "vite": "latest",
+    "wrangler": "latest"
+  }
+}

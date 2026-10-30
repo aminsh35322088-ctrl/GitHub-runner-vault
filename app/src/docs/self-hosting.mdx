@@ -1,0 +1,101 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: 'Self-host Sigillo on your own Cloudflare account'
+sidebarTitle: 'Self-hosting'
+description: 'Deploy Sigillo to your own Cloudflare account with a single command: Worker, D1 database, migrations, and custom domain, with no build step required.'
+icon: lucide:server
+---
+
+Run Sigillo on **your own Cloudflare account** with a single command. No git clone, no build step, no wrangler config:
+
+```bash
+npx sigillo self-host
+```
+
+The command provisions a **Worker and a D1 database** on your account, applies the database migrations, uploads the latest Sigillo release, and prints your instance URL. The whole thing runs on Cloudflare's **free plan**.
+
+## What it does
+
+```diagram
+npx sigillo self-host
+      │
+      ├──> 1. Log in to Cloudflare (reuses wrangler login when present)
+      ├──> 2. Download the latest prebuilt Sigillo release bundle
+      ├──> 3. Create a D1 database ──> apply migrations
+      ├──> 4. Upload the Worker with static assets and bindings
+      ├──> 5. Enable your workers.dev URL
+      └──> 6. Optionally attach a custom domain
+```
+
+Authentication with your instance **just works**: the deployed app registers itself with the hosted Sigillo auth provider on first load, so you sign in with the same login as sigillo.dev. There are no OAuth keys to configure.
+
+## Cloudflare credentials
+
+The command finds **credentials** in this order:
+
+1. `CLOUDFLARE_API_TOKEN` environment variable (or `--api-token`)
+2. Your existing **`wrangler login`** (refreshed automatically if expired)
+3. A login saved by a previous `self-host` run
+4. Interactive: an **OAuth browser login**, or a pre-filled API token creation link you can open from any device
+
+<Aside>
+<Tip>
+Deploying over **SSH**? Pick the API token option: the pre-filled link opens on your phone or laptop and you paste the token back into the terminal.
+</Tip>
+</Aside>
+
+## Updating
+
+Re-run the same command anytime to **update** to the latest release:
+
+```bash
+npx sigillo self-host
+```
+
+Re-runs are **idempotent**: only new database migrations are applied, unchanged assets are skipped, and your auth secret is never rotated, so your stored secrets stay decryptable.
+
+Stored secrets are encrypted with a key derived from `BETTER_AUTH_SECRET`, which is saved in `~/.sigillo/selfhost.json`. **Back up that file.** If the worker and the file are both lost, the stored secrets cannot be decrypted, and `self-host` refuses to reuse that database.
+
+## Separate encryption key
+
+Optional. To use a separate AES key instead of the derived one, set `SIGILLO_ENCRYPTION_KEY` on the **first** deploy:
+
+```bash
+SIGILLO_ENCRYPTION_KEY="$(openssl rand -base64 32)" npx sigillo self-host
+```
+
+It is bound as the worker's `ENCRYPTION_KEY` secret and saved in `~/.sigillo/selfhost.json`. It cannot be set on an existing deployment, because a new key would make its stored secrets unreadable.
+
+## Options
+
+See the full flag reference at [sigillo self-host](./cli/self-host.mdx).
+
+| Option | Description |
+|--------|-------------|
+| `--name <name>` | Worker name (default: `sigillo`) |
+| `--account <id>` | Cloudflare account id (skips the account prompt) |
+| `--api-token <token>` | Cloudflare API token |
+| `--domain <hostname>` | Attach a custom domain (the zone must be on your account) |
+| `--skip-domain` | Skip the custom domain prompt |
+| `--yes` | Accept all defaults, non-interactive |
+
+Non-interactive example for **CI or agents**:
+
+```bash
+CLOUDFLARE_API_TOKEN=xxx npx sigillo self-host --yes
+```
+
+## Using your instance
+
+Point the CLI at your deployment with **`--api-url`**:
+
+```bash
+sigillo login --api-url https://sigillo.<your-subdomain>.workers.dev
+```
+
+Then everything works exactly like the hosted service:
+
+```bash
+sigillo setup
+sigillo run -- next dev
+```

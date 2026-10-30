@@ -1,0 +1,405 @@
+// Idempotent deploy steps for `npx sigillo self-host`.
+//
+// Downloads a prebuilt release bundle (worker modules + assets + D1
+// migrations, built by app/scripts/build-selfhost-bundle.ts), then provisions
+// everything on the customer's Cloudflare account via raw API calls:
+//
+//   D1 create → migrations (wrangler-compatible d1_migrations table) →
+//   assets upload session → worker PUT (multipart modules + bindings) →
+//   workers.dev subdomain → health check
+//
+// Every step is safe to re-run: re-running the command updates the deployed
+// version, applies only new migrations, and never rotates BETTER_AUTH_SECRET
+// (existing secrets are inherited via keep_bindings — rotating the secret
+// would invalidate the derived AES encryption key and destroy stored secrets).
+
+import { gunzipSync } from 'node:zlib'
+import { randomBytes } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { CfClient } from './cloudflare.js'
+
+export const RELEASE_INFO_URL = 'https://sigillo.dev/api/selfhost/release/latest'
+const GITHUB_RELEASES_URL = 'https://api.github.com/repos/remorses/sigillo/releases?per_page=30'
+export const BUNDLE_ASSET_NAME = 'sigillo-selfhost-bundle.json.gz'
+
+// Keep in sync with app/scripts/build-selfhost-bundle.ts
+export interface SelfhostBundle {
+  formatVersion: 1
+  version: string
+  createdAt: string
+  providerUrl: string
+  compatibilityDate: string
+  compatibilityFlags: string[]
+  mainModule: string
+  modules: Record<string, string>
+  assets: Record<string, { base64: string; hash: string; size: number; contentType: string }>
+  migrations: Record<string, string>
+}
+
+export interface ReleaseInfo {
+  version: string
+  url: string
+}
+
+/**
+ * Resolve the latest release bundle. Goes through sigillo.dev (so paid update
+ * gating can be added server-side later without CLI changes) and falls back
+ * to the GitHub releases API directly.
+ */
+export async function fetchReleaseInfo(): Promise<ReleaseInfo> {
+  try {
+    const res = await fetch(RELEASE_INFO_URL)
+    if (res.ok) {
+      const info = (await res.json()) as ReleaseInfo
+      if (info.version && info.url) return info
+    }
+  } catch {
+    // fall through to GitHub
+  }
+  const res = await fetch(GITHUB_RELEASES_URL, {
+    headers: { 'User-Agent': 'sigillo-cli', Accept: 'application/vnd.github+json' },
+  })
+  if (!res.ok) {
+    throw new Error(`Could not fetch releases from GitHub: ${res.status}`)
+  }
+  const releases = (await res.json()) as Array<{
+    tag_name: string
+    assets: Array<{ name: string; browser_download_url: string }>
+  }>
+  for (const release of releases) {
+    const asset = release.assets.find((a) => a.name === BUNDLE_ASSET_NAME)
+    if (asset && release.tag_name.startsWith('sigillo@')) {
+      return { version: release.tag_name.slice('sigillo@'.length), url: asset.browser_download_url }
+    }
+  }
+  throw new Error(`No release with a ${BUNDLE_ASSET_NAME} asset found — self-host bundles start at v0.13.0`)
+}
+
+export function parseBundle(gzipped: Buffer): SelfhostBundle {
+  const bundle = JSON.parse(gunzipSync(gzipped).toString('utf-8')) as SelfhostBundle
+  if (bundle.formatVersion !== 1) {
+    throw new Error(`Unsupported bundle format ${bundle.formatVersion} — update the sigillo CLI`)
+  }
+  return bundle
+}
+
+export async function loadBundle(args: { bundlePath?: string; url?: string }): Promise<SelfhostBundle> {
+  if (args.bundlePath) {
+    return parseBundle(readFileSync(args.bundlePath))
+  }
+  const url = args.url ?? (await fetchReleaseInfo()).url
+  const res = await fetch(url)
+  if (!res.ok) {
+    throw new Error(`Bundle download failed: ${res.status} ${url}`)
+  }
+  return parseBundle(Buffer.from(await res.arrayBuffer()))
+}
+
+// ── Conflict detection ──────────────────────────────────────────────
+
+/**
+ * Fingerprint an existing worker: every Sigillo deployment has a `DB` D1
+ * binding and a `PROVIDER_URL` plain_text binding. An unrelated worker that
+ * happens to share the name must never be overwritten.
+ */
+export function isSigilloWorker(settings: { bindings?: Array<{ type: string; name: string }> } | null): boolean {
+  const bindings = settings?.bindings ?? []
+  return (
+    bindings.some((b) => b.type === 'd1' && b.name === 'DB') &&
+    bindings.some((b) => b.type === 'plain_text' && b.name === 'PROVIDER_URL')
+  )
+}
+
+// ── D1 ──────────────────────────────────────────────────────────────
+
+/**
+ * Find-or-create the D1 database. When adopting an existing database by name
+ * (nothing in local state), verify it actually belongs to Sigillo before
+ * applying migrations into it: an empty database is fine, a database whose
+ * `d1_migrations` history starts with our first migration is ours, anything
+ * else is an unrelated database that must not be touched.
+ */
+export async function ensureDatabase({ client, accountId, name, firstMigrationName }: {
+  client: CfClient
+  accountId: string
+  name: string
+  firstMigrationName?: string
+}): Promise<string> {
+  const existing = await client.findD1ByName(accountId, name)
+  if (!existing) {
+    const created = await client.createD1(accountId, name)
+    return created.uuid
+  }
+
+  const [tablesResult] = await client.d1Query({
+    accountId,
+    databaseId: existing.uuid,
+    sql: "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%';",
+  })
+  const tables = (tablesResult?.results ?? []).map((row) => String(row.name))
+  if (tables.length === 0) return existing.uuid // empty database — safe to adopt
+
+  if (tables.includes('d1_migrations')) {
+    const [appliedResult] = await client.d1Query({
+      accountId,
+      databaseId: existing.uuid,
+      sql: 'SELECT name FROM d1_migrations ORDER BY id LIMIT 1;',
+    })
+    const first = appliedResult?.results?.[0]?.name
+    if (first === undefined || first === firstMigrationName) return existing.uuid
+  }
+
+  throw new Error(
+    `A D1 database named "${name}" already exists on this account and does not look like a Sigillo database. ` +
+      'Re-run with --name <other-name> to deploy under a different name.',
+  )
+}
+
+// Same key derivation as getEncryptionKey() in app/src/db.ts: ENCRYPTION_KEY
+// (base64, 32 bytes) if set, else SHA-256 of BETTER_AUTH_SECRET.
+export async function canDecryptStoredSecret({ betterAuthSecret, encryptionKey, encrypted, iv }: {
+  betterAuthSecret: string
+  encryptionKey?: string
+  encrypted: string
+  iv: string
+}): Promise<boolean> {
+  const raw = encryptionKey
+    ? Buffer.from(encryptionKey, 'base64')
+    : Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(betterAuthSecret)))
+  const key = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['decrypt'])
+  return crypto.subtle
+    .decrypt({ name: 'AES-GCM', iv: Buffer.from(iv, 'base64') }, key, Buffer.from(encrypted, 'base64'))
+    .then(() => true, () => false)
+}
+
+/**
+ * Before binding secrets to a new worker, prove they decrypt a value already
+ * stored in the database. Otherwise every stored secret would silently become
+ * unreadable: a freshly generated BETTER_AUTH_SECRET (worker and selfhost.json
+ * lost), or a missing ENCRYPTION_KEY that was added by hand in the dashboard.
+ * Passing the original SIGILLO_ENCRYPTION_KEY recovers the second case.
+ */
+export async function assertSecretsDecryptDatabase({ client, accountId, databaseId, betterAuthSecret, encryptionKey }: {
+  client: CfClient
+  accountId: string
+  databaseId: string
+  betterAuthSecret: string
+  encryptionKey?: string
+}): Promise<void> {
+  const [tablesResult] = await client.d1Query({
+    accountId,
+    databaseId,
+    sql: "SELECT name FROM sqlite_master WHERE type='table' AND name = 'secret_event';",
+  })
+  if (!tablesResult?.results?.length) return
+  const [rowResult] = await client.d1Query({
+    accountId,
+    databaseId,
+    sql: "SELECT value_encrypted, iv FROM secret_event WHERE operation = 'set' AND value_encrypted IS NOT NULL LIMIT 1;",
+  })
+  const row = rowResult?.results?.[0]
+  if (!row) return
+  const ok = await canDecryptStoredSecret({
+    betterAuthSecret,
+    encryptionKey,
+    encrypted: String(row.value_encrypted),
+    iv: String(row.iv),
+  })
+  if (ok) return
+  throw new Error(
+    'This D1 database already stores secrets that the keys for this deploy cannot decrypt. Deploying would make ' +
+      'every stored secret unreadable. Restore the original ~/.sigillo/selfhost.json, or pass the original key with ' +
+      'SIGILLO_ENCRYPTION_KEY if you set one, then re-run. Or deploy under --name <other-name>.',
+  )
+}
+
+/**
+ * Apply pending migrations using the same `d1_migrations` bookkeeping table
+ * wrangler uses, so `wrangler d1 migrations` stays interoperable.
+ * Returns the names of newly applied migrations.
+ */
+export async function applyMigrations({ client, accountId, databaseId, migrations }: {
+  client: CfClient
+  accountId: string
+  databaseId: string
+  migrations: Record<string, string>
+}): Promise<string[]> {
+  await client.d1Query({
+    accountId,
+    databaseId,
+    sql: 'CREATE TABLE IF NOT EXISTS d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);',
+  })
+  const [appliedResult] = await client.d1Query({ accountId, databaseId, sql: 'SELECT name FROM d1_migrations;' })
+  const applied = new Set((appliedResult?.results ?? []).map((row) => String(row.name)))
+
+  const appliedNow: string[] = []
+  for (const name of Object.keys(migrations).sort()) {
+    if (applied.has(name)) continue
+    // Migration SQL + bookkeeping insert in ONE request so a transient
+    // failure can't apply the schema without recording it (which would make
+    // every subsequent run fail on duplicate DDL). Same approach as wrangler.
+    const escapedName = name.replaceAll("'", "''")
+    await client.d1Query({
+      accountId,
+      databaseId,
+      sql: `${migrations[name]!}\nINSERT INTO d1_migrations (name) VALUES ('${escapedName}');`,
+    })
+    appliedNow.push(name)
+  }
+  return appliedNow
+}
+
+// ── Assets ──────────────────────────────────────────────────────────
+
+/**
+ * Upload static assets through the assets-upload-session flow and return the
+ * completion JWT to attach to the worker upload. Unchanged files (matched by
+ * hash) are skipped server-side, which is what makes re-runs fast.
+ */
+export async function syncAssets({ client, accountId, scriptName, bundle, onProgress }: {
+  client: CfClient
+  accountId: string
+  scriptName: string
+  bundle: SelfhostBundle
+  onProgress?: (uploaded: number, total: number) => void
+}): Promise<string> {
+  const manifest: Record<string, { hash: string; size: number }> = {}
+  for (const [assetPath, asset] of Object.entries(bundle.assets)) {
+    manifest[assetPath] = { hash: asset.hash, size: asset.size }
+  }
+  const session = await client.createAssetsUploadSession({ accountId, scriptName, manifest })
+  if (!session?.jwt) {
+    throw new Error('Cloudflare did not return an assets upload session')
+  }
+  const buckets = session.buckets ?? []
+  const totalFiles = buckets.flat().length
+  if (totalFiles === 0) return session.jwt
+
+  const byHash = new Map(Object.values(bundle.assets).map((asset) => [asset.hash, asset]))
+  let completionJwt = ''
+  let uploaded = 0
+  for (const bucket of buckets) {
+    const formData = new FormData()
+    for (const hash of bucket) {
+      const asset = byHash.get(hash)
+      if (!asset) throw new Error(`Upload session requested unknown asset hash ${hash}`)
+      formData.append(hash, new File([asset.base64], hash, { type: asset.contentType }), hash)
+    }
+    const res = await client.uploadAssetsBucket({ accountId, uploadJwt: session.jwt, formData })
+    uploaded += bucket.length
+    onProgress?.(uploaded, totalFiles)
+    if (res.jwt) completionJwt = res.jwt
+  }
+  if (!completionJwt) {
+    throw new Error('Asset upload finished but Cloudflare returned no completion token')
+  }
+  return completionJwt
+}
+
+// ── Worker upload ───────────────────────────────────────────────────
+
+export function generateBetterAuthSecret(): string {
+  return randomBytes(32).toString('base64')
+}
+
+/**
+ * Secrets to bind on this deploy. By default the app derives its AES key from
+ * BETTER_AUTH_SECRET (never rotated). SIGILLO_ENCRYPTION_KEY optionally binds a
+ * separate ENCRYPTION_KEY, but only on a new worker: changing the key of a
+ * worker that already stores secrets would make them all unreadable.
+ * Returns {} for an existing worker (inherit everything via keep_bindings).
+ */
+export function resolveDeploySecrets({ workerExists, saved, encryptionKeyEnv }: {
+  workerExists: boolean
+  saved?: { betterAuthSecret?: string; encryptionKey?: string }
+  encryptionKeyEnv?: string
+}): { betterAuthSecret?: string; encryptionKey?: string } {
+  const encryptionKey = encryptionKeyEnv?.trim() || undefined
+  if (encryptionKey && Buffer.from(encryptionKey, 'base64').length !== 32) {
+    throw new Error('SIGILLO_ENCRYPTION_KEY must be 32 bytes, base64-encoded (openssl rand -base64 32)')
+  }
+  const keyChanged = !!encryptionKey && encryptionKey !== saved?.encryptionKey
+  if (workerExists) {
+    if (keyChanged) {
+      throw new Error(
+        'SIGILLO_ENCRYPTION_KEY can only be set on the first deploy. Changing the key of an existing ' +
+          'deployment would make its stored secrets unreadable. Unset it to update.',
+      )
+    }
+    return {}
+  }
+  if (keyChanged && saved?.encryptionKey) {
+    throw new Error('SIGILLO_ENCRYPTION_KEY differs from the key saved for this deployment. Unset it to reuse the saved key.')
+  }
+  return {
+    betterAuthSecret: saved?.betterAuthSecret ?? generateBetterAuthSecret(),
+    encryptionKey: encryptionKey ?? saved?.encryptionKey,
+  }
+}
+
+export async function uploadWorker(
+  client: CfClient,
+  args: {
+    accountId: string
+    scriptName: string
+    bundle: SelfhostBundle
+    databaseId: string
+    assetsJwt: string
+    /** undefined = worker already exists, inherit stored secrets via keep_bindings */
+    betterAuthSecret?: string
+    encryptionKey?: string
+  },
+): Promise<void> {
+  const { bundle } = args
+  const bindings: Array<Record<string, unknown>> = [
+    { type: 'd1', name: 'DB', id: args.databaseId },
+    { type: 'plain_text', name: 'PROVIDER_URL', text: bundle.providerUrl },
+  ]
+  if (args.betterAuthSecret) {
+    bindings.push({ type: 'secret_text', name: 'BETTER_AUTH_SECRET', text: args.betterAuthSecret })
+    if (args.encryptionKey) bindings.push({ type: 'secret_text', name: 'ENCRYPTION_KEY', text: args.encryptionKey })
+  }
+
+  const metadata = {
+    main_module: bundle.mainModule,
+    compatibility_date: bundle.compatibilityDate,
+    compatibility_flags: bundle.compatibilityFlags,
+    bindings,
+    // Never clobber secrets on update: BETTER_AUTH_SECRET derives the AES
+    // encryption key, rotating it would make all stored secrets unreadable.
+    ...(args.betterAuthSecret ? {} : { keep_bindings: ['secret_text', 'secret_key'] }),
+    placement: { mode: 'smart' },
+    observability: { enabled: true },
+    assets: { jwt: args.assetsJwt, config: {} },
+  }
+
+  const formData = new FormData()
+  formData.append(
+    'metadata',
+    new File([JSON.stringify(metadata)], 'metadata.json', { type: 'application/json' }),
+  )
+  for (const [modulePath, base64] of Object.entries(bundle.modules)) {
+    formData.append(
+      modulePath,
+      new File([Buffer.from(base64, 'base64')], modulePath, { type: 'application/javascript+module' }),
+      modulePath,
+    )
+  }
+  await client.putWorker({ accountId: args.accountId, scriptName: args.scriptName, formData })
+}
+
+// ── workers.dev + health ────────────────────────────────────────────
+
+export async function waitForHealth(url: string, timeoutMs = 60_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${url}/health`)
+      if (res.ok) return true
+    } catch {
+      // DNS for fresh workers.dev subdomains can lag — keep retrying
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000))
+  }
+  return false
+}
