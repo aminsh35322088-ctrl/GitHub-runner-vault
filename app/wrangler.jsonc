@@ -1,6 +1,6 @@
 {
-  // Runner credential vault Worker. Replace the placeholders before the first
-  // deploy (the owner does this; nothing here is deployed by CI):
+  // Runner credential vault Worker. Production origin and owner ID are set here;
+  // credentials remain Cloudflare Worker secrets and are never committed.
   //   - database_id: output of `wrangler d1 create runner-vault-db`
   //   - PUBLIC_ORIGIN: the exact https origin the Worker is served from
   //   - OWNER_GITHUB_ID: numeric id of the owner's GitHub account
@@ -8,6 +8,7 @@
   // GITHUB_CLIENT_SECRET, and ENCRYPTION_KEY (32 random bytes, base64).
   "name": "runner-vault",
   "compatibility_date": "2026-04-16",
+  "preview_urls": false,
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/app.tsx",
   "placement": {
@@ -25,8 +26,8 @@
     },
   ],
   "vars": {
-    "PUBLIC_ORIGIN": "",
-    "OWNER_GITHUB_ID": "",
+    "PUBLIC_ORIGIN": "https://runner-vault.amin3532.workers.dev",
+    "OWNER_GITHUB_ID": "318252513",
     // Runner trust policy (owner/name of the Lab repo and its numeric id). Empty = runner API refuses with 503.
     "RUNNER_REPOSITORY": "aminsh35322088-ctrl/GitHub-Runner-Lab",
     "RUNNER_REPOSITORY_ID": "1374269690",
