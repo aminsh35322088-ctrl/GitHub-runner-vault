@@ -13,6 +13,7 @@ const baseConfigPath = path.join(appDir, 'wrangler.jsonc')
 const localConfigPath = path.join(appDir, 'wrangler.local.jsonc')
 const secretsPath = path.join(root, '.vault.secrets.json')
 const forceConfigure = process.argv.includes('--configure')
+const nonInteractive = process.argv.includes('--non-interactive')
 
 function execute(command, args, options = {}) {
   const executable = process.platform === 'win32' && command === 'pnpm' ? 'pnpm.cmd' : command
@@ -58,7 +59,83 @@ function validName(value, label) {
   return value
 }
 
+function validateBranch(branch) {
+  if (!/^[A-Za-z0-9._/-]{1,200}$/.test(branch) || branch.startsWith('/') || branch.includes('..')) {
+    throw new Error('Invalid branch name')
+  }
+  return branch
+}
+
+function validateWorkflowFile(workflowFile) {
+  if (!workflowFile.startsWith('.github/workflows/') || workflowFile.includes('..') || workflowFile.includes('@') || workflowFile.includes('\\')) {
+    throw new Error('Workflow path must be inside .github/workflows/')
+  }
+  return workflowFile
+}
+
+function validateEvents(value) {
+  const allowedEvents = value.split(',').map((v) => v.trim()).filter(Boolean)
+  if (!allowedEvents.length || allowedEvents.some((v) => !/^[a-z_]+$/.test(v) || v === 'pull_request' || v === 'pull_request_target')) {
+    throw new Error('Configure valid GitHub Actions events; pull-request events are not supported')
+  }
+  return allowedEvents
+}
+
+function validatePublicOrigin(publicOrigin) {
+  if (!publicOrigin) return ''
+  const url = new URL(publicOrigin)
+  if (url.protocol !== 'https:' || url.origin !== publicOrigin.replace(/\/$/, '')) {
+    throw new Error('PUBLIC_ORIGIN must be an HTTPS origin without a path or trailing slash')
+  }
+  return publicOrigin
+}
+
+function requiredEnvironment(name) {
+  const value = process.env[name]?.trim()
+  if (!value) throw new Error(name + ' is required for non-interactive deployment')
+  return value
+}
+
+async function collectNonInteractiveInstallConfig() {
+  const workerName = validName(requiredEnvironment('VAULT_DEPLOY_WORKER_NAME'), 'Worker name')
+  const ownerLogin = requiredEnvironment('VAULT_DEPLOY_OWNER_GITHUB_USERNAME')
+  if (!/^[A-Za-z0-9-]{1,39}$/.test(ownerLogin)) throw new Error('Invalid GitHub username')
+  const repository = requiredEnvironment('VAULT_DEPLOY_RUNNER_REPOSITORY')
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('Runner repository must be owner/name')
+  const branch = validateBranch(requiredEnvironment('VAULT_DEPLOY_BRANCH'))
+  const workflowFile = validateWorkflowFile(requiredEnvironment('VAULT_DEPLOY_WORKFLOW_FILE'))
+  const allowedEvents = validateEvents(requiredEnvironment('VAULT_DEPLOY_ALLOWED_EVENTS'))
+  const publicOrigin = validatePublicOrigin(process.env.VAULT_DEPLOY_PUBLIC_ORIGIN?.trim() ?? '')
+
+  const encodedRepo = repository.split('/').map(encodeURIComponent).join('/')
+  const [owner, metadata] = await Promise.all([
+    githubJson('https://api.github.com/users/' + encodeURIComponent(ownerLogin)),
+    githubJson('https://api.github.com/repos/' + encodedRepo),
+  ])
+  if (!/^\d{1,20}$/.test(String(owner.id ?? '')) || owner.login?.toLowerCase() !== ownerLogin.toLowerCase()) {
+    throw new Error('GitHub owner lookup did not match VAULT_DEPLOY_OWNER_GITHUB_USERNAME')
+  }
+  if (!/^\d{1,20}$/.test(String(metadata.id ?? '')) || metadata.full_name?.toLowerCase() !== repository.toLowerCase()) {
+    throw new Error('GitHub repository lookup did not match VAULT_DEPLOY_RUNNER_REPOSITORY')
+  }
+
+  return {
+    workerName,
+    vars: {
+      OWNER_GITHUB_ID: String(owner.id),
+      RUNNER_REPOSITORY: metadata.full_name,
+      RUNNER_REPOSITORY_ID: String(metadata.id),
+      RUNNER_ALLOWED_REFS: 'refs/heads/' + branch,
+      RUNNER_ALLOWED_EVENTS: allowedEvents.join(','),
+      RUNNER_ALLOWED_WORKFLOW_REFS: metadata.full_name + '/' + workflowFile + '@refs/heads/' + branch,
+      ...(publicOrigin ? { PUBLIC_ORIGIN: publicOrigin } : {}),
+    },
+  }
+}
+
 async function collectInstallConfig(rl) {
+  if (nonInteractive) return collectNonInteractiveInstallConfig()
+
   const workerName = validName(await ask(rl, 'Cloudflare Worker name'), 'Worker name')
   const ownerLogin = await ask(rl, 'Owner GitHub username')
   if (!/^[A-Za-z0-9-]{1,39}$/.test(ownerLogin)) throw new Error('Invalid GitHub username')
@@ -83,24 +160,10 @@ async function collectInstallConfig(rl) {
   }
   if (!/^\d{1,20}$/.test(repositoryId)) throw new Error('Repository ID must be numeric')
 
-  const branch = await ask(rl, 'Allowed Git ref branch')
-  if (!/^[A-Za-z0-9._/-]{1,200}$/.test(branch) || branch.startsWith('/') || branch.includes('..')) throw new Error('Invalid branch name')
-  const workflowFile = await ask(rl, 'Exact workflow path inside .github/workflows/')
-  if (!workflowFile.startsWith('.github/workflows/') || workflowFile.includes('..') || workflowFile.includes('@')) {
-    throw new Error('Workflow path must be inside .github/workflows/')
-  }
-  const events = await ask(rl, 'Allowed GitHub Actions events (comma-separated)')
-  const allowedEvents = events.split(',').map((v) => v.trim()).filter(Boolean)
-  if (!allowedEvents.length || allowedEvents.some((v) => v === 'pull_request' || v === 'pull_request_target')) {
-    throw new Error('Configure at least one event; pull-request events are not supported')
-  }
-  const publicOrigin = await ask(rl, 'Optional canonical PUBLIC_ORIGIN (leave empty to use the actual request URL)')
-  if (publicOrigin) {
-    const url = new URL(publicOrigin)
-    if (url.protocol !== 'https:' || url.origin !== publicOrigin.replace(/\/$/, '')) {
-      throw new Error('PUBLIC_ORIGIN must be an HTTPS origin without a path or trailing slash')
-    }
-  }
+  const branch = validateBranch(await ask(rl, 'Allowed Git ref branch'))
+  const workflowFile = validateWorkflowFile(await ask(rl, 'Exact workflow path inside .github/workflows/'))
+  const allowedEvents = validateEvents(await ask(rl, 'Allowed GitHub Actions events (comma-separated)'))
+  const publicOrigin = validatePublicOrigin(await ask(rl, 'Optional canonical PUBLIC_ORIGIN (leave empty to use the actual request URL)'))
 
   return {
     workerName,
@@ -118,11 +181,17 @@ async function collectInstallConfig(rl) {
 
 function ensureSecrets() {
   if (!fs.existsSync(secretsPath)) {
-    writePrivate(secretsPath, JSON.stringify({
+    const generatedOrProvided = nonInteractive ? {
+      BETTER_AUTH_SECRET: requiredEnvironment('VAULT_BETTER_AUTH_SECRET'),
+      ENCRYPTION_KEY: requiredEnvironment('VAULT_ENCRYPTION_KEY'),
+    } : {
       BETTER_AUTH_SECRET: randomBytes(32).toString('base64'),
       ENCRYPTION_KEY: randomBytes(32).toString('base64'),
-    }, null, 2) + '\n')
-    console.log('Created local auth/encryption keys in ' + path.relative(root, secretsPath) + ' (mode 0600). Back up securely; never commit this file.')
+    }
+    writePrivate(secretsPath, JSON.stringify(generatedOrProvided, null, 2) + '\n')
+    console.log(nonInteractive
+      ? 'Loaded persistent auth/encryption keys from the protected deployment environment.'
+      : 'Created local auth/encryption keys in ' + path.relative(root, secretsPath) + ' (mode 0600). Back up securely; never commit this file.')
   }
   const secretStat = fs.lstatSync(secretsPath)
   if (!secretStat.isFile() || secretStat.isSymbolicLink()) throw new Error('.vault.secrets.json must be a regular file, not a symlink')
@@ -136,26 +205,70 @@ function ensureSecrets() {
   }
 }
 
+function findExistingD1Database(databaseName) {
+  const raw = execute('pnpm', ['exec', 'wrangler', 'd1', 'list', '--json',
+    '--config', path.basename(baseConfigPath)], { cwd: appDir, capture: true })
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error('Wrangler returned invalid JSON while listing D1 databases; refusing to create a duplicate database')
+  }
+  const databases = Array.isArray(parsed) ? parsed : (parsed.result ?? parsed.databases ?? parsed.items)
+  if (!Array.isArray(databases)) throw new Error('Wrangler D1 list response has an unexpected shape; refusing to create a duplicate database')
+  return databases.find((entry) => (entry.name ?? entry.database_name) === databaseName) ?? null
+}
+
+function attachExistingD1(config, databaseName, databaseId) {
+  config.d1_databases = config.d1_databases ?? []
+  const current = config.d1_databases.find((entry) => entry.binding === 'DB')
+  if (current) {
+    current.database_name = databaseName
+    current.database_id = databaseId
+    current.migrations_dir = '../db/drizzle-app'
+  } else {
+    config.d1_databases.push({
+      binding: 'DB',
+      database_name: databaseName,
+      database_id: databaseId,
+      migrations_dir: '../db/drizzle-app',
+    })
+  }
+  writePrivate(localConfigPath, JSON.stringify(config, null, 2) + '\n')
+}
+
 async function main() {
   const rl = createInterface({ input: stdin, output: stdout })
   try {
     execute('pnpm', ['exec', 'wrangler', 'whoami'], { cwd: appDir })
     let config = readConfig()
-    if (forceConfigure || !fs.existsSync(localConfigPath) || !config.vars?.OWNER_GITHUB_ID) {
+    if (nonInteractive || forceConfigure || !fs.existsSync(localConfigPath) || !config.vars?.OWNER_GITHUB_ID) {
       const installation = await collectInstallConfig(rl)
+      const expectedDatabaseName = installation.workerName + '-db'
       config.name = installation.workerName
       config.vars = installation.vars
-      config.d1_databases = config.d1_databases ?? []
+      config.d1_databases = (config.d1_databases ?? []).filter((entry) =>
+        entry.binding !== 'DB' || entry.database_name === expectedDatabaseName,
+      )
       writePrivate(localConfigPath, JSON.stringify(config, null, 2) + '\n')
     }
 
     const d1 = (config.d1_databases ?? []).find((entry) => entry.binding === 'DB')
     if (!d1?.database_id) {
       const databaseName = config.name + '-db'
-      execute('pnpm', ['exec', 'wrangler', 'd1', 'create', databaseName,
-        '--config', path.basename(localConfigPath),
-        '--update-config', '--use-remote', '--binding', 'DB'], { cwd: appDir })
-      config = readConfig()
+      const existingDatabase = findExistingD1Database(databaseName)
+      const existingDatabaseId = existingDatabase?.uuid ?? existingDatabase?.database_id ?? existingDatabase?.id
+      if (existingDatabaseId) {
+        console.log('Reusing existing D1 database ' + databaseName + '.')
+        attachExistingD1(config, databaseName, String(existingDatabaseId))
+        config = readConfig()
+      } else {
+        console.log('No existing D1 database named ' + databaseName + '; creating it once.')
+        execute('pnpm', ['exec', 'wrangler', 'd1', 'create', databaseName,
+          '--config', path.basename(localConfigPath),
+          '--update-config', '--use-remote', '--binding', 'DB'], { cwd: appDir })
+        config = readConfig()
+      }
     }
 
     const binding = (config.d1_databases ?? []).find((entry) => entry.binding === 'DB')
