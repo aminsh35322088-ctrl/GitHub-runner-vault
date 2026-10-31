@@ -14,7 +14,7 @@ import { betterAuth } from 'better-auth/minimal'
 import { drizzleAdapter } from 'better-auth-drizzle-adapter'
 import { redirect } from 'spiceflow'
 import { GITHUB_PROVIDER_ID, isOwnerAccount, normalizeOwnerId, userHasOwnerAccount } from './lib/owner.ts'
-import { hasGithubOAuthConfig } from './lib/auth-config.ts'
+import { CLOUDFLARE_IP_ADDRESS_HEADERS, hasGithubOAuthConfig } from './lib/auth-config.ts'
 
 // ── Drizzle client via D1 ───────────────────────────────────────────
 export { getDb }
@@ -129,6 +129,11 @@ export async function getAuth(request: Request) {
     database: drizzleAdapter(db, { provider: 'sqlite' }),
     // Only the origin of this deployment. No registered-host list, no wildcard.
     trustedOrigins: [origin],
+    // Cloudflare sets this edge-controlled header on incoming visitor requests.
+    // Do not trust client-supplied X-Forwarded-For or X-Real-IP values here.
+    advanced: {
+      ipAddress: { ipAddressHeaders: [...CLOUDFLARE_IP_ADDRESS_HEADERS] },
+    },
     // Enable email/password signup in tests so tests can create users via
     // auth.api.signUpEmail() and get bearer tokens without needing GitHub.
     // VITEST var is set in wrangler.test.jsonc, propagated to process.env by nodejs_compat.
