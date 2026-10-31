@@ -59,7 +59,7 @@ function validName(value, label) {
 }
 
 async function collectInstallConfig(rl) {
-  const workerName = validName(await ask(rl, 'Cloudflare Worker name', 'runner-vault'), 'Worker name')
+  const workerName = validName(await ask(rl, 'Cloudflare Worker name'), 'Worker name')
   const ownerLogin = await ask(rl, 'Owner GitHub username')
   if (!/^[A-Za-z0-9-]{1,39}$/.test(ownerLogin)) throw new Error('Invalid GitHub username')
   let ownerId
@@ -83,13 +83,13 @@ async function collectInstallConfig(rl) {
   }
   if (!/^\d{1,20}$/.test(repositoryId)) throw new Error('Repository ID must be numeric')
 
-  const branch = await ask(rl, 'Allowed Git ref branch', 'main')
+  const branch = await ask(rl, 'Allowed Git ref branch')
   if (!/^[A-Za-z0-9._/-]{1,200}$/.test(branch) || branch.startsWith('/') || branch.includes('..')) throw new Error('Invalid branch name')
-  const workflowFile = await ask(rl, 'Workflow path', '.github/workflows/runner.yml')
+  const workflowFile = await ask(rl, 'Exact workflow path inside .github/workflows/')
   if (!workflowFile.startsWith('.github/workflows/') || workflowFile.includes('..') || workflowFile.includes('@')) {
     throw new Error('Workflow path must be inside .github/workflows/')
   }
-  const events = await ask(rl, 'Allowed GitHub Actions events (comma-separated)', 'workflow_dispatch,schedule,push')
+  const events = await ask(rl, 'Allowed GitHub Actions events (comma-separated)')
   const allowedEvents = events.split(',').map((v) => v.trim()).filter(Boolean)
   if (!allowedEvents.length || allowedEvents.some((v) => v === 'pull_request' || v === 'pull_request_target')) {
     throw new Error('Configure at least one event; pull-request events are not supported')

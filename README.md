@@ -213,8 +213,9 @@ cd ..
 pnpm vault:deploy
 ```
 
-The first run asks for the Worker name, owner GitHub username, trusted runner repository, workflow file, branch and
-allowed events. It resolves the GitHub owner/repository numeric IDs through the GitHub API (for a private repository,
+The first run explicitly asks for the Worker name, owner GitHub username, trusted runner repository, exact branch,
+workflow file and allowed event types; none are silently inferred from this source repository. It resolves the GitHub
+owner/repository numeric IDs through the GitHub API (for a private repository,
 provide a GitHub token through `GH_TOKEN` or enter the repository ID when prompted).
 
 The helper creates an ignored local Wrangler config and a new D1 database for this installation, applies migrations,
