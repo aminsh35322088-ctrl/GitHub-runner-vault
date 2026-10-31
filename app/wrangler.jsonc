@@ -20,7 +20,7 @@
     {
       "binding": "DB",
       "database_name": "runner-vault-db",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "0eac2ae2-ce9f-4559-9d24-5a011925aeff",
       "migrations_dir": "../db/drizzle-app",
     },
   ],
