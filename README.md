@@ -218,9 +218,32 @@ workflow file and allowed event types; none are silently inferred from this sour
 owner/repository numeric IDs through the GitHub API (for a private repository,
 provide a GitHub token through `GH_TOKEN` or enter the repository ID when prompted).
 
-The helper creates an ignored local Wrangler config and a new D1 database for this installation, applies migrations,
-builds with that config, deploys the Worker and generates two cryptographic secrets. It never writes installation
-values into tracked source files. Re-run with `pnpm vault:deploy -- --configure` to change the trust configuration.
+The helper creates an ignored local Wrangler config and creates (or reuses) the D1 database named `<WORKER_NAME>-db`,
+applies migrations, builds with that config, deploys the Worker and generates two cryptographic secrets. It never writes
+installation values into tracked source files. Re-run with `pnpm vault:deploy -- --configure` to change the trust configuration.
+
+### Non-interactive CI deployment
+
+Trusted CI can run the same private-source deployment path without prompts:
+
+```bash
+pnpm vault:deploy -- --non-interactive
+```
+
+It requires `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `GH_TOKEN`, `VAULT_BETTER_AUTH_SECRET`,
+`VAULT_ENCRYPTION_KEY`, and the following installation settings:
+
+- `VAULT_DEPLOY_WORKER_NAME`
+- `VAULT_DEPLOY_OWNER_GITHUB_USERNAME`
+- `VAULT_DEPLOY_RUNNER_REPOSITORY`
+- `VAULT_DEPLOY_BRANCH`
+- `VAULT_DEPLOY_WORKFLOW_FILE`
+- `VAULT_DEPLOY_ALLOWED_EVENTS` (comma-separated; pull-request events are rejected)
+- `VAULT_DEPLOY_PUBLIC_ORIGIN` (optional)
+
+The auth and encryption secrets must be persistent across deployments. The deploy helper discovers an existing D1
+by the exact `<WORKER_NAME>-db` name and reuses it; it creates the database only when no exact match exists. If D1
+listing fails or returns an unexpected response, deployment stops rather than risking an accidental duplicate DB.
 
 The local files `app/wrangler.local.jsonc` and `.vault.secrets.json` are private installation state and are ignored by
 Git. Back up `.vault.secrets.json` securely: losing `ENCRYPTION_KEY` makes stored credentials unrecoverable. Never
