@@ -35,8 +35,8 @@
     "spiceflow": "1.26.0-rsc.18",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.3",
-    "ulid": "latest",
-    "zod": "latest"
+    "ulid": "3.0.2",
+    "zod": "4.6.5"
   },
   "cloudflare": {
     "bindings": {
@@ -53,13 +53,13 @@
     "@cloudflare/vitest-pool-workers": "^0.18.8",
     "@types/node": "^25.6.0",
     "@types/prismjs": "^1.26.6",
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
-    "@vitejs/plugin-react": "latest",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
     "blake3-wasm": "2.1.5",
     "tsx": "^4.23.1",
-    "typescript": "latest",
-    "vite": "latest",
+    "typescript": "7.0.2",
+    "vite": "8.3.1",
     "vitest": "^4.1.10",
     "wrangler": "^4.114.0"
   }
