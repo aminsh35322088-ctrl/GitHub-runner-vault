@@ -6,9 +6,11 @@
 //   /api/auth/*            BetterAuth
 
 import './globals.css'
+import { env } from 'cloudflare:workers'
 import { Spiceflow } from 'spiceflow'
 import { Head } from 'spiceflow/react'
 import { getDb, getAuth, getSession, getRequestOrigin, requirePageSession } from './db.ts'
+import { hasGithubOAuthConfig } from './lib/auth-config.ts'
 import { runnerApp } from './runner-api.ts'
 import { cn } from './lib/utils'
 import { Badge } from './components/ui/badge'
@@ -150,12 +152,26 @@ export const app = new Spiceflow()
     const redirectTo = safeRedirectPath(new URL(request.url).searchParams.get('redirect'))
     if (session) throw redirect(redirectTo)
     const { LoginButton } = await import('./components/login-button')
+    const githubOAuthConfigured = hasGithubOAuthConfig(env as unknown as {
+      GITHUB_CLIENT_ID?: string
+      GITHUB_CLIENT_SECRET?: string
+    })
     return (
       <div className="flex justify-center py-24">
         <div className="text-center max-w-sm space-y-4">
           <h1 className="text-xl font-semibold tracking-tight">Runner Credential Vault</h1>
           <p className="text-sm text-muted-foreground">Sign in with the owner's GitHub account.</p>
-          <LoginButton callbackURL={redirectTo} />
+          {githubOAuthConfigured ? (
+            <LoginButton callbackURL={redirectTo} />
+          ) : (
+            <div role="status" className="rounded-lg border border-border bg-muted/40 p-4 text-left space-y-2">
+              <p className="text-sm font-medium">GitHub sign-in is not configured yet.</p>
+              <p className="text-sm text-muted-foreground">
+                Add both <code>GITHUB_CLIENT_ID</code> and <code>GITHUB_CLIENT_SECRET</code> as encrypted
+                Worker secrets, then redeploy. The vault remains locked until OAuth is configured.
+              </p>
+            </div>
+          )}
         </div>
       </div>
     )
