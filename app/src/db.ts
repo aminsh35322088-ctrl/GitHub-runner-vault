@@ -14,6 +14,7 @@ import { betterAuth } from 'better-auth/minimal'
 import { drizzleAdapter } from 'better-auth-drizzle-adapter'
 import { redirect } from 'spiceflow'
 import { GITHUB_PROVIDER_ID, isOwnerAccount, normalizeOwnerId, userHasOwnerAccount } from './lib/owner.ts'
+import { hasGithubOAuthConfig } from './lib/auth-config.ts'
 
 // ── Drizzle client via D1 ───────────────────────────────────────────
 export { getDb }
@@ -134,8 +135,8 @@ export async function getAuth(request: Request) {
     emailAndPassword: { enabled: !!process.env.VITEST },
     // Without a configured GitHub OAuth app there is simply no provider, so
     // sign-in fails closed instead of falling back to anything weaker.
-    socialProviders: githubId && githubSecret
-      ? { github: { clientId: githubId, clientSecret: githubSecret } }
+    socialProviders: hasGithubOAuthConfig({ GITHUB_CLIENT_ID: githubId, GITHUB_CLIENT_SECRET: githubSecret })
+      ? { github: { clientId: githubId!, clientSecret: githubSecret! } }
       : {},
     // The GitHub access token is only needed to read the profile once at sign-in.
     account: { encryptOAuthTokens: true },
