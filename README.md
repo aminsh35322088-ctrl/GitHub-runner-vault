@@ -98,7 +98,7 @@ One flat registry; a credential has these properties:
 | `visible` | true / false | Hidden credentials cannot be listed or used. |
 | `lifetime` | `permanent` / `temporary` | Temporary credentials **must** expire within 24 hours. |
 | `expiresAt` | time or none | Permanent ones may optionally expire (max about 3 years). |
-| `delivery` | `proxy` / `inject` | `proxy` (default): the Worker makes the call. `inject` is stored but **not implemented yet**. |
+| `delivery` | `proxy` only | The Worker makes the API call; the raw token is never returned to the runner. |
 | `allowedHosts` | exact hostnames | Required for `proxy`. No wildcards, no IPs, no ports, no internal suffixes. |
 | `authHeader` / `authScheme` | header name; `Bearer` / `Token` / `Raw` | How the token is attached upstream (default `Authorization: Bearer <token>`). |
 | `externallyManaged` | true / false | Metadata-only entry such as `GITHUB_TOKEN`: listed for discovery, holds no value, can never be proxied. |
@@ -189,7 +189,7 @@ Sign in at `https://<origin>/login` with the owner GitHub account.
 | Page | What it does |
 | --- | --- |
 | `/vault` | Credential list: status, delivery, expiry, last used. |
-| `/vault/register/<link>` | The one-time registration page: the agent's setup notes above a write-only secret field, plus hosts, auth header/scheme, lifetime, expiry, delivery and visibility. |
+| `/vault/register/<link>` | The one-time registration page: the agent's setup notes above a write-only secret field, plus hosts, auth header/scheme, lifetime, expiry and visibility. |
 | `/vault/credentials/<id>` | Details, enable/disable, show/hide, delete, replace value or rules, recent activity. Stored values are never displayed. |
 | `/vault/audit` | Append-only audit log (database triggers block updates and deletes). |
 | `/vault/settings` | **Revoke all runner sessions**; add a metadata-only entry (for example `GITHUB_TOKEN`). |
@@ -233,7 +233,7 @@ Note the **Client ID** and generate a **Client secret**.
 | `PUBLIC_ORIGIN` | the exact Worker origin |
 | `OWNER_GITHUB_ID` | the **numeric** id of the owner's GitHub account: `curl https://api.github.com/users/<login>` → `id` |
 | `RUNNER_REPOSITORY` | `aminsh35322088-ctrl/GitHub-Runner-Lab` |
-| `RUNNER_REPOSITORY_ID` | numeric id of that repo: `curl https://api.github.com/repos/aminsh35322088-ctrl/GitHub-Runner-Lab` → `id` (currently `1374269690`) |
+| `RUNNER_REPOSITORY_ID` | `1374269690`; numeric id of the Lab repo |
 
 **6. Set the secrets** (never commit these; each command prompts for the value):
 
@@ -272,9 +272,10 @@ for migrations.
 | `PUBLIC_ORIGIN` | var | yes | Pins the origin used for OAuth callbacks, trusted origins and owner links. |
 | `OWNER_GITHUB_ID` | var | yes | Numeric GitHub account id. Empty = nobody can sign in (fails closed). |
 | `RUNNER_REPOSITORY` | var | yes | `owner/name`. Empty = runner API answers 503. |
-| `RUNNER_REPOSITORY_ID` | var | recommended | Numeric repository id; binds trust to the repository, not just its name. |
+| `RUNNER_REPOSITORY_ID` | var | yes | Numeric repository id; a mismatch or missing value rejects runner authentication. |
 | `RUNNER_ALLOWED_REFS` | var | no | Comma list, default `refs/heads/main`. |
-| `RUNNER_ALLOWED_EVENTS` | var | no | Comma list, default `workflow_dispatch,schedule`. |
+| `RUNNER_ALLOWED_EVENTS` | var | no | Default `workflow_dispatch,schedule,push`; PR events stay excluded. |
+| `RUNNER_ALLOWED_WORKFLOW_REFS` | var | yes/defaulted | Exact `job_workflow_ref` allowlist; the default is only Lab's `rdc-lab.yml@refs/heads/main`. |
 | `BETTER_AUTH_SECRET` | secret | yes | Signs owner sessions; also (via HKDF, separate label) runner sessions. At least 32 characters. |
 | `ENCRYPTION_KEY` | secret | yes | 32 random bytes, base64. |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | secret | yes | GitHub OAuth App for the owner login. |
@@ -286,7 +287,7 @@ for migrations.
 - **Rotate a credential:** open it → *Replace value*. The old value is overwritten.
 - **Disable quickly:** *Disable* or *Hide* takes effect on the next request.
 - **Delete:** destroys the stored ciphertext; the audit trail stays.
-- **Audit log:** `/vault/audit`. Rows contain who, what, purpose, result and `METHOD host/path -> status`; never secrets.
+- **Audit log:** `/vault/audit`. Rows contain runner identity, credential, result and sanitized request metadata. Caller-controlled purpose, body, headers, names that fail validation and secret values are not persisted.
 - **Rotating `ENCRYPTION_KEY`:** not automated. Re-enter the credentials after changing the key (old ciphertexts will not decrypt).
 - **Backups:** D1 holds only ciphertext and metadata. Back up `ENCRYPTION_KEY` separately.
 
@@ -303,18 +304,18 @@ cd app && npx vite dev               # local dev (needs app/.dev.vars, see below
 `PUBLIC_ORIGIN` (use a `*.localhost` host so `crypto.randomUUID` has a secure context). Apply migrations locally with
 `npx wrangler d1 migrations apply DB --local`.
 
-Tests cover: encryption and AAD binding, availability rules, one-time links (including concurrent use), documentation
+Run `pnpm validate` for typecheck, tests and production build. Tests cover: encryption and AAD binding, availability rules, one-time links (including concurrent use and concurrent creation), documentation
 validation, OIDC verification (bad algorithm, issuer, audience, expiry, repository, ref, event, tampering, JWKS refresh and
 outage), session signing and revocation, the proxy (host allowlist, header override attempts, redirects, size caps,
 redaction in every encoding, timeouts) and the runner API end to end (including rate limits and fail-closed behaviour).
 
 ## Known limits and roadmap
 
-- `inject` delivery is not implemented; only `proxy` works. Add it only for low-privilege or short-lived tokens.
-- OIDC proves the workflow run, not a single process; see the threat model.
+- Runner delivery is proxy-only. Legacy `inject` rows are disabled and hidden by migration 0013.
+- OIDC proves the workflow run, not a single process; any process able to read the job's OIDC request variables can request a run-bound token. Keep the workflow job trusted and minimize untrusted code in it.
 - No automatic `ENCRYPTION_KEY` rotation tooling.
 - No GitHub-side validation test for stored tokens (`validation` stays `not_tested`).
-- The Lab does not yet install or call the client automatically; see the Lab's `docs/credential-vault.md`.
+- The Lab installs the zero-dependency client from the pinned Vault commit when `VAULT_URL` is configured; see the Lab's `docs/credential-vault.md`.
 - Suggested hardening after first deploy: a branch ruleset on `main` of this repository and Cloudflare Access in front of `/vault/*` as a second owner gate.
 
 ## Repository layout

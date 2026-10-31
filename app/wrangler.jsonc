@@ -28,8 +28,11 @@
     "PUBLIC_ORIGIN": "",
     "OWNER_GITHUB_ID": "",
     // Runner trust policy (owner/name of the Lab repo and its numeric id). Empty = runner API refuses with 503.
-    "RUNNER_REPOSITORY": "",
-    "RUNNER_REPOSITORY_ID": "",
+    "RUNNER_REPOSITORY": "aminsh35322088-ctrl/GitHub-Runner-Lab",
+    "RUNNER_REPOSITORY_ID": "1374269690",
+    "RUNNER_ALLOWED_REFS": "refs/heads/main",
+    "RUNNER_ALLOWED_EVENTS": "workflow_dispatch,schedule,push",
+    "RUNNER_ALLOWED_WORKFLOW_REFS": "aminsh35322088-ctrl/GitHub-Runner-Lab/.github/workflows/rdc-lab.yml@refs/heads/main",
   },
   "secrets": {
     "required": ["BETTER_AUTH_SECRET", "ENCRYPTION_KEY", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"],

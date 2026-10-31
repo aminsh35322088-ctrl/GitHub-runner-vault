@@ -22,9 +22,10 @@ export type OidcPolicy = {
   /** `owner/name`, compared exactly (case-insensitively, as GitHub treats names). */
   repository: string
   /** Numeric repository id; strongest binding because names can be renamed or re-created. */
-  repositoryId?: string
+  repositoryId: string
   allowedRefs: string[]
   allowedEvents: string[]
+  allowedWorkflowRefs: string[]
 }
 
 export type RunnerIdentity = {
@@ -159,11 +160,13 @@ export async function verifyGithubOidc(
   const repository = str(claims, 'repository')
   if (!repository || !sameRepository(repository, policy.repository)) return { ok: false, error: 'wrong repository' }
   const repositoryId = str(claims, 'repository_id')
-  if (policy.repositoryId && repositoryId !== policy.repositoryId) return { ok: false, error: 'wrong repository' }
+  if (!repositoryId || repositoryId !== policy.repositoryId) return { ok: false, error: 'wrong repository' }
   const ref = str(claims, 'ref')
   if (!policy.allowedRefs.includes(ref)) return { ok: false, error: 'ref not allowed' }
   const event = str(claims, 'event_name')
   if (!policy.allowedEvents.includes(event)) return { ok: false, error: 'event not allowed' }
+  const workflow = str(claims, 'job_workflow_ref')
+  if (!workflow || !policy.allowedWorkflowRefs.includes(workflow)) return { ok: false, error: 'workflow not allowed' }
 
   const runId = str(claims, 'run_id')
   if (!/^\d{1,20}$/.test(runId)) return { ok: false, error: 'missing run id' }
@@ -177,7 +180,7 @@ export async function verifyGithubOidc(
       runAttempt: str(claims, 'run_attempt') || '1',
       ref,
       event,
-      workflow: str(claims, 'job_workflow_ref').slice(0, 200),
+      workflow: workflow.slice(0, 200),
       sha: str(claims, 'sha').slice(0, 64),
       jti: str(claims, 'jti').slice(0, 100),
     },
@@ -191,12 +194,17 @@ export function policyFromEnv(env: Record<string, unknown>, audience: string): O
   const list = (value: unknown, fallback: string[]) =>
     typeof value === 'string' && value.trim() ? value.split(',').map((v) => v.trim()).filter(Boolean) : fallback
   const repositoryId = typeof env.RUNNER_REPOSITORY_ID === 'string' && /^\d{1,20}$/.test(env.RUNNER_REPOSITORY_ID.trim())
-    ? env.RUNNER_REPOSITORY_ID.trim() : undefined
+    ? env.RUNNER_REPOSITORY_ID.trim() : ''
+  if (!repositoryId) throw new Error('RUNNER_REPOSITORY_ID must be the numeric repository id')
+  const defaultWorkflow = 'aminsh35322088-ctrl/GitHub-Runner-Lab/.github/workflows/rdc-lab.yml@refs/heads/main'
+  const allowedWorkflowRefs = list(env.RUNNER_ALLOWED_WORKFLOW_REFS, [defaultWorkflow])
+  if (allowedWorkflowRefs.length === 0 || allowedWorkflowRefs.some((item) => item.length > 300 || !item.includes('/.github/workflows/'))) {
+    throw new Error('RUNNER_ALLOWED_WORKFLOW_REFS must contain exact workflow refs')
+  }
   return {
-    audience,
-    repository,
-    repositoryId,
+    audience, repository, repositoryId,
     allowedRefs: list(env.RUNNER_ALLOWED_REFS, ['refs/heads/main']),
-    allowedEvents: list(env.RUNNER_ALLOWED_EVENTS, ['workflow_dispatch', 'schedule']),
+    allowedEvents: list(env.RUNNER_ALLOWED_EVENTS, ['workflow_dispatch', 'schedule', 'push']),
+    allowedWorkflowRefs,
   }
 }

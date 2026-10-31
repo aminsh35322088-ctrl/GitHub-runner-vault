@@ -202,6 +202,9 @@ export const app = new Spiceflow()
     if (!link || link.kind !== 'register') return <Message title="Link not valid" text="This link is unknown, expired, or has already been used. Ask the model for a new one." />
     const credential = await getCredentialForOwner(db, link.credentialId)
     if (!credential) return <Message title="Link not valid" text="The credential for this link no longer exists." />
+    if (credential.status !== 'pending' || credential.externallyManaged) {
+      return <Message title="Registration closed" text="This credential is no longer accepting a value. Ask the runner for a fresh registration request." />
+    }
     const { CredentialForm } = await import('./components/credential-form.tsx')
     return (
       <div className="space-y-6 max-w-2xl">
@@ -293,7 +296,7 @@ function AuditTable({ rows }: { rows: Awaited<ReturnType<typeof listAudit>> }) {
   if (rows.length === 0) return <p className="text-sm text-muted-foreground">No activity yet.</p>
   return (
     <Table>
-      <TableHeader><TableRow><TableHead>When</TableHead><TableHead>Action</TableHead><TableHead>Credential</TableHead><TableHead>Result</TableHead><TableHead>Actor</TableHead><TableHead>Detail</TableHead></TableRow></TableHeader>
+      <TableHeader><TableRow><TableHead>When</TableHead><TableHead>Action</TableHead><TableHead>Credential</TableHead><TableHead>Result</TableHead><TableHead>Actor</TableHead><TableHead>Request detail</TableHead></TableRow></TableHeader>
       <TableBody>
         {rows.map((r) => (
           <TableRow key={r.id}>
@@ -302,7 +305,7 @@ function AuditTable({ rows }: { rows: Awaited<ReturnType<typeof listAudit>> }) {
             <TableCell className="font-mono">{r.credentialName || '—'}</TableCell>
             <TableCell>{r.result || '—'}</TableCell>
             <TableCell className="max-w-48 truncate" title={r.actor}>{r.actor}</TableCell>
-            <TableCell className="max-w-72 truncate" title={[r.purpose, r.detail].filter(Boolean).join(' · ')}>{[r.purpose, r.detail].filter(Boolean).join(' · ') || '—'}</TableCell>
+            <TableCell className="max-w-72 truncate" title={r.detail}>{r.detail || '—'}</TableCell>
           </TableRow>
         ))}
       </TableBody>

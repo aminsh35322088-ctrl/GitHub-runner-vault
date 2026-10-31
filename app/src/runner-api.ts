@@ -37,11 +37,30 @@ async function run(fn: (deps: RunnerDeps) => Promise<{ status: number; body: unk
   } catch {
     return json({ error: 'vault_not_configured' }, { status: 503, headers: { 'Cache-Control': 'no-store' } })
   }
-  const result = await fn(deps)
-  return json(result.body, { status: result.status, headers: { 'Cache-Control': 'no-store' } })
+  try {
+    const result = await fn(deps)
+    return json(result.body, { status: result.status, headers: { 'Cache-Control': 'no-store' } })
+  } catch {
+    return json({ error: 'internal_error' }, { status: 500, headers: { 'Cache-Control': 'no-store' } })
+  }
 }
 
 const anyBody = z.record(z.string(), z.unknown())
+
+async function parseRunnerBody(request: Request): Promise<Record<string, unknown> | null> {
+  try {
+    const body: unknown = await request.json()
+    return typeof body === 'object' && body !== null && !Array.isArray(body)
+      ? body as Record<string, unknown>
+      : null
+  } catch {
+    return null
+  }
+}
+
+function invalidRequest() {
+  return json({ error: 'invalid_request' }, { status: 400, headers: { 'Cache-Control': 'no-store' } })
+}
 
 export const runnerApp = new Spiceflow()
   .route({
@@ -66,7 +85,8 @@ export const runnerApp = new Spiceflow()
     detail: { tags: ['Runner'], summary: 'Ask the owner to register a credential; returns a one-time owner link' },
     request: anyBody,
     async handler({ request }) {
-      const body = await request.json()
+      const body = await parseRunnerBody(request)
+      if (!body) return invalidRequest()
       return run((deps) => requestCredential(deps, request.headers.get('authorization'), {
         name: body.name, service: body.service, purpose: body.purpose, doc: body.doc,
       }))
@@ -78,7 +98,8 @@ export const runnerApp = new Spiceflow()
     detail: { tags: ['Runner'], summary: 'Make an HTTPS call with a stored credential; the token is never returned' },
     request: anyBody,
     async handler({ request }) {
-      const body = await request.json()
+      const body = await parseRunnerBody(request)
+      if (!body) return invalidRequest()
       return run((deps) => useCredential(deps, request.headers.get('authorization'), {
         name: body.name, method: body.method, url: body.url, headers: body.headers, body: body.body, purpose: body.purpose,
       }))

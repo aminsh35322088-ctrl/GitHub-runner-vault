@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest'
 import { getDb, schema } from 'db'
 import * as orm from 'drizzle-orm'
 import { importEncryptionKey } from './credential-crypto.ts'
-import { requestRegistration, storeCredentialValue, setEnabled, setVisibility } from './credential-service.ts'
+import { deleteCredential, requestRegistration, storeCredentialValue, setEnabled, setVisibility } from './credential-service.ts'
 import { GITHUB_OIDC_ISSUER, type OidcPolicy } from './oidc.ts'
 import { deriveSessionKey, issueRunnerSession, revokeRunnerSessions } from './runner-session.ts'
 import { bearer, createSession, registry, requestCredential, useCredential, USE_LIMIT_PER_MINUTE, type RunnerDeps } from './runner-core.ts'
@@ -17,7 +17,11 @@ const doc = {
   security_notes: [], expiration_guidance: [], official_documentation_links: [], verification: 'unverified', unverified_note: 'not checked',
 }
 
-const policy: OidcPolicy = { audience: 'https://vault.test', repository: 'o/r', allowedRefs: ['refs/heads/main'], allowedEvents: ['workflow_dispatch'] }
+const policy: OidcPolicy = {
+  audience: 'https://vault.test', repository: 'o/r', repositoryId: '1',
+  allowedRefs: ['refs/heads/main'], allowedEvents: ['workflow_dispatch', 'schedule', 'push'],
+  allowedWorkflowRefs: ['o/r/.github/workflows/runner.yml@refs/heads/main'],
+}
 let n = 0
 const uname = () => `E2E_${Date.now().toString(36).toUpperCase()}_${++n}_${Math.floor(Math.random() * 1e6)}`
 
@@ -36,13 +40,13 @@ async function sessionHeader(d: RunnerDeps) {
   return `Bearer ${token}`
 }
 
-async function activeCredential(d: RunnerDeps, opts: { delivery?: 'proxy' | 'inject'; visible?: boolean } = {}) {
+async function activeCredential(d: RunnerDeps, opts: { visible?: boolean } = {}) {
   const name = uname()
   const req = await requestRegistration(d.db, { name, service: 'Cloudflare', purpose: 'Deploy', doc, requestedBy: 'runner:x', now: d.now })
   if (!req.ok) throw new Error(req.error)
   const stored = await storeCredentialValue(d.db, d.encryptionKey, {
     credentialId: req.value.credentialId, value: SECRET, lifetime: 'permanent', expiresAt: null, visible: opts.visible ?? true,
-    delivery: opts.delivery ?? 'proxy', allowedHosts: ['api.cloudflare.com'], now: d.now,
+    delivery: 'proxy', allowedHosts: ['api.cloudflare.com'], now: d.now,
   })
   if (!stored.ok) throw new Error(stored.error)
   return { name, id: req.value.credentialId }
@@ -129,12 +133,12 @@ describe('use (proxy)', () => {
       }) as unknown as typeof fetch,
     })
     const cred = await activeCredential(d)
-    const res = await useCredential(d, await sessionHeader(d), { name: cred.name, ...call, purpose: 'verify token' })
+    const res = await useCredential(d, await sessionHeader(d), { name: cred.name, ...call, purpose: '' })
     expect(res.status).toBe(200)
     expect(JSON.stringify(res.body)).not.toContain(SECRET)
     expect(seen[0]).toEqual({ url: call.url, auth: `Bearer ${SECRET}` })
     const log = await d.db.select().from(schema.credentialAudit).where(orm.and(orm.eq(schema.credentialAudit.credentialName, cred.name), orm.eq(schema.credentialAudit.action, 'proxy_use')))
-    expect(log[0]).toMatchObject({ result: 'ok', purpose: 'verify token', actor: 'runner:o/r#9.1' })
+    expect(log[0]).toMatchObject({ result: 'ok', purpose: '', actor: 'runner:o/r#9.1' })
     expect(JSON.stringify(log)).not.toContain(SECRET)
     const [row] = await d.db.select({ lastUsedAt: schema.credential.lastUsedAt }).from(schema.credential).where(orm.eq(schema.credential.id, cred.id))
     expect(row?.lastUsedAt).toBe(d.now)
@@ -145,9 +149,11 @@ describe('use (proxy)', () => {
     const header = await sessionHeader(d)
     const a = await activeCredential(d)
     const b = await activeCredential(d)
+    const c = await activeCredential(d)
     await setEnabled(d.db, a.id, false, d.now)
     await setVisibility(d.db, b.id, false, d.now)
-    for (const name of [a.name, b.name, 'DOES_NOT_EXIST']) {
+    await deleteCredential(d.db, c.id, d.now)
+    for (const name of [a.name, b.name, c.name, 'DOES_NOT_EXIST']) {
       expect(await useCredential(d, header, { name, ...call })).toEqual({ status: 404, body: { error: 'unavailable' } })
     }
   })
@@ -161,10 +167,39 @@ describe('use (proxy)', () => {
     expect(called).toBe(false)
   })
 
-  test('inject-only credentials cannot be used through the proxy', async () => {
+  test('legacy Inject rows fail closed and cannot use the proxy', async () => {
     const d = await deps()
-    const cred = await activeCredential(d, { delivery: 'inject' })
+    const cred = await activeCredential(d)
+    await d.db.update(schema.credential).set({ delivery: 'inject' as never }).where(orm.eq(schema.credential.id, cred.id))
     expect((await useCredential(d, await sessionHeader(d), { name: cred.name, ...call })).body).toEqual({ error: 'not_a_proxy_credential' })
+  })
+
+  test.each([
+    ['Railway', 'backboard.railway.app', 'https://backboard.railway.app/graphql'],
+    ['GitHub', 'api.github.com', 'https://api.github.com/user'],
+  ])('%s credential proxy requests never disclose the token', async (provider, host, url) => {
+    const seen: Array<{ authorization: string | null; host: string }> = []
+    const d = await deps({
+      fetchFn: (async (target: string, init: RequestInit) => {
+        seen.push({ authorization: new Headers(init.headers).get('authorization'), host: new URL(target).host })
+        return Response.json({ data: { ok: true }, echo: SECRET })
+      }) as unknown as typeof fetch,
+    })
+    const name = uname()
+    const req = await requestRegistration(d.db, { name, service: provider, purpose: 'API operation', doc, requestedBy: 'runner:test', now: d.now })
+    if (!req.ok) throw new Error(req.error)
+    const stored = await storeCredentialValue(d.db, d.encryptionKey, {
+      credentialId: req.value.credentialId, value: SECRET, lifetime: 'permanent', expiresAt: null,
+      visible: true, delivery: 'proxy', allowedHosts: [host], now: d.now,
+    })
+    if (!stored.ok) throw new Error(stored.error)
+    const result = await useCredential(d, await sessionHeader(d), { name, method: 'GET', url, purpose: SECRET })
+    expect(result.status).toBe(200)
+    expect(seen).toEqual([{ authorization: 'Bearer ' + SECRET, host }])
+    expect(JSON.stringify(result.body)).not.toContain(SECRET)
+    const audits = await d.db.select().from(schema.credentialAudit).where(orm.eq(schema.credentialAudit.credentialName, name))
+    expect(JSON.stringify(audits)).not.toContain(SECRET)
+    expect(audits.find((entry) => entry.action === 'proxy_use')?.purpose).toBe('')
   })
 
   test('malformed input is rejected before anything is decrypted', async () => {

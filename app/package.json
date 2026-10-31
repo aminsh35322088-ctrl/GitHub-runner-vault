@@ -44,7 +44,7 @@
         "description": "Any random string used to sign auth sessions and cookies. No length or format requirement. Generate with `openssl rand -base64 32`."
       },
       "ENCRYPTION_KEY": {
-        "description": "**Optional.** Must be exactly 32 bytes, base64-encoded (44 characters). Used for AES-256-GCM encryption of secrets at rest. Generate with `openssl rand -base64 32`. If omitted, a key is derived from BETTER_AUTH_SECRET automatically."
+        "description": "Required. Exactly 32 random bytes, base64-encoded (44 characters), used for AES-256-GCM encryption of credentials at rest. Never derive it from BETTER_AUTH_SECRET. Back it up securely; rotating it requires an explicit credential re-encryption migration. Generate with openssl rand -base64 32."
       }
     }
   },

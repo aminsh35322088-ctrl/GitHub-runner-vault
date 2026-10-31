@@ -288,7 +288,7 @@ export const credential = sqliteCore.sqliteTable('credential', {
   status: sqliteCore.text('status', { enum: ['pending', 'active', 'disabled'] }).notNull().default('pending'),
   visible: sqliteCore.integer('visible', { mode: 'boolean' }).notNull().default(false),
   lifetime: sqliteCore.text('lifetime', { enum: ['permanent', 'temporary'] }).notNull().default('temporary'),
-  delivery: sqliteCore.text('delivery', { enum: ['proxy', 'inject'] }).notNull().default('proxy'),
+  delivery: sqliteCore.text('delivery', { enum: ['proxy'] }).notNull().default('proxy'),
   allowedHosts: sqliteCore.text('allowed_hosts').notNull().default('[]'),
   // How the proxy presents the value upstream (migration 0011). Owner-controlled.
   authHeader: sqliteCore.text('auth_header').notNull().default('Authorization'),

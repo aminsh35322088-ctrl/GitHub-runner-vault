@@ -48,7 +48,8 @@ test('parsing', () => {
 
 test('list and use work end to end, caching one session', async () => {
   const { server, seen, port } = await startStub()
-  const sessionFile = path.join(os.tmpdir(), `vault-test-${process.pid}.json`)
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-test-'))
+  const sessionFile = path.join(dir, 'session.json')
   const env = {
     VAULT_URL: `http://localhost:${port}`.replace('localhost', 'localhost'),
     ACTIONS_ID_TOKEN_REQUEST_URL: `http://127.0.0.1:${port}/oidc`,
@@ -66,13 +67,28 @@ test('list and use work end to end, caching one session', async () => {
     assert.equal(seen.find((r) => r.url.startsWith('/oidc')).auth, 'Bearer req-token')
     assert.match(seen.find((r) => r.url.startsWith('/oidc')).url, /audience=/)
     assert.equal(fs.statSync(sessionFile).mode & 0o777, 0o600)
+    fs.chmodSync(sessionFile, 0o644)
+    const safeRead = await run(['list'], env)
+    assert.equal(safeRead.code, 0, safeRead.stderr)
+    assert.equal(fs.statSync(sessionFile).mode & 0o777, 0o600)
+
+    // A malicious pre-created symlink must not let the client overwrite its target.
+    const targetFile = path.join(dir, 'do-not-overwrite.txt')
+    fs.writeFileSync(targetFile, 'keep-me')
+    fs.unlinkSync(sessionFile)
+    fs.symlinkSync(targetFile, sessionFile)
+    const symlinkRun = await run(['list'], env)
+    assert.equal(symlinkRun.code, 0, symlinkRun.stderr)
+    assert.equal(fs.readFileSync(targetFile, 'utf8'), 'keep-me')
+    assert.equal(fs.lstatSync(sessionFile).isSymbolicLink(), true)
+
     const missing = await run(['use', 'MISSING', 'GET', 'https://api.cloudflare.com/x'], env)
     assert.equal(missing.code, 2)
     assert.match(missing.stderr, /unavailable/)
     assert.ok(!(list.stdout + use.stdout + use.stderr).includes(SECRET))
   } finally {
     server.close()
-    fs.rmSync(sessionFile, { force: true })
+    fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 

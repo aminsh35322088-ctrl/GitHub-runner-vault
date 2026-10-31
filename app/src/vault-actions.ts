@@ -11,9 +11,9 @@ import { env } from 'cloudflare:workers'
 import { getDb, getSession } from './db.ts'
 import { importEncryptionKey } from './lib/credential-crypto.ts'
 import {
-  deleteCredential, registerExternallyManaged, setEnabled, setVisibility, storeCredentialValue,
+  deleteCredential, getCredentialForOwner, registerExternallyManaged, setEnabled, setVisibility, storeCredentialValue, validateStoreInput,
 } from './lib/credential-service.ts'
-import { consumeEnrollmentLink, peekEnrollmentLink } from './lib/enrollment.ts'
+import { consumeEnrollmentLink, peekEnrollmentLink, releaseEnrollmentLink } from './lib/enrollment.ts'
 import { revokeRunnerSessions } from './lib/runner-session.ts'
 
 async function requireOwner() {
@@ -34,7 +34,7 @@ const storeSchema = z.object({
   /** hours from now; required for temporary, optional for permanent */
   expiresInHours: z.number().positive().max(24 * 365 * 3).nullable(),
   visible: z.boolean(),
-  delivery: z.enum(['proxy', 'inject']),
+  delivery: z.enum(['proxy']),
   allowedHosts: z.string().max(2000),
   authHeader: z.string().max(60),
   authScheme: z.enum(['Bearer', 'Token', 'Raw']),
@@ -66,13 +66,33 @@ export async function submitRegistrationAction(token: string, form: StoreForm) {
   const db = getDb()
   const now = Date.now()
   // Validate the inputs before burning the link, so a typo does not waste it.
-  const info = await peekEnrollmentLink(db, z.string().max(100).parse(token), now)
-  if (!info) throw new Error('This link is invalid, expired or already used')
-  const link = await consumeEnrollmentLink(db, token, now)
-  if (!link) throw new Error('This link is invalid, expired or already used')
-  const result = await storeCredentialValue(db, await key(), { credentialId: link.credentialId, ...toStoreInput(parsed, now) })
-  if (!result.ok) fail(result)
-  return { ok: true as const, name: result.value.name }
+  const parsedToken = z.string().max(100).parse(token)
+  const info = await peekEnrollmentLink(db, parsedToken, now)
+  if (!info || info.kind !== 'register') throw new Error('This link is invalid, expired or already used')
+  const credential = await getCredentialForOwner(db, info.credentialId)
+  if (!credential || credential.status !== 'pending' || credential.externallyManaged) {
+    throw new Error('This registration is no longer available')
+  }
+  const storeInput = { credentialId: info.credentialId, ...toStoreInput(parsed, now) }
+  const validation = validateStoreInput(storeInput)
+  if (!validation.ok) fail(validation)
+  const encryptionKey = await key()
+
+  const link = await consumeEnrollmentLink(db, parsedToken, now)
+  if (!link || link.id !== info.id || link.credentialId !== info.credentialId || link.kind !== 'register') {
+    throw new Error('This link is invalid, expired or already used')
+  }
+  try {
+    const result = await storeCredentialValue(db, encryptionKey, storeInput)
+    if (!result.ok) {
+      await releaseEnrollmentLink(db, link.id, now)
+      fail(result)
+    }
+    return { ok: true as const, name: result.value.name }
+  } catch (error) {
+    await releaseEnrollmentLink(db, link.id, now).catch(() => false)
+    throw error
+  }
 }
 
 /** Replace the value / rules of an existing credential (owner is signed in; no link needed). */

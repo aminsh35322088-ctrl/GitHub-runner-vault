@@ -10,7 +10,7 @@ import {
   normalizeAllowedHosts, normalizeHost, readAllowedHosts, reservedName, validCredentialName,
 } from './credential-input.ts'
 import {
-  consumeEnrollmentLink, createEnrollmentLink, hashLinkToken, peekEnrollmentLink, MAX_LINK_TTL_MS,
+  consumeEnrollmentLink, createEnrollmentLink, hashLinkToken, peekEnrollmentLink, releaseEnrollmentLink, MAX_LINK_TTL_MS,
 } from './enrollment.ts'
 
 const KEY_B64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
@@ -235,6 +235,32 @@ describe('enrollment links', () => {
     const { token } = await createEnrollmentLink(db, { credentialId: id, kind: 'register', requestedBy: '', now })
     const results = await Promise.all(Array.from({ length: 8 }, () => consumeEnrollmentLink(db, token, now)))
     expect(results.filter((r) => r !== null)).toHaveLength(1)
+  })
+
+  test('a failed registration can release its consumed link once', async () => {
+    const { db, id } = await makeCredential()
+    const now = Date.now()
+    const { token } = await createEnrollmentLink(db, { credentialId: id, kind: 'register', requestedBy: 'owner', now })
+    const used = await consumeEnrollmentLink(db, token, now)
+    expect(used).not.toBeNull()
+    expect(await peekEnrollmentLink(db, token, now)).toBeNull()
+    expect(await releaseEnrollmentLink(db, used!.id, now)).toBe(true)
+    expect(await peekEnrollmentLink(db, token, now)).not.toBeNull()
+    expect(await releaseEnrollmentLink(db, used!.id, now)).toBe(false)
+  })
+
+  test('concurrent link creation leaves exactly one active registration link', async () => {
+    const { db, id } = await makeCredential()
+    const now = Date.now()
+    const results = await Promise.allSettled(Array.from({ length: 8 }, (_, i) =>
+      createEnrollmentLink(db, { credentialId: id, kind: 'register', requestedBy: 'owner-' + i, now })))
+    expect(results.every((item) => item.status === 'fulfilled')).toBe(true)
+    const active = await db.select().from(schema.enrollmentLink).where(orm.and(
+      orm.eq(schema.enrollmentLink.credentialId, id),
+      orm.eq(schema.enrollmentLink.kind, 'register'),
+      orm.isNull(schema.enrollmentLink.usedAt),
+    ))
+    expect(active).toHaveLength(1)
   })
 
   test('expired links are rejected', async () => {

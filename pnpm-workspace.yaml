@@ -1,9 +1,8 @@
-# pnpm v10+ reads build-script approval and version overrides from this file,
-# not from the package.json "pnpm" field (which is now ignored).
+# pnpm 11+ uses allowBuilds for reviewed dependency install scripts.
 packages:
   - ./*
 
-onlyBuiltDependencies:
-  - esbuild
-  - sharp
-  - workerd
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true

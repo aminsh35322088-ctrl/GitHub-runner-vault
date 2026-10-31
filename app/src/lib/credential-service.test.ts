@@ -144,14 +144,14 @@ describe('storing a value', () => {
     expect(await storeCredentialValue(db, key, { ...base, delivery: 'proxy', allowedHosts: [] })).toMatchObject({ ok: false, error: 'hosts_required' })
     expect(await storeCredentialValue(db, key, { ...base, delivery: 'proxy', allowedHosts: ['127.0.0.1'] })).toMatchObject({ ok: false, error: 'invalid_hosts' })
     expect(await storeCredentialValue(db, key, { ...base, delivery: 'proxy', allowedHosts: ['*.cloudflare.com'] })).toMatchObject({ ok: false, error: 'invalid_hosts' })
-    expect(await storeCredentialValue(db, key, { ...base, delivery: 'inject', allowedHosts: [] })).toMatchObject({ ok: true })
+    expect(await storeCredentialValue(db, key, { ...base, delivery: 'inject' as 'proxy', allowedHosts: [] })).toMatchObject({ ok: false, error: 'invalid_value' })
   })
 
   test.each(['', '   ', 'line1\nline2', 'nul\u0000byte', 'x'.repeat(9000)])('rejects an invalid value', async (value) => {
     const { db, key, now } = await setup()
     const req = await requestRegistration(db, { name: uniqueName(), service: 's', purpose: 'p', doc, requestedBy: 'r', now })
     if (!req.ok) throw new Error('unexpected')
-    const result = await storeCredentialValue(db, key, { credentialId: req.value.credentialId, value, lifetime: 'permanent', expiresAt: null, visible: true, delivery: 'inject', allowedHosts: [], now })
+    const result = await storeCredentialValue(db, key, { credentialId: req.value.credentialId, value, lifetime: 'permanent', expiresAt: null, visible: true, delivery: 'proxy', allowedHosts: ['api.cloudflare.com'], now })
     expect(result).toMatchObject({ ok: false, error: 'invalid_value' })
   })
 
@@ -159,7 +159,7 @@ describe('storing a value', () => {
     const { db, key, now } = await setup()
     const req = await requestRegistration(db, { name: uniqueName(), service: 's', purpose: 'p', doc, requestedBy: 'r', now })
     if (!req.ok) throw new Error('unexpected')
-    const base = { credentialId: req.value.credentialId, value: SECRET, lifetime: 'temporary' as const, visible: true, delivery: 'inject' as const, allowedHosts: [], now }
+    const base = { credentialId: req.value.credentialId, value: SECRET, lifetime: 'temporary' as const, visible: true, delivery: 'proxy' as const, allowedHosts: ['api.cloudflare.com'], now }
     expect(await storeCredentialValue(db, key, { ...base, expiresAt: now + MAX_TEMPORARY_MS + 1 })).toMatchObject({ ok: false, error: 'invalid_expiry' })
     expect(await storeCredentialValue(db, key, { ...base, expiresAt: now - 1 })).toMatchObject({ ok: false, error: 'invalid_expiry' })
     expect(await storeCredentialValue(db, key, { ...base, expiresAt: null })).toMatchObject({ ok: true })

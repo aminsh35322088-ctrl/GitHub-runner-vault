@@ -32,7 +32,8 @@ const policy: OidcPolicy = {
   repository: 'aminsh35322088-ctrl/GitHub-Runner-Lab',
   repositoryId: '999',
   allowedRefs: ['refs/heads/main'],
-  allowedEvents: ['workflow_dispatch', 'schedule'],
+  allowedEvents: ['workflow_dispatch', 'schedule', 'push'],
+  allowedWorkflowRefs: ['aminsh35322088-ctrl/GitHub-Runner-Lab/.github/workflows/rdc-lab.yml@refs/heads/main'],
 }
 
 function goodClaims(overrides: Record<string, unknown> = {}) {
@@ -68,6 +69,9 @@ describe('GitHub OIDC verification', () => {
     ['issued in the future', { iat: Math.floor(NOW / 1000) + 3600 }, 'token issued in the future'],
     ['wrong repository', { repository: 'someone/else' }, 'wrong repository'],
     ['wrong repository id', { repository_id: '1' }, 'wrong repository'],
+    ['missing repository id', { repository_id: undefined }, 'wrong repository'],
+    ['missing workflow binding', { job_workflow_ref: undefined }, 'workflow not allowed'],
+    ['wrong workflow binding', { job_workflow_ref: 'aminsh35322088-ctrl/GitHub-Runner-Lab/.github/workflows/other.yml@refs/heads/main' }, 'workflow not allowed'],
     ['pull request ref', { ref: 'refs/pull/7/merge' }, 'ref not allowed'],
     ['other branch', { ref: 'refs/heads/feature' }, 'ref not allowed'],
     ['pull_request event', { event_name: 'pull_request' }, 'event not allowed'],
@@ -78,6 +82,14 @@ describe('GitHub OIDC verification', () => {
     const { privateKey, jwk } = await makeKeyPair()
     const result = await verifyGithubOidc(await sign(privateKey, goodClaims(overrides)), policy, async () => ({ keys: [jwk] }), NOW)
     expect(result).toEqual({ ok: false, error })
+  })
+
+  test('allows a main push from the exact approved workflow', async () => {
+    const { privateKey, jwk } = await makeKeyPair()
+    const token = await sign(privateKey, goodClaims({ event_name: 'push' }))
+    expect((await verifyGithubOidc(token, policy, async () => ({ keys: [jwk] }), NOW)).ok).toBe(true)
+    const wrong = await sign(privateKey, goodClaims({ event_name: 'push', ref: 'refs/heads/feature' }))
+    expect(await verifyGithubOidc(wrong, policy, async () => ({ keys: [jwk] }), NOW)).toEqual({ ok: false, error: 'ref not allowed' })
   })
 
   test('audience may be a list that contains ours', async () => {
@@ -156,10 +168,15 @@ describe('GitHub OIDC verification', () => {
   test('policy comes from bindings and fails closed on a bad repository', () => {
     expect(() => policyFromEnv({}, 'https://x')).toThrow()
     expect(() => policyFromEnv({ RUNNER_REPOSITORY: 'not a repo' }, 'https://x')).toThrow()
-    expect(policyFromEnv({ RUNNER_REPOSITORY: 'a/b', RUNNER_REPOSITORY_ID: '42' }, 'https://x')).toEqual({
-      audience: 'https://x', repository: 'a/b', repositoryId: '42', allowedRefs: ['refs/heads/main'], allowedEvents: ['workflow_dispatch', 'schedule'],
+    const defaults = policyFromEnv({ RUNNER_REPOSITORY: 'a/b', RUNNER_REPOSITORY_ID: '42' }, 'https://x')
+    expect(defaults).toEqual({
+      audience: 'https://x', repository: 'a/b', repositoryId: '42',
+      allowedRefs: ['refs/heads/main'], allowedEvents: ['workflow_dispatch', 'schedule', 'push'],
+      allowedWorkflowRefs: ['aminsh35322088-ctrl/GitHub-Runner-Lab/.github/workflows/rdc-lab.yml@refs/heads/main'],
     })
-    expect(policyFromEnv({ RUNNER_REPOSITORY: 'a/b', RUNNER_ALLOWED_REFS: 'refs/heads/x, refs/heads/y' }, 'https://x').allowedRefs).toEqual(['refs/heads/x', 'refs/heads/y'])
+    expect(() => policyFromEnv({ RUNNER_REPOSITORY: 'a/b' }, 'https://x')).toThrow(/RUNNER_REPOSITORY_ID/)
+    expect(policyFromEnv({ RUNNER_REPOSITORY: 'a/b', RUNNER_REPOSITORY_ID: '42', RUNNER_ALLOWED_EVENTS: 'schedule,push', RUNNER_ALLOWED_WORKFLOW_REFS: 'a/b/.github/workflows/runner.yml@refs/heads/main' }, 'https://x').allowedEvents).toEqual(['schedule', 'push'])
+    expect(policyFromEnv({ RUNNER_REPOSITORY: 'a/b', RUNNER_REPOSITORY_ID: '42', RUNNER_ALLOWED_REFS: 'refs/heads/x, refs/heads/y' }, 'https://x').allowedRefs).toEqual(['refs/heads/x', 'refs/heads/y'])
   })
 })
 

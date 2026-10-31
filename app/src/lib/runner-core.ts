@@ -122,7 +122,6 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
   const auth = await authenticate(deps, authorization)
   if (!auth.ok) return auth.res
   if (typeof input.name !== 'string' || typeof input.method !== 'string' || typeof input.url !== 'string') return fail(400, 'invalid_request')
-  const purpose = typeof input.purpose === 'string' ? input.purpose.slice(0, 500) : ''
   const requestId = crypto.randomUUID()
   const headers: Record<string, string> = {}
   if (input.headers !== undefined) {
@@ -134,7 +133,8 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
   }
   if (input.body !== undefined && typeof input.body !== 'string') return fail(400, 'invalid_request')
 
-  const common = { actor: auth.session.sub, credentialName: input.name.slice(0, 80), requestId, purpose, now: deps.now }
+  const safeName = /^[A-Z][A-Z0-9_]{0,79}$/.test(input.name) ? input.name : ''
+  const common = { actor: auth.session.sub, credentialName: safeName, requestId, now: deps.now }
   if (await countSince(deps.db, 'proxy_use', deps.now - 60_000, input.name) >= USE_LIMIT_PER_MINUTE) {
     await audit(deps.db, { ...common, action: 'proxy_use', result: 'rate_limited' })
     return fail(429, 'rate_limited')
