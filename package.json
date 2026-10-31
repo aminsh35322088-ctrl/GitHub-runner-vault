@@ -1,0 +1,11 @@
+{
+  "name": "runner-vault",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm --filter runner-vault-app test && node --test client/vault.test.mjs",
+    "build": "pnpm --filter runner-vault-app build",
+    "deploy": "wrangler d1 migrations apply DB --remote --config app/wrangler.jsonc && pnpm build && wrangler deploy --config app/wrangler.jsonc"
+  }
+}

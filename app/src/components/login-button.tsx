@@ -1,0 +1,30 @@
+// Client component for the login page sign-in button.
+// Uses the type-safe BetterAuth client to trigger the genericOAuth flow.
+
+"use client"
+
+import { useState } from "react"
+import { Button } from "./ui/button"
+import { authClient } from "../auth-client.ts"
+
+export function LoginButton({ callbackURL = "/dash" }: { callbackURL?: string }) {
+  const [loading, setLoading] = useState(false)
+
+  async function handleSignIn() {
+    setLoading(true)
+    await authClient.signIn.social({
+      provider: "github",
+      callbackURL,
+    })
+  }
+
+  return (
+    <Button
+      onClick={handleSignIn}
+      loading={loading}
+      size="lg"
+    >
+      {loading ? "Redirecting…" : "Sign in with GitHub"}
+    </Button>
+  )
+}

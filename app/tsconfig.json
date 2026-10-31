@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "noEmit": true,
+    "lib": ["ESNext", "DOM"],
+    "types": ["@cloudflare/vitest-pool-workers/types"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "customConditions": ["workerd"],
+    "paths": {
+      "sigillo-app/src/*": ["./src/*"]
+    }
+  },
+  "include": ["src", "worker-configuration.d.ts"]
+}

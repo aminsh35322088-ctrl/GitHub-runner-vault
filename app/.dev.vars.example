@@ -1,0 +1,2 @@
+BETTER_AUTH_SECRET= # Required: openssl rand -base64 32
+ENCRYPTION_KEY= # Optional: openssl rand -base64 32 (if not set, derived from BETTER_AUTH_SECRET)

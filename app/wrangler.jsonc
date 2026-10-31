@@ -1,0 +1,37 @@
+{
+  // Runner credential vault Worker. Replace the placeholders before the first
+  // deploy (the owner does this; nothing here is deployed by CI):
+  //   - database_id: output of `wrangler d1 create runner-vault-db`
+  //   - PUBLIC_ORIGIN: the exact https origin the Worker is served from
+  //   - OWNER_GITHUB_ID: numeric id of the owner's GitHub account
+  // Secrets (wrangler secret put): BETTER_AUTH_SECRET, GITHUB_CLIENT_ID,
+  // GITHUB_CLIENT_SECRET, and ENCRYPTION_KEY (32 random bytes, base64).
+  "name": "runner-vault",
+  "compatibility_date": "2026-04-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "src/app.tsx",
+  "placement": {
+    "mode": "smart",
+  },
+  "observability": {
+    "enabled": true,
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "runner-vault-db",
+      "database_id": "0eac2ae2-ce9f-4559-9d24-5a011925aeff",
+      "migrations_dir": "../db/drizzle-app",
+    },
+  ],
+  "vars": {
+    "PUBLIC_ORIGIN": "",
+    "OWNER_GITHUB_ID": "",
+    // Runner trust policy (owner/name of the Lab repo and its numeric id). Empty = runner API refuses with 503.
+    "RUNNER_REPOSITORY": "",
+    "RUNNER_REPOSITORY_ID": "",
+  },
+  "secrets": {
+    "required": ["BETTER_AUTH_SECRET", "ENCRYPTION_KEY", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"],
+  },
+}
