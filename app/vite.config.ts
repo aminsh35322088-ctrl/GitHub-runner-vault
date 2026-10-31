@@ -50,6 +50,7 @@ export default defineConfig(async () => {
             },
           })
         : null,
+      tailwindcss(),
       // Tests need the raw react + spiceflow plugins next to cloudflareTest().
       ...(process.env.VITEST
         ? [react(), spiceflowPlugin({ entry: './src/app.tsx' })]

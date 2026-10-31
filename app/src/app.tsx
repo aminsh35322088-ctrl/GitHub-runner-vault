@@ -130,7 +130,6 @@ export const app = new Spiceflow()
   })
 
   .layout('/login', async ({ children, request }) => <Shell request={request}>{children}</Shell>)
-  .layout('/vault', async ({ children, request }) => <Shell request={request} signedIn>{children}</Shell>)
   .layout('/vault/*', async ({ children, request }) => <Shell request={request} signedIn>{children}</Shell>)
 
   .get('/', ({ request }) => Response.redirect(new URL('/vault', request.url).toString(), 302))
@@ -209,7 +208,7 @@ export const app = new Spiceflow()
         <div>
           <h1 className="text-lg font-semibold tracking-tight font-mono">{credential.name}</h1>
           <p className="text-sm text-muted-foreground">{credential.service} — {credential.purpose}</p>
-          <p className="text-xs text-muted-foreground mt-1">Link expires <TimeAgo ts={link.expiresAt} /> and works once.</p>
+          <p className="text-xs text-muted-foreground mt-1">Link expires in about {Math.max(1, Math.round((link.expiresAt - Date.now()) / 60_000))} min and works once.</p>
         </div>
         {credential.doc && <DocView doc={credential.doc} />}
         <CredentialForm mode="register" token={params.token} defaults={{ delivery: 'proxy', allowedHosts: '', authHeader: 'Authorization', authScheme: 'Bearer', visible: true, lifetime: 'permanent' }} />

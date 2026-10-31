@@ -71,12 +71,10 @@ export function CredentialForm({ mode, token, id, defaults }: { mode: 'register'
 
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Lifetime">
-            <NativeSelect className="w-full">
-              <select value={lifetime} onChange={(e) => setLifetime(e.target.value as 'permanent' | 'temporary')}>
+            <NativeSelect className="w-full" value={lifetime} onChange={(e) => setLifetime(e.target.value as 'permanent' | 'temporary')}>
                 <option value="permanent">Permanent</option>
                 <option value="temporary">Temporary (max 24 h)</option>
-              </select>
-            </NativeSelect>
+              </NativeSelect>
           </Field>
           <Field label={lifetime === 'temporary' ? 'Expires in (hours, max 24)' : 'Expires in (hours, optional)'}>
             <Input name="hours" type="number" step="any" min="0.1" max={lifetime === 'temporary' ? 24 : undefined} required={lifetime === 'temporary'} className="w-full" />
@@ -84,12 +82,10 @@ export function CredentialForm({ mode, token, id, defaults }: { mode: 'register'
         </div>
 
         <Field label="How the runner uses it" hint="Proxy: the vault makes the call and never returns the token (recommended). Inject: only for low-privilege or short-lived tokens.">
-          <NativeSelect className="w-full">
-            <select value={delivery} onChange={(e) => setDelivery(e.target.value as 'proxy' | 'inject')}>
+          <NativeSelect className="w-full" value={delivery} onChange={(e) => setDelivery(e.target.value as 'proxy' | 'inject')}>
               <option value="proxy">Proxy (recommended)</option>
               <option value="inject">Inject</option>
-            </select>
-          </NativeSelect>
+            </NativeSelect>
         </Field>
 
         <Field label="Allowed hosts" hint="One exact hostname per line, e.g. api.cloudflare.com. You decide this, not the model.">
@@ -102,13 +98,11 @@ export function CredentialForm({ mode, token, id, defaults }: { mode: 'register'
             <Input name="authHeader" defaultValue={defaults.authHeader} className="w-full font-mono" />
           </Field>
           <Field label="Auth scheme">
-            <NativeSelect className="w-full">
-              <select name="authScheme" defaultValue={defaults.authScheme}>
+            <NativeSelect className="w-full" name="authScheme" defaultValue={defaults.authScheme}>
                 <option value="Bearer">Bearer</option>
                 <option value="Token">Token</option>
                 <option value="Raw">Raw (value only)</option>
-              </select>
-            </NativeSelect>
+              </NativeSelect>
           </Field>
         </div>
 
