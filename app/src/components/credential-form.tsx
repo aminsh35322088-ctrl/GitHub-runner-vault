@@ -12,7 +12,7 @@ import { NativeSelect } from './ui/native-select'
 import { submitRegistrationAction, replaceCredentialAction, type StoreForm } from '../vault-actions.ts'
 
 export type FormDefaults = {
-  delivery: 'proxy' | 'inject'
+  delivery: 'proxy'
   allowedHosts: string
   authHeader: string
   authScheme: 'Bearer' | 'Token' | 'Raw'
@@ -32,7 +32,8 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 
 export function CredentialForm({ mode, token, id, defaults }: { mode: 'register' | 'replace'; token?: string; id?: string; defaults: FormDefaults }) {
   const [lifetime, setLifetime] = useState(defaults.lifetime)
-  const [delivery, setDelivery] = useState(defaults.delivery)
+  const [errorMessage, setErrorMessage] = useState('')
+  const [saving, setSaving] = useState(false)
 
   return (
     <ErrorBoundary
@@ -49,20 +50,28 @@ export function CredentialForm({ mode, token, id, defaults }: { mode: 'register'
         className="flex flex-col gap-4"
         autoComplete="off"
         action={async (formData: FormData) => {
-          const hours = String(formData.get('hours') ?? '').trim()
-          const form: StoreForm = {
-            value: String(formData.get('value') ?? ''),
-            lifetime,
-            expiresInHours: lifetime === 'temporary' ? Number(hours || 24) : hours ? Number(hours) : null,
-            visible: formData.get('visible') === 'on',
-            delivery,
-            allowedHosts: String(formData.get('hosts') ?? ''),
-            authHeader: String(formData.get('authHeader') ?? 'Authorization'),
-            authScheme: String(formData.get('authScheme') ?? 'Bearer') as StoreForm['authScheme'],
+          setErrorMessage('')
+          setSaving(true)
+          try {
+            const hours = String(formData.get('hours') ?? '').trim()
+            const form: StoreForm = {
+              value: String(formData.get('value') ?? ''),
+              lifetime,
+              expiresInHours: lifetime === 'temporary' ? Number(hours || 24) : hours ? Number(hours) : null,
+              visible: formData.get('visible') === 'on',
+              delivery: 'proxy',
+              allowedHosts: String(formData.get('hosts') ?? ''),
+              authHeader: String(formData.get('authHeader') ?? 'Authorization'),
+              authScheme: String(formData.get('authScheme') ?? 'Bearer') as StoreForm['authScheme'],
+            }
+            if (mode === 'register') await submitRegistrationAction(token!, form)
+            else await replaceCredentialAction(id!, form)
+            window.location.assign('/vault')
+          } catch {
+            setErrorMessage('The credential could not be saved. Check the values and link status, then try again.')
+          } finally {
+            setSaving(false)
           }
-          if (mode === 'register') await submitRegistrationAction(token!, form)
-          else await replaceCredentialAction(id!, form)
-          window.location.assign('/vault')
         }}
       >
         <Field label="Secret value" hint="Write-only. It is encrypted immediately and cannot be shown again.">
@@ -81,15 +90,13 @@ export function CredentialForm({ mode, token, id, defaults }: { mode: 'register'
           </Field>
         </div>
 
-        <Field label="How the runner uses it" hint="Proxy: the vault makes the call and never returns the token (recommended). Inject: only for low-privilege or short-lived tokens.">
-          <NativeSelect className="w-full" value={delivery} onChange={(e) => setDelivery(e.target.value as 'proxy' | 'inject')}>
-              <option value="proxy">Proxy (recommended)</option>
-              <option value="inject">Inject</option>
-            </NativeSelect>
-        </Field>
+        <div className="rounded-md border border-border bg-muted/30 p-3">
+          <p className="text-sm font-medium">Runner delivery: Vault proxy</p>
+          <p className="mt-1 text-xs text-muted-foreground">The vault attaches this credential to approved HTTPS API calls. The raw value is never returned to the runner.</p>
+        </div>
 
         <Field label="Allowed hosts" hint="One exact hostname per line, e.g. api.cloudflare.com. You decide this, not the model.">
-          <textarea name="hosts" rows={3} defaultValue={defaults.allowedHosts} required={delivery === 'proxy'} spellCheck={false}
+          <textarea name="hosts" rows={3} defaultValue={defaults.allowedHosts} required spellCheck={false}
             className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring" />
         </Field>
 
@@ -114,7 +121,8 @@ export function CredentialForm({ mode, token, id, defaults }: { mode: 'register'
           </span>
         </label>
 
-        <Button type="submit">{mode === 'register' ? 'Save and activate' : 'Replace value'}</Button>
+        {errorMessage && <p role="alert" aria-live="polite" className="text-sm text-destructive">{errorMessage}</p>}
+        <Button type="submit" disabled={saving}>{saving ? 'Saving…' : mode === 'register' ? 'Save and activate' : 'Replace value'}</Button>
       </form>
     </ErrorBoundary>
   )

@@ -21,6 +21,19 @@ describe('runner HTTP surface', () => {
     expect(await res.json()).toEqual({ error: 'vault_not_configured' })
   })
 
+  test('malformed and non-object JSON bodies return a generic 400', async () => {
+    for (const body of ['{', '[]', 'null', '"secret-value"']) {
+      const res = await app.handle(new Request('https://vault.test/api/runner/use', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer aaaaaaaaaa.bbbbbbbbbb.cccccccccc' },
+        body,
+      }))
+      expect(res.status).toBe(400)
+      expect(res.headers.get('cache-control')).toBe('no-store')
+      expect(await res.json()).toEqual({ error: 'invalid_request' })
+    }
+  })
+
   test('no route returns a credential value endpoint of the old secrets API shape', async () => {
     const res = await call('GET', '/api/runner/secrets')
     expect([404, 405]).toContain(res.status)

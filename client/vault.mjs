@@ -37,21 +37,47 @@ function origin() {
 }
 
 function sessionFile() {
-  return env.VAULT_SESSION_FILE || path.join(env.XDG_RUNTIME_DIR || os.tmpdir(), `runner-vault-session-${os.userInfo().uid}.json`)
+  const uid = os.userInfo().uid
+  const privateDir = env.XDG_RUNTIME_DIR || path.join(os.tmpdir(), 'runner-vault-' + uid)
+  return env.VAULT_SESSION_FILE || path.join(privateDir, 'session-' + uid + '.json')
+}
+
+function openNoFollow(file, flags, mode) {
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0
+  return fs.openSync(file, flags | noFollow, mode)
 }
 
 function readCachedSession(base) {
+  let fd
   try {
-    const cached = JSON.parse(fs.readFileSync(sessionFile(), 'utf8'))
+    fd = openNoFollow(sessionFile(), fs.constants.O_RDONLY)
+    const stat = fs.fstatSync(fd)
+    if (!stat.isFile() || stat.uid !== os.userInfo().uid) return null
+    if ((stat.mode & 0o077) !== 0) fs.fchmodSync(fd, 0o600)
+    const cached = JSON.parse(fs.readFileSync(fd, 'utf8'))
     if (cached.origin === base && typeof cached.token === 'string' && cached.expiresAt - Date.now() > 60_000) return cached.token
-  } catch { /* no cache */ }
+  } catch { /* no cache; symlinks and unsafe files are ignored */ }
+  finally { if (fd !== undefined) fs.closeSync(fd) }
   return null
 }
 
 function writeCachedSession(base, token, expiresAt) {
+  let fd
   try {
-    fs.writeFileSync(sessionFile(), JSON.stringify({ origin: base, token, expiresAt }), { mode: 0o600 })
-  } catch { /* cache is optional */ }
+    const file = sessionFile()
+    const directory = path.dirname(file)
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
+    const dirStat = fs.lstatSync(directory)
+    if (!dirStat.isDirectory() || dirStat.isSymbolicLink() || dirStat.uid !== os.userInfo().uid) return
+    if ((dirStat.mode & 0o077) !== 0) fs.chmodSync(directory, 0o700)
+
+    fd = openNoFollow(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC, 0o600)
+    const stat = fs.fstatSync(fd)
+    if (!stat.isFile() || stat.uid !== os.userInfo().uid) return
+    fs.fchmodSync(fd, 0o600)
+    fs.writeFileSync(fd, JSON.stringify({ origin: base, token, expiresAt }))
+  } catch { /* cache is optional; never follow a pre-existing symlink */ }
+  finally { if (fd !== undefined) fs.closeSync(fd) }
 }
 
 async function getOidcToken(base) {

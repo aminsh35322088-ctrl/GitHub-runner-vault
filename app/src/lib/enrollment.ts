@@ -45,14 +45,17 @@ export async function createEnrollmentLink(
   const tokenHash = await hashLinkToken(token)
   const expiresAt = input.now + ttl
 
-  await db.update(schema.enrollmentLink)
+  // The invalidation and insert are one D1 batch (one transaction). This avoids
+  // the race where parallel callers both retire the old link and collide on insert.
+  // The partial unique index is a second, database-enforced line of defence.
+  const invalidate = db.update(schema.enrollmentLink)
     .set({ usedAt: input.now })
     .where(orm.and(
       orm.eq(schema.enrollmentLink.credentialId, input.credentialId),
       orm.eq(schema.enrollmentLink.kind, input.kind),
       orm.isNull(schema.enrollmentLink.usedAt),
     ))
-  await db.insert(schema.enrollmentLink).values({
+  const insert = db.insert(schema.enrollmentLink).values({
     credentialId: input.credentialId,
     kind: input.kind,
     tokenHash,
@@ -60,10 +63,25 @@ export async function createEnrollmentLink(
     requestedBy: input.requestedBy.slice(0, 200),
     createdAt: input.now,
   })
+  await db.batch([invalidate, insert])
   return { token, expiresAt }
 }
 
 export type LinkInfo = { id: string; credentialId: string; kind: LinkKind; expiresAt: number }
+
+/** Undo a consume only when this exact request marked the link used and it has not expired. */
+export async function releaseEnrollmentLink(db: Db, id: string, consumedAt: number): Promise<boolean> {
+  const rows = await db.update(schema.enrollmentLink)
+    .set({ usedAt: null })
+    .where(orm.and(
+      orm.eq(schema.enrollmentLink.id, id),
+      orm.eq(schema.enrollmentLink.usedAt, consumedAt),
+      orm.gt(schema.enrollmentLink.expiresAt, consumedAt),
+    ))
+    .returning({ id: schema.enrollmentLink.id })
+  return rows.length === 1
+}
+
 
 /** Look at a link without using it. Returns null for unknown, expired or used links. */
 export async function peekEnrollmentLink(db: Db, token: string, now: number): Promise<LinkInfo | null> {

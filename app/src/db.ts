@@ -4,8 +4,8 @@
 // epochMs custom columns that accept both Date and number inputs, so
 // BetterAuth's Date params are converted to epoch ms before reaching D1.
 // getAuth(request) creates a BetterAuth instance backed by the same drizzle
-// client for the current request host. encrypt()/decrypt() use ENCRYPTION_KEY
-// when set, otherwise derive a stable AES-256 key from BETTER_AUTH_SECRET.
+// client for the current request host. Credential encryption requires a
+// dedicated ENCRYPTION_KEY and never derives one from BETTER_AUTH_SECRET.
 
 import { env } from 'cloudflare:workers'
 import * as orm from 'drizzle-orm'

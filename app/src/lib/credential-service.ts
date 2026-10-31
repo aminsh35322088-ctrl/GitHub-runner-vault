@@ -2,7 +2,7 @@
 // here so the rules live in one place:
 //  - listing queries name their columns explicitly and never select the value columns,
 //  - the only function that reads a value is `readCredentialValue` (used by the proxy /
-//    inject paths in a later step) and it re-checks availability itself,
+//    it re-checks availability itself for every proxy call,
 //  - every state change writes an audit row written by the Worker, never by a runner.
 
 import * as orm from 'drizzle-orm'
@@ -36,9 +36,7 @@ export async function audit(db: Db, entry: {
   credentialId?: string | null
   credentialName?: string
   requestId?: string
-  purpose?: string
   result?: string
-  reportedResult?: string
   detail?: string
   now: number
 }) {
@@ -49,9 +47,9 @@ export async function audit(db: Db, entry: {
     credentialId: entry.credentialId ?? null,
     credentialName: entry.credentialName ?? '',
     requestId: entry.requestId ?? '',
-    purpose: (entry.purpose ?? '').slice(0, 500),
+    purpose: '',
     result: (entry.result ?? '').slice(0, 60),
-    reportedResult: (entry.reportedResult ?? '').slice(0, 500),
+    reportedResult: '',
     detail: (entry.detail ?? '').slice(0, 500),
   })
 }
@@ -100,7 +98,7 @@ export async function requestRegistration(db: Db, req: RegistrationRequest): Pro
     })
   }
   const link = await createEnrollmentLink(db, { credentialId, kind: 'register', requestedBy: req.requestedBy, now: req.now })
-  await audit(db, { action: 'registration_requested', actor: req.requestedBy, credentialId, credentialName: req.name, purpose, result: 'ok', now: req.now })
+  await audit(db, { action: 'registration_requested', actor: req.requestedBy, credentialId, credentialName: req.name, result: 'ok', now: req.now })
   return { ok: true, value: { credentialId, link } }
 }
 
@@ -113,12 +111,43 @@ export type StoreInput = {
   /** epoch ms; required for temporary, optional for permanent */
   expiresAt: number | null
   visible: boolean
-  delivery: 'proxy' | 'inject'
+  delivery: 'proxy'
   allowedHosts: unknown
   /** Header and scheme the proxy uses upstream. Defaults to `Authorization: Bearer`. */
   authHeader?: string
   authScheme?: AuthScheme
   now: number
+}
+
+export type ValidatedStoreInput = {
+  value: string
+  expiresAt: number | null
+  hosts: string[]
+  style: { header: string; scheme: AuthScheme }
+}
+
+/** Validate every owner-controlled value before a one-time registration link is consumed. */
+export function validateStoreInput(input: StoreInput): Result<ValidatedStoreInput> {
+  if ((input as { delivery: string }).delivery !== 'proxy') {
+    return { ok: false, error: 'invalid_value', detail: 'only proxy delivery is supported' }
+  }
+  const value = input.value.trim()
+  if (!value || new TextEncoder().encode(value).byteLength > MAX_VALUE_BYTES || /[\r\n\u0000]/.test(value)) {
+    return { ok: false, error: 'invalid_value' }
+  }
+  let expiresAt = input.expiresAt
+  if (input.lifetime === 'temporary') {
+    expiresAt = expiresAt === null ? input.now + MAX_TEMPORARY_MS : expiresAt
+    if (expiresAt <= input.now || expiresAt > input.now + MAX_TEMPORARY_MS) return { ok: false, error: 'invalid_expiry' }
+  } else if (expiresAt !== null && (expiresAt <= input.now || expiresAt > input.now + MAX_PERMANENT_MS)) {
+    return { ok: false, error: 'invalid_expiry' }
+  }
+  const hosts = normalizeAllowedHosts(input.allowedHosts)
+  if (!hosts.ok) return { ok: false, error: 'invalid_hosts', detail: hosts.error }
+  if (hosts.hosts.length === 0) return { ok: false, error: 'hosts_required' }
+  const style = normalizeAuthStyle(input.authHeader ?? 'Authorization', input.authScheme ?? 'Bearer')
+  if (!style.ok) return { ok: false, error: 'invalid_auth_style', detail: style.error }
+  return { ok: true, value: { value, expiresAt, hosts: hosts.hosts, style: { header: style.header, scheme: style.scheme } } }
 }
 
 export async function storeCredentialValue(db: Db, key: CryptoKey, input: StoreInput): Promise<Result<{ name: string }>> {
@@ -127,29 +156,9 @@ export async function storeCredentialValue(db: Db, key: CryptoKey, input: StoreI
   if (!row) return { ok: false, error: 'not_found' }
   if (row.externallyManaged) return { ok: false, error: 'invalid_value', detail: 'externally managed credentials hold no value' }
 
-  const value = input.value.trim()
-  if (!value || new TextEncoder().encode(value).byteLength > MAX_VALUE_BYTES || /[\r\n\u0000]/.test(value)) {
-    return { ok: false, error: 'invalid_value' }
-  }
-
-  let expiresAt = input.expiresAt
-  if (input.lifetime === 'temporary') {
-    // Temporary credentials always expire, and never later than 24 hours from now.
-    expiresAt = expiresAt === null ? input.now + MAX_TEMPORARY_MS : expiresAt
-    if (expiresAt <= input.now || expiresAt > input.now + MAX_TEMPORARY_MS) return { ok: false, error: 'invalid_expiry' }
-  } else if (expiresAt !== null && (expiresAt <= input.now || expiresAt > input.now + MAX_PERMANENT_MS)) {
-    return { ok: false, error: 'invalid_expiry' }
-  }
-
-  const hosts = normalizeAllowedHosts(input.allowedHosts)
-  if (!hosts.ok) return { ok: false, error: 'invalid_hosts', detail: hosts.error }
-  // A proxied credential without hosts could call nothing; an injected credential
-  // without hosts is allowed because injection does not talk to the network itself.
-  if (input.delivery === 'proxy' && hosts.hosts.length === 0) return { ok: false, error: 'hosts_required' }
-
-  const style = normalizeAuthStyle(input.authHeader ?? 'Authorization', input.authScheme ?? 'Bearer')
-  if (!style.ok) return { ok: false, error: 'invalid_auth_style', detail: style.error }
-
+  const validated = validateStoreInput(input)
+  if (!validated.ok) return validated
+  const { value, expiresAt, hosts, style } = validated.value
   const { encrypted, iv } = await encryptCredentialValue(key, row.id, KEY_VERSION, value)
   await db.update(schema.credential).set({
     authHeader: style.header,
@@ -161,12 +170,12 @@ export async function storeCredentialValue(db: Db, key: CryptoKey, input: StoreI
     visible: input.visible,
     lifetime: input.lifetime,
     delivery: input.delivery,
-    allowedHosts: JSON.stringify(hosts.hosts),
+    allowedHosts: JSON.stringify(hosts),
     expiresAt,
     validation: 'not_tested',
     updatedAt: input.now,
   }).where(orm.eq(schema.credential.id, row.id))
-  await audit(db, { action: 'value_stored', actor: 'owner', credentialId: row.id, credentialName: row.name, result: 'ok', detail: `${input.lifetime}/${input.delivery}`, now: input.now })
+  await audit(db, { action: 'value_stored', actor: 'owner', credentialId: row.id, credentialName: row.name, result: 'ok', detail: input.lifetime + '/proxy', now: input.now })
   return { ok: true, value: { name: row.name } }
 }
 
@@ -266,7 +275,7 @@ export async function registerExternallyManaged(db: Db, input: { name: string; s
   const id = crypto.randomUUID()
   await db.insert(schema.credential).values({
     id, name: input.name, service: input.service.slice(0, 80), purpose: input.purpose.slice(0, 500),
-    status: 'active', visible: true, lifetime: 'permanent', delivery: 'inject', externallyManaged: true,
+    status: 'active', visible: true, lifetime: 'permanent', delivery: 'proxy', externallyManaged: true,
     createdAt: input.now, updatedAt: input.now,
   })
   await audit(db, { action: 'registered_external', actor: 'owner', credentialId: id, credentialName: input.name, result: 'ok', now: input.now })
@@ -276,11 +285,11 @@ export async function registerExternallyManaged(db: Db, input: { name: string; s
 // ── The only place a value is decrypted ───────────────────────────────
 
 export type ValueResult =
-  | { ok: true; value: string; credential: { id: string; name: string; delivery: 'proxy' | 'inject'; allowedHosts: string[]; authHeader: string; authScheme: AuthScheme } }
+  | { ok: true; value: string; credential: { id: string; name: string; delivery: 'proxy'; allowedHosts: string[]; authHeader: string; authScheme: AuthScheme } }
   | { ok: false; reason: string }
 
 /**
- * Decrypts a value for the proxy or inject paths. Re-checks availability against the
+ * Decrypts a value for a proxy call. Re-checks availability against the
  * stored row at the moment of use, so disabling, hiding, deleting or expiry take
  * effect on the very next request. The caller must never return `value` to a runner
  * in `proxy` mode.
