@@ -80,10 +80,18 @@ describe('authentication', () => {
 
   test('revoking sessions locks out existing sessions at once', async () => {
     const d = await deps()
-    const header = await sessionHeader(d)
-    expect((await registry(d, header)).status).toBe(200)
-    await revokeRunnerSessions(d.db, d.now + 5)
-    expect((await registry({ ...d, now: d.now + 10 }, header)).status).toBe(401)
+    const revokedKey = 'runner_revoked_before'
+    // D1 state is shared across tests in this worker pool. Never let a prior
+    // interrupted run or this test's future timestamp contaminate later cases.
+    await d.db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, revokedKey))
+    try {
+      const header = await sessionHeader(d)
+      expect((await registry(d, header)).status).toBe(200)
+      await revokeRunnerSessions(d.db, d.now + 5)
+      expect((await registry({ ...d, now: d.now + 10 }, header)).status).toBe(401)
+    } finally {
+      await d.db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, revokedKey))
+    }
   })
 
   test('the issuer constant is the real GitHub one', () => {
@@ -97,6 +105,7 @@ describe('registry', () => {
     const shown = await activeCredential(d)
     const hidden = await activeCredential(d, { visible: false })
     const res = await registry(d, await sessionHeader(d))
+    expect(res.status).toBe(200)
     const names = (res.body as { credentials: Array<{ name: string }> }).credentials.map((c) => c.name)
     expect(names).toContain(shown.name)
     expect(names).not.toContain(hidden.name)
