@@ -9,3 +9,5 @@ tmp
 .zig-cache
 zig-out
 dummy-non-existing-folder
+.vault.secrets.json
+app/wrangler.local.jsonc

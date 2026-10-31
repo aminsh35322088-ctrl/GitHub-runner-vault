@@ -191,20 +191,24 @@ export async function verifyGithubOidc(
 export function policyFromEnv(env: Record<string, unknown>, audience: string): OidcPolicy {
   const repository = typeof env.RUNNER_REPOSITORY === 'string' ? env.RUNNER_REPOSITORY.trim() : ''
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('RUNNER_REPOSITORY must be owner/name')
-  const list = (value: unknown, fallback: string[]) =>
-    typeof value === 'string' && value.trim() ? value.split(',').map((v) => v.trim()).filter(Boolean) : fallback
+  const requiredList = (name: string): string[] => {
+    const value = env[name]
+    if (typeof value !== 'string' || !value.trim()) throw new Error(name + ' is required')
+    const items = value.split(',').map((item) => item.trim()).filter(Boolean)
+    if (items.length === 0 || items.some((item) => item.length > 300)) throw new Error(name + ' is invalid')
+    return [...new Set(items)]
+  }
   const repositoryId = typeof env.RUNNER_REPOSITORY_ID === 'string' && /^\d{1,20}$/.test(env.RUNNER_REPOSITORY_ID.trim())
     ? env.RUNNER_REPOSITORY_ID.trim() : ''
   if (!repositoryId) throw new Error('RUNNER_REPOSITORY_ID must be the numeric repository id')
-  const defaultWorkflow = 'aminsh35322088-ctrl/GitHub-Runner-Lab/.github/workflows/rdc-lab.yml@refs/heads/main'
-  const allowedWorkflowRefs = list(env.RUNNER_ALLOWED_WORKFLOW_REFS, [defaultWorkflow])
-  if (allowedWorkflowRefs.length === 0 || allowedWorkflowRefs.some((item) => item.length > 300 || !item.includes('/.github/workflows/'))) {
+  const allowedRefs = requiredList('RUNNER_ALLOWED_REFS')
+  const allowedEvents = requiredList('RUNNER_ALLOWED_EVENTS')
+  if (allowedEvents.some((event) => event === 'pull_request' || event === 'pull_request_target')) {
+    throw new Error('Pull-request events are not allowed')
+  }
+  const allowedWorkflowRefs = requiredList('RUNNER_ALLOWED_WORKFLOW_REFS')
+  if (allowedWorkflowRefs.some((item) => !item.includes('/.github/workflows/') || !item.includes('@'))) {
     throw new Error('RUNNER_ALLOWED_WORKFLOW_REFS must contain exact workflow refs')
   }
-  return {
-    audience, repository, repositoryId,
-    allowedRefs: list(env.RUNNER_ALLOWED_REFS, ['refs/heads/main']),
-    allowedEvents: list(env.RUNNER_ALLOWED_EVENTS, ['workflow_dispatch', 'schedule', 'push']),
-    allowedWorkflowRefs,
-  }
+  return { audience, repository, repositoryId, allowedRefs, allowedEvents, allowedWorkflowRefs }
 }
