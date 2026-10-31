@@ -244,9 +244,12 @@ async function main() {
     let config = readConfig()
     if (nonInteractive || forceConfigure || !fs.existsSync(localConfigPath) || !config.vars?.OWNER_GITHUB_ID) {
       const installation = await collectInstallConfig(rl)
+      const expectedDatabaseName = installation.workerName + '-db'
       config.name = installation.workerName
       config.vars = installation.vars
-      config.d1_databases = config.d1_databases ?? []
+      config.d1_databases = (config.d1_databases ?? []).filter((entry) =>
+        entry.binding !== 'DB' || entry.database_name === expectedDatabaseName,
+      )
       writePrivate(localConfigPath, JSON.stringify(config, null, 2) + '\n')
     }
 
