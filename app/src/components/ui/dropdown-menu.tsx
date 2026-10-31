@@ -6,7 +6,7 @@
 
 import { Menu as MenuPrimitive } from "@base-ui/react/menu";
 import type React from "react";
-import { cn } from "sigillo-app/src/lib/utils";
+import { cn } from "../../lib/utils";
 
 export const DropdownMenu: typeof MenuPrimitive.Root = MenuPrimitive.Root;
 

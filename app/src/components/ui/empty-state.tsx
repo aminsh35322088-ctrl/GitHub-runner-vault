@@ -3,7 +3,7 @@
 
 import type * as React from "react";
 import { LockIcon } from "lucide-react";
-import { cn } from "sigillo-app/src/lib/utils";
+import { cn } from "../../lib/utils";
 
 export function EmptyState({
   icon,

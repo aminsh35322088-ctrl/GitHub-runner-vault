@@ -1,5 +1,5 @@
 {
-  "name": "sigillo-app",
+  "name": "runner-vault-app",
   "version": "0.2.0",
   "private": true,
   "type": "module",
@@ -10,7 +10,6 @@
   },
   "scripts": {
     "dev": "pnpm db:migrate:local && tuistory launch -s sigillo-app-dev --attach 'pnpm vite dev'",
-    "prebuild": "pnpm generate:install",
     "build": "vite build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
@@ -19,20 +18,11 @@
     "db:migrate:prod": "echo \"D1 pre-migration timestamp: $(date +%s)\" && wrangler d1 migrations apply DB --remote",
     "db:migrate:preview": "echo \"D1 pre-migration timestamp: $(date +%s)\" && wrangler d1 migrations apply DB --remote --env preview",
     "deployment": "pnpm db:migrate:preview && CLOUDFLARE_ENV=preview pnpm build && wrangler deploy --env preview",
-    "deployment:prod": "pnpm db:migrate:prod && pnpm build && wrangler deploy",
-    "bundle:selfhost": "tsx scripts/build-selfhost-bundle.ts",
-    "openapi": "tsx scripts/generate-openapi.ts",
-    "generate:install": "tsx scripts/generate-install-script.ts",
-    "generate:cli-docs": "tsx scripts/generate-cli-docs.ts"
+    "deployment:prod": "pnpm db:migrate:prod && pnpm build && wrangler deploy"
   },
   "dependencies": {
-    "@ascii-kit/font": "^0.0.6",
-    "@ascii-kit/fonts-flf": "^0.0.6",
     "@base-ui/react": "^1.6.0",
-    "@holocron.so/vite": "^0.36.0",
-    "@strada.sh/sdk": "^0.5.0",
     "@tailwindcss/vite": "^4.3.3",
-    "@tanstack/react-table": "^8.21.3",
     "better-auth": "^1.7.0-beta.4",
     "better-auth-drizzle-adapter": "^1.2.1",
     "class-variance-authority": "^0.7.1",
@@ -40,15 +30,12 @@
     "db": "workspace:^",
     "drizzle-orm": "1.0.0-rc.1",
     "lucide-react": "^1.27.0",
-    "prismjs": "^1.29.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "spiceflow": "1.26.0-rsc.18",
-    "superjson": "^2.2.6",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.3",
     "ulid": "latest",
-    "vaul": "^1.1.2",
     "zod": "latest"
   },
   "cloudflare": {

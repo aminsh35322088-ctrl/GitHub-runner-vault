@@ -7,9 +7,9 @@ import { XIcon } from "lucide-react";
 import type React from "react";
 import { useEffect, useRef } from "react";
 import { useRouterState } from "spiceflow/react";
-import { cn } from "sigillo-app/src/lib/utils";
-import { Button } from "sigillo-app/src/components/ui/button";
-import { ScrollArea } from "sigillo-app/src/components/ui/scroll-area";
+import { cn } from "../../lib/utils";
+import { Button } from "./button";
+import { ScrollArea } from "./scroll-area";
 
 export const DialogCreateHandle: typeof DialogPrimitive.createHandle =
   DialogPrimitive.createHandle;

@@ -23,7 +23,7 @@
 'use client'
 
 import { useSyncExternalStore } from 'react'
-import { formatAbsoluteDate, formatTime } from 'sigillo-app/src/lib/utils'
+import { formatAbsoluteDate, formatTime } from '../../lib/utils'
 
 // Hydration never "changes" after it happens, so the store never notifies.
 const subscribe = () => () => {}

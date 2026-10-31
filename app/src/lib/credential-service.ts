@@ -310,3 +310,13 @@ export async function readCredentialValue(db: Db, key: CryptoKey, name: string, 
     },
   }
 }
+
+// ── Audit listing (owner) ─────────────────────────────────────────────
+
+export async function listAudit(db: Db, opts: { limit?: number; credentialName?: string } = {}) {
+  const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500)
+  const q = db.select().from(schema.credentialAudit)
+  const rows = await (opts.credentialName ? q.where(orm.eq(schema.credentialAudit.credentialName, opts.credentialName)) : q)
+    .orderBy(orm.desc(schema.credentialAudit.at)).limit(limit)
+  return rows
+}

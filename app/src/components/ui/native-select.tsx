@@ -4,7 +4,7 @@
 
 import { ChevronsUpDownIcon } from "lucide-react";
 import type * as React from "react";
-import { cn } from "sigillo-app/src/lib/utils";
+import { cn } from "../../lib/utils";
 
 export function NativeSelect({
   children,

@@ -4,7 +4,7 @@
 "use client"
 
 import { useState } from "react"
-import { Button } from "sigillo-app/src/components/ui/button"
+import { Button } from "./ui/button"
 import { authClient } from "../auth-client.ts"
 
 export function LoginButton({ callbackURL = "/dash" }: { callbackURL?: string }) {

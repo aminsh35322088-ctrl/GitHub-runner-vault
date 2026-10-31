@@ -1,7 +1,4 @@
-/* Use @reference instead of @import because holocron already imports Tailwind.
-   A second @import creates duplicate style layers that break layout and cascade.
-   @reference gives access to Tailwind variables, @apply, and @variant without duplication. */
-@reference 'tailwindcss';
+@import 'tailwindcss';
 @custom-variant dark (&:where(.dark, .dark *));
 
 @font-face {

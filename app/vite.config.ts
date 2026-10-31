@@ -3,11 +3,9 @@
 import path from 'node:path'
 import { cloudflare } from '@cloudflare/vite-plugin'
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-pool-workers'
-import { holocron } from '@holocron.so/vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { spiceflowPlugin } from 'spiceflow/vite'
-import { stradaVitePlugin } from '@strada.sh/sdk/vite'
 import { defineConfig } from 'vite'
 
 const port = parseInt(process.env.PORT || '5188', 10)
@@ -37,8 +35,6 @@ export default defineConfig(async () => {
     server: { port, strictPort: true },
     clearScreen: false,
     plugins: [
-      // Tags browser telemetry with git commit/branch (release metadata).
-      stradaVitePlugin(),
       // cloudflareTest() runs tests inside workerd via @cloudflare/vitest-pool-workers.
       // cloudflare() handles dev/build/deploy but conflicts with the vitest pool
       // (both manage workerd), so only one is active at a time.
@@ -54,17 +50,11 @@ export default defineConfig(async () => {
             },
           })
         : null,
-      // app.tsx imports `@holocron.so/vite/app`, so holocron must run in BOTH
-      // modes to (a) alias that bare id to its `src/app.tsx` and (b) provide the
-      // `virtual:holocron-*` modules. Without it in tests, the id resolves to
-      // `dist/app.js` which imports virtual modules that don't exist, crashing
-      // module load. In test mode we also pass the raw react+spiceflow plugins;
-      // holocron detects them and skips adding its own duplicates, avoiding the
-      // conflict with cloudflareTest (which manages workerd itself).
+      // Tests need the raw react + spiceflow plugins next to cloudflareTest().
       ...(process.env.VITEST
-        ? [react(), spiceflowPlugin({ entry: './src/app.tsx' }), holocron({ entry: './src/app.tsx', pagesDir: './src' })]
-        : [holocron({ entry: './src/app.tsx', pagesDir: './src' })]),
-      // cloudflare() must come AFTER spiceflow/holocron — spiceflow sets ssr outDir to
+        ? [react(), spiceflowPlugin({ entry: './src/app.tsx' })]
+        : [react(), spiceflowPlugin({ entry: './src/app.tsx' })]),
+      // cloudflare() must come AFTER spiceflow — spiceflow sets ssr outDir to
       // dist/rsc/ssr (nested inside the worker root) so workerd can resolve the
       // cross-environment import. cloudflare's config hook unconditionally sets
       // outDir to dist/ssr (sibling), and Vite's config merge gives the first
