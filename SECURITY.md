@@ -12,7 +12,8 @@
 - Owner login is GitHub OAuth restricted to one numeric account id; sessions are cookie-only.
 - Models propose names and setup notes; the **owner** decides hosts, auth header, lifetime
   and visibility. Notes are treated as hostile text (strict schema, no HTML, visible link hosts).
-- `inject` delivery returns a value to the runner and should only be used for low-privilege or
-  short-lived tokens.
+- `inject` delivery is stored as a setting but **not implemented yet**: the runner API refuses to
+  proxy such credentials and has no endpoint that returns a value. If added, it must be limited to
+  low-privilege or short-lived tokens.
 
 Report vulnerabilities privately to the repository owner, not in a public issue.
