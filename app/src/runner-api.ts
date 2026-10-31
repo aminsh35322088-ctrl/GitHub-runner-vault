@@ -9,14 +9,13 @@ import { importEncryptionKey } from './lib/credential-crypto.ts'
 import { cachedJwksSource, policyFromEnv } from './lib/oidc.ts'
 import { deriveSessionKey } from './lib/runner-session.ts'
 import { createSession, registry, requestCredential, useCredential, type RunnerDeps } from './lib/runner-core.ts'
-import { pinnedOrigin } from './db.ts'
+import { getRequestOrigin } from './db.ts'
 
 const jwks = cachedJwksSource()
 
-async function buildDeps(): Promise<RunnerDeps> {
+async function buildDeps(request: Request): Promise<RunnerDeps> {
   const e = env as unknown as Record<string, unknown>
-  const origin = pinnedOrigin()
-  if (!origin) throw new Error('PUBLIC_ORIGIN is not configured')
+  const origin = getRequestOrigin(request)
   return {
     db: getDb(),
     encryptionKey: await importEncryptionKey(e.ENCRYPTION_KEY),
@@ -30,10 +29,10 @@ async function buildDeps(): Promise<RunnerDeps> {
 }
 
 // Misconfiguration must fail closed with a generic answer, never a stack trace.
-async function run(fn: (deps: RunnerDeps) => Promise<{ status: number; body: unknown }>) {
+async function run(request: Request, fn: (deps: RunnerDeps) => Promise<{ status: number; body: unknown }>) {
   let deps: RunnerDeps
   try {
-    deps = await buildDeps()
+    deps = await buildDeps(request)
   } catch {
     return json({ error: 'vault_not_configured' }, { status: 503, headers: { 'Cache-Control': 'no-store' } })
   }
@@ -68,7 +67,7 @@ export const runnerApp = new Spiceflow()
     path: '/api/runner/session',
     detail: { tags: ['Runner'], summary: 'Exchange a GitHub Actions OIDC token for a short session' },
     async handler({ request }) {
-      return run((deps) => createSession(deps, request.headers.get('authorization')))
+      return run(request, (deps) => createSession(deps, request.headers.get('authorization')))
     },
   })
   .route({
@@ -76,7 +75,7 @@ export const runnerApp = new Spiceflow()
     path: '/api/runner/registry',
     detail: { tags: ['Runner'], summary: 'List credentials this runner may use (metadata only)' },
     async handler({ request }) {
-      return run((deps) => registry(deps, request.headers.get('authorization')))
+      return run(request, (deps) => registry(deps, request.headers.get('authorization')))
     },
   })
   .route({
@@ -87,7 +86,7 @@ export const runnerApp = new Spiceflow()
     async handler({ request }) {
       const body = await parseRunnerBody(request)
       if (!body) return invalidRequest()
-      return run((deps) => requestCredential(deps, request.headers.get('authorization'), {
+      return run(request, (deps) => requestCredential(deps, request.headers.get('authorization'), {
         name: body.name, service: body.service, purpose: body.purpose, doc: body.doc,
       }))
     },
@@ -100,7 +99,7 @@ export const runnerApp = new Spiceflow()
     async handler({ request }) {
       const body = await parseRunnerBody(request)
       if (!body) return invalidRequest()
-      return run((deps) => useCredential(deps, request.headers.get('authorization'), {
+      return run(request, (deps) => useCredential(deps, request.headers.get('authorization'), {
         name: body.name, method: body.method, url: body.url, headers: body.headers, body: body.body, purpose: body.purpose,
       }))
     },

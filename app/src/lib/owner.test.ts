@@ -3,7 +3,7 @@ import { isOwnerAccount, normalizeOwnerId, userHasOwnerAccount } from './owner.t
 
 describe('normalizeOwnerId', () => {
   test('accepts a positive integer string and trims it', () => {
-    expect(normalizeOwnerId('318252513')).toBe('318252513')
+    expect(normalizeOwnerId('42')).toBe('42')
     expect(normalizeOwnerId(' 42 ')).toBe('42')
   })
 
@@ -16,15 +16,15 @@ describe('normalizeOwnerId', () => {
 })
 
 describe('isOwnerAccount', () => {
-  const owner = '318252513'
+  const owner = '42'
 
   test('matches the owner GitHub id exactly', () => {
     expect(isOwnerAccount({ providerId: 'github', accountId: owner }, owner)).toBe(true)
   })
 
   test('rejects another GitHub id, including a login name', () => {
-    expect(isOwnerAccount({ providerId: 'github', accountId: '318252514' }, owner)).toBe(false)
-    expect(isOwnerAccount({ providerId: 'github', accountId: 'aminsh35322088-ctrl' }, owner)).toBe(false)
+    expect(isOwnerAccount({ providerId: 'github', accountId: '43' }, owner)).toBe(false)
+    expect(isOwnerAccount({ providerId: 'github', accountId: 'example-owner' }, owner)).toBe(false)
   })
 
   test('rejects the owner id on a different provider', () => {

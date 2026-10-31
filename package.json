@@ -6,8 +6,9 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm --filter runner-vault-app test && node --test client/vault.test.mjs",
     "build": "pnpm --filter runner-vault-app build",
-    "deploy": "wrangler d1 migrations apply DB --remote --config app/wrangler.jsonc && pnpm build && wrangler deploy --config app/wrangler.jsonc",
-    "validate": "pnpm typecheck && pnpm test && pnpm build"
+    "deploy": "node scripts/deploy.mjs",
+    "validate": "pnpm typecheck && pnpm test && pnpm build",
+    "vault:deploy": "node scripts/deploy.mjs"
   },
   "packageManager": "pnpm@12.16.1"
 }

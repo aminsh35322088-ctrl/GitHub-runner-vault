@@ -1,41 +1,17 @@
 {
-  // Runner credential vault Worker. Production origin and owner ID are set here;
-  // credentials remain Cloudflare Worker secrets and are never committed.
-  //   - database_id: output of `wrangler d1 create runner-vault-db`
-  //   - PUBLIC_ORIGIN: the exact https origin the Worker is served from
-  //   - OWNER_GITHUB_ID: numeric id of the owner's GitHub account
-  // Secrets (wrangler secret put): BETTER_AUTH_SECRET, GITHUB_CLIENT_ID,
-  // GITHUB_CLIENT_SECRET, and ENCRYPTION_KEY (32 random bytes, base64).
+  "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "runner-vault",
-  "compatibility_date": "2026-04-16",
+  "compatibility_date": "2026-10-31",
   "preview_urls": false,
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
   "main": "src/app.tsx",
   "placement": {
-    "mode": "smart",
+    "mode": "smart"
   },
   "observability": {
-    "enabled": true,
+    "enabled": true
   },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "runner-vault-db",
-      "database_id": "0eac2ae2-ce9f-4559-9d24-5a011925aeff",
-      "migrations_dir": "../db/drizzle-app",
-    },
-  ],
-  "vars": {
-    "PUBLIC_ORIGIN": "https://runner-vault.amin3532.workers.dev",
-    "OWNER_GITHUB_ID": "318252513",
-    // Runner trust policy (owner/name of the Lab repo and its numeric id). Empty = runner API refuses with 503.
-    "RUNNER_REPOSITORY": "aminsh35322088-ctrl/GitHub-Runner-Lab",
-    "RUNNER_REPOSITORY_ID": "1374269690",
-    "RUNNER_ALLOWED_REFS": "refs/heads/main",
-    "RUNNER_ALLOWED_EVENTS": "workflow_dispatch,schedule,push",
-    "RUNNER_ALLOWED_WORKFLOW_REFS": "aminsh35322088-ctrl/GitHub-Runner-Lab/.github/workflows/rdc-lab.yml@refs/heads/main",
-  },
-  "secrets": {
-    "required": ["BETTER_AUTH_SECRET", "ENCRYPTION_KEY", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"],
-  },
+  "vars": {}
 }

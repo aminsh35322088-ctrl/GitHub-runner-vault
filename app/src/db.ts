@@ -19,9 +19,9 @@ import { GITHUB_PROVIDER_ID, isOwnerAccount, normalizeOwnerId, userHasOwnerAccou
 export { getDb }
 
 // ── Request origin ──────────────────────────────────────────────────
-// PUBLIC_ORIGIN (e.g. https://vault.example.workers.dev) pins the origin used
-// for OAuth callbacks and trusted origins. Set it in production so no request
-// header can influence where the sign-in flow redirects.
+// PUBLIC_ORIGIN is an optional canonical-origin override (useful for custom
+// domains). By default, use the origin of the request actually received by the
+// Worker. Forwarded headers are only considered for localhost development.
 
 export function pinnedOrigin(): string | null {
   const raw = (env as { PUBLIC_ORIGIN?: string }).PUBLIC_ORIGIN
