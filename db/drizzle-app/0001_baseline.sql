@@ -1,3 +1,53 @@
+-- Runner Credential Vault schema (single baseline).
+-- Auth tables follow BetterAuth; credential tables hold the encrypted registry.
+
+CREATE TABLE `account` (
+	`id` text PRIMARY KEY,
+	`user_id` text NOT NULL,
+	`account_id` text NOT NULL,
+	`provider_id` text NOT NULL,
+	`access_token` text,
+	`refresh_token` text,
+	`access_token_expires_at` integer,
+	`refresh_token_expires_at` integer,
+	`scope` text,
+	`id_token` text,
+	`password` text,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	CONSTRAINT `fk_account_user_id_user_id_fk` FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON DELETE CASCADE
+);--> statement-breakpoint
+CREATE TABLE `session` (
+	`id` text PRIMARY KEY,
+	`user_id` text NOT NULL,
+	`token` text NOT NULL UNIQUE,
+	`expires_at` integer NOT NULL,
+	`ip_address` text,
+	`user_agent` text,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	CONSTRAINT `fk_session_user_id_user_id_fk` FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON DELETE CASCADE
+);--> statement-breakpoint
+CREATE TABLE `user` (
+	`id` text PRIMARY KEY,
+	`name` text NOT NULL,
+	`email` text NOT NULL UNIQUE,
+	`email_verified` integer DEFAULT false NOT NULL,
+	`image` text,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL
+);--> statement-breakpoint
+CREATE TABLE `verification` (
+	`id` text PRIMARY KEY,
+	`identifier` text NOT NULL,
+	`value` text NOT NULL,
+	`expires_at` integer NOT NULL,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL
+);--> statement-breakpoint
+CREATE INDEX `account_user_id_idx` ON `account` (`user_id`);--> statement-breakpoint
+CREATE INDEX `session_user_id_idx` ON `session` (`user_id`);--> statement-breakpoint
+
 -- Flat credential registry for the runner vault.
 --
 -- Metadata and the encrypted value live in the same row but are separate
@@ -26,6 +76,8 @@ CREATE TABLE `credential` (
 	`value_encrypted` text,
 	`value_iv` text,
 	`key_version` integer NOT NULL DEFAULT 1,
+	`auth_header` text NOT NULL DEFAULT 'Authorization' CHECK (length(`auth_header`) BETWEEN 1 AND 64),
+	`auth_scheme` text NOT NULL DEFAULT 'Bearer' CHECK (`auth_scheme` IN ('Bearer', 'Token', 'Raw')),
 	`expires_at` integer,
 	`last_used_at` integer,
 	`created_at` integer NOT NULL,
@@ -73,4 +125,15 @@ CREATE INDEX `credential_audit_credential_idx` ON `credential_audit` (`credentia
 CREATE TRIGGER `credential_audit_no_update` BEFORE UPDATE ON `credential_audit`
 BEGIN SELECT RAISE(ABORT, 'credential_audit is append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `credential_audit_no_delete` BEFORE DELETE ON `credential_audit`
-BEGIN SELECT RAISE(ABORT, 'credential_audit is append-only'); END;
+BEGIN SELECT RAISE(ABORT, 'credential_audit is append-only'); END;;--> statement-breakpoint
+
+-- Small key/value settings owned by the vault itself (e.g. runner_revoked_before).
+CREATE TABLE `vault_setting` (
+	`key` text PRIMARY KEY CHECK (length(`key`) BETWEEN 1 AND 64),
+	`value` text NOT NULL CHECK (length(`value`) <= 500),
+	`updated_at` integer NOT NULL
+);;--> statement-breakpoint
+
+CREATE UNIQUE INDEX `enrollment_link_one_unused_per_credential_kind_idx`
+ON `enrollment_link` (`credential_id`, `kind`)
+WHERE `used_at` IS NULL;

@@ -4,8 +4,8 @@
 // epochMs custom columns that accept both Date and number inputs, so
 // BetterAuth's Date params are converted to epoch ms before reaching D1.
 // getAuth(request) creates a BetterAuth instance backed by the same drizzle
-// client for the current request host. Credential encryption requires a
-// dedicated ENCRYPTION_KEY and never derives one from BETTER_AUTH_SECRET.
+// client for the current request host. Keys come from lib/vault-config.ts: the
+// auth secret and the credential key are derived from separate HKDF labels.
 
 import { env } from 'cloudflare:workers'
 import * as orm from 'drizzle-orm'
@@ -14,7 +14,8 @@ import { betterAuth } from 'better-auth/minimal'
 import { drizzleAdapter } from 'better-auth-drizzle-adapter'
 import { redirect } from 'spiceflow'
 import { GITHUB_PROVIDER_ID, isOwnerAccount, normalizeOwnerId, userHasOwnerAccount } from './lib/owner.ts'
-import { CLOUDFLARE_IP_ADDRESS_HEADERS, hasGithubOAuthConfig } from './lib/auth-config.ts'
+import { CLOUDFLARE_IP_ADDRESS_HEADERS } from './lib/auth-config.ts'
+import { loadGithubOAuth, loadOwnerId, loadVaultKeys, type VaultEnv } from './lib/vault-config.ts'
 
 // ── Drizzle client via D1 ───────────────────────────────────────────
 export { getDb }
@@ -120,12 +121,13 @@ function getPublicOriginOverride(request: Request): string | null {
 export async function getAuth(request: Request) {
   const db = getDb()
   const origin = getRequestOrigin(request)
-  const githubId = (env as { GITHUB_CLIENT_ID?: string }).GITHUB_CLIENT_ID
-  const githubSecret = (env as { GITHUB_CLIENT_SECRET?: string }).GITHUB_CLIENT_SECRET
-  const ownerId = normalizeOwnerId((env as { OWNER_GITHUB_ID?: string }).OWNER_GITHUB_ID)
+  const vaultEnv = env as unknown as VaultEnv
+  const keys = await loadVaultKeys(db, vaultEnv)
+  const github = await loadGithubOAuth(db, vaultEnv, keys)
+  const ownerId = await loadOwnerId(db, vaultEnv)
   return betterAuth({
     baseURL: origin,
-    secret: env.BETTER_AUTH_SECRET,
+    secret: keys.authSecret,
     database: drizzleAdapter(db, { provider: 'sqlite' }),
     // Only the origin of this deployment. No registered-host list, no wildcard.
     trustedOrigins: [origin],
@@ -140,8 +142,18 @@ export async function getAuth(request: Request) {
     emailAndPassword: { enabled: !!process.env.VITEST },
     // Without a configured GitHub OAuth app there is simply no provider, so
     // sign-in fails closed instead of falling back to anything weaker.
-    socialProviders: hasGithubOAuthConfig({ GITHUB_CLIENT_ID: githubId, GITHUB_CLIENT_SECRET: githubSecret })
-      ? { github: { clientId: githubId!, clientSecret: githubSecret! } }
+    socialProviders: github
+      ? {
+          github: {
+            clientId: github.clientId,
+            clientSecret: github.clientSecret,
+            // The app asks for no email permission, so GitHub may return none. The
+            // vault never uses the email; this only satisfies the user table.
+            mapProfileToUser: (profile: { id: number | string; login?: string; email?: string | null }) => ({
+              email: profile.email || `${profile.id}+${profile.login ?? 'owner'}@users.noreply.github.com`,
+            }),
+          },
+        }
       : {},
     // The GitHub access token is only needed to read the profile once at sign-in.
     account: { encryptOAuthTokens: true },
@@ -201,7 +213,7 @@ async function sessionUserIsOwner(userId: string): Promise<boolean> {
     .select({ providerId: schema.account.providerId, accountId: schema.account.accountId })
     .from(schema.account)
     .where(orm.eq(schema.account.userId, userId))
-  return userHasOwnerAccount(accounts, (env as { OWNER_GITHUB_ID?: string }).OWNER_GITHUB_ID)
+  return userHasOwnerAccount(accounts, await loadOwnerId(getDb(), env as unknown as VaultEnv))
 }
 
 async function resolveSession(request: Request): Promise<Session | null> {

@@ -4,11 +4,11 @@
   "type": "module",
   "scripts": {
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm --filter runner-vault-app test && node --test client/vault.test.mjs",
+    "embed-schema": "node scripts/embed-schema.mjs",
+    "test": "node scripts/embed-schema.mjs --check && pnpm --filter runner-vault-app test && node --test client/vault.test.mjs",
     "build": "pnpm --filter runner-vault-app build",
-    "deploy": "node scripts/deploy.mjs",
     "validate": "pnpm typecheck && pnpm test && pnpm build",
-    "vault:deploy": "node scripts/deploy.mjs"
+    "deploy": "pnpm build && pnpm --filter runner-vault-app exec wrangler deploy"
   },
   "packageManager": "pnpm@12.16.1"
 }
