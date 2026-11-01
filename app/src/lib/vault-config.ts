@@ -6,9 +6,10 @@
 //    it with HKDF under separate labels. Explicit BETTER_AUTH_SECRET +
 //    ENCRYPTION_KEY secrets (older deployments) keep working unchanged.
 //  - GitHub sign-in: created through GitHub's app-manifest flow from /setup. The
-//    client secret is stored encrypted; the app's creator becomes the owner.
-//  - There is no setup password: the first person to finish /setup owns the vault
-//    (see "setup state" below), so open the URL right after deploying.
+//    client secret is stored encrypted; its creator must match the immutable owner
+//    ID provisioned by the Deploy to Cloudflare GitHub Actions bootstrap.
+//  - /setup stays locked until that deployment identity exists; visitors cannot
+//    claim ownership by arriving first.
 
 import * as orm from 'drizzle-orm'
 import { schema } from 'db'
