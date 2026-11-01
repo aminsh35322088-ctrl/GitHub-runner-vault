@@ -6,7 +6,7 @@ import { newSetupState, resetVaultKeyCache, SETUP_STATE_COOKIE } from './lib/vau
 const ORIGIN = 'https://vault.test'
 
 const req = (method: string, path: string, cookie?: string) =>
-  app.handle(new Request(`${ORIGIN}${path}`, { method, redirect: 'manual', headers: cookie ? { cookie } : {} }))
+  app.handle(new Request(`${ORIGIN}${path}`, { method, redirect: 'manual', headers: { accept: 'text/html', ...(cookie ? { cookie } : {}) } }))
 
 beforeEach(async () => {
   resetVaultKeyCache()
