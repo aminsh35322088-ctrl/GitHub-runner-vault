@@ -24,32 +24,35 @@ function writeOwnerVar(config, ownerId) {
   const ownerEntry = /("OWNER_GITHUB_ID"\s*:\s*)"[^"]*"/
   let body
   if (ownerEntry.test(vars[2])) {
-    body = vars[2].replace(ownerEntry, \`$1"\${ownerId}"\`)
+    body = vars[2].replace(ownerEntry, '$1"' + ownerId + '"')
   } else {
     const existing = vars[2].trim().replace(/,\s*$/, '')
     body = existing
-      ? \`\\n\${existing},\\n    "OWNER_GITHUB_ID": "\${ownerId}"\\n  \`
-      : \`\\n    "OWNER_GITHUB_ID": "\${ownerId}"\\n  \`
+      ? '\n' + existing + ',\n    "OWNER_GITHUB_ID": "' + ownerId + '"\n  '
+      : '\n    "OWNER_GITHUB_ID": "' + ownerId + '"\n  '
   }
-  return config.replace(vars[0], \`\${vars[1]}{\${body}}\`)
+  return config.replace(vars[0], vars[1] + '{' + body + '}')
 }
 
 const remote = execFileSync('git', ['remote', 'get-url', 'origin'], {
   encoding: 'utf8',
   stdio: ['ignore', 'pipe', 'pipe'],
 })
-const { owner, repo } = repositoryFromRemote(remote)
-const response = await fetch(\`https://api.github.com/repos/\${encodeURIComponent(owner)}/\${encodeURIComponent(repo)}\`, {
+const identity = repositoryFromRemote(remote)
+const owner = identity.owner
+const repo = identity.repo
+const apiUrl = 'https://api.github.com/repos/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo)
+const response = await fetch(apiUrl, {
   headers: {
     Accept: 'application/vnd.github+json',
     'User-Agent': 'runner-vault-deploy-owner',
     'X-GitHub-Api-Version': '2022-11-28',
   },
 })
-if (!response.ok) throw new Error(\`GitHub repository lookup failed with HTTP \${response.status}\`)
+if (!response.ok) throw new Error('GitHub repository lookup failed with HTTP ' + response.status)
 
 const repository = await response.json()
-if (repository.full_name?.toLowerCase() !== \`\${owner}/\${repo}\`.toLowerCase()) {
+if (repository.full_name?.toLowerCase() !== (owner + '/' + repo).toLowerCase()) {
   throw new Error('GitHub repository metadata does not match the checked-out origin')
 }
 if (repository.owner?.type !== 'User') {
@@ -64,4 +67,4 @@ const configPath = resolve(process.cwd(), 'wrangler.jsonc')
 const before = readFileSync(configPath, 'utf8')
 const after = writeOwnerVar(before, ownerId)
 if (after !== before) writeFileSync(configPath, after)
-console.log(\`[deploy-owner] bound GitHub user ID \${ownerId} from \${owner}/\${repo}\`)
+console.log('[deploy-owner] bound GitHub user ID ' + ownerId + ' from ' + owner + '/' + repo)
