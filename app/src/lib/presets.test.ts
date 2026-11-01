@@ -1,8 +1,18 @@
 import { describe, expect, test } from 'vitest'
-import { presetForService } from './presets.ts'
+import { presetForService, SERVICE_CATALOG } from './presets.ts'
 import { normalizeAllowedHosts, normalizeAuthStyle } from './credential-input.ts'
 
 describe('service presets', () => {
+  test('catalog exposes categorized providers with official HTTPS documentation', () => {
+    expect(SERVICE_CATALOG.length).toBeGreaterThanOrEqual(15)
+    expect(new Set(SERVICE_CATALOG.map((p) => p.id)).size).toBe(SERVICE_CATALOG.length)
+    for (const provider of SERVICE_CATALOG) {
+      expect(provider.docsUrl).toMatch(/^https:\/\//)
+      expect(normalizeAllowedHosts(provider.hosts).ok, provider.id).toBe(true)
+      expect(normalizeAuthStyle(provider.authHeader, provider.authScheme).ok, provider.id).toBe(true)
+    }
+  })
+
   test('match the exact service name regardless of case and punctuation', () => {
     expect(presetForService('Cloudflare')?.hosts).toEqual(['api.cloudflare.com'])
     expect(presetForService(' cloud-flare ')?.id).toBe('cloudflare')
