@@ -37,7 +37,7 @@ export const SERVICE_CATALOG: ServicePreset[] = [
   { id: 'stripe', label: 'Stripe', category: 'Payments', description: 'Manage payments, customers, subscriptions and billing.', docsUrl: 'https://docs.stripe.com/keys', hosts: ['api.stripe.com'], authHeader: 'Authorization', authScheme: 'Bearer' },
   { id: 'sentry', label: 'Sentry', category: 'Monitoring & Analytics', description: 'Access organizations, projects, issues and events.', docsUrl: 'https://docs.sentry.io/api/auth/', hosts: ['sentry.io'], authHeader: 'Authorization', authScheme: 'Bearer' },
   { id: 'supabase', label: 'Supabase', category: 'Data & Storage', description: 'Manage Supabase projects through the Management API.', docsUrl: 'https://supabase.com/docs/reference/api/introduction', hosts: ['api.supabase.com'], authHeader: 'Authorization', authScheme: 'Bearer' },
-  { id: 'pinecone', label: 'Pinecone', category: 'Data & Storage', description: 'Manage vector indexes and data operations.', docsUrl: 'https://docs.pinecone.io/guides/operations/authentication', hosts: ['api.pinecone.io'], authHeader: 'Api-Key', authScheme: 'Raw' },
+  { id: 'pinecone', label: 'Pinecone', category: 'Data & Storage', description: 'Manage vector index configuration through the control-plane API.', docsUrl: 'https://docs.pinecone.io/guides/operations/authentication', hosts: ['api.pinecone.io'], authHeader: 'Api-Key', authScheme: 'Raw' },
   { id: 'slack', label: 'Slack', category: 'Communication', description: 'Use Slack Web API methods and workspace integrations.', docsUrl: 'https://api.slack.com/authentication/token-types', hosts: ['slack.com'], authHeader: 'Authorization', authScheme: 'Bearer' },
 ]
 
