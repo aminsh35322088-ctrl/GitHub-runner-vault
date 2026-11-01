@@ -144,7 +144,16 @@ export async function loadGithubOAuth(db: Db, e: VaultEnv, keys: VaultKeys): Pro
 }
 
 export async function loadOwnerId(db: Db, e: VaultEnv): Promise<string | null> {
-  return normalizeOwnerId(e.OWNER_GITHUB_ID) ?? normalizeOwnerId(await getSetting(db, OWNER_ID))
+  // The build-derived owner ID is the bootstrap identity. Pin it in D1 once so
+  // later repository transfers or build metadata changes cannot transfer a vault.
+  const stored = normalizeOwnerId(await getSetting(db, OWNER_ID))
+  if (stored) return stored
+  const expected = normalizeOwnerId(e.OWNER_GITHUB_ID)
+  if (!expected) return null
+  await db.insert(schema.vaultSetting)
+    .values({ key: OWNER_ID, value: expected, updatedAt: Date.now() })
+    .onConflictDoNothing()
+  return normalizeOwnerId(await getSetting(db, OWNER_ID))
 }
 
 export async function saveGithubApp(db: Db, keys: VaultKeys, app: { clientId: string; clientSecret: string; ownerId: string; ownerLogin?: string }, expectedOwnerId: unknown): Promise<void> {
@@ -152,20 +161,41 @@ export async function saveGithubApp(db: Db, keys: VaultKeys, app: { clientId: st
   if (!expected) throw new Error('deployment owner is not provisioned')
   if (!normalizeOwnerId(app.ownerId)) throw new Error('invalid owner id')
   if (app.ownerId !== expected) throw new Error('GitHub account does not match deployment owner')
-  const sealed = await encryptCredentialValue(keys.encryptionKey, SECRET_AAD_ID, 1, app.clientSecret)
-  const now = Date.now()
-  // Claim the owner slot atomically: if two browsers finish setup at once, exactly
-  // one insert succeeds and the other aborts before writing anything else.
+
+  // Owner identity is pinned from the deployment repository before /setup is
+  // enabled. Keep the claim guard for direct calls and concurrent first requests.
+  const storedOwner = normalizeOwnerId(await getSetting(db, OWNER_ID))
+  if (storedOwner && storedOwner !== expected) throw new Error('This vault is bound to a different deployment owner')
+  if (!storedOwner) {
+    await db.insert(schema.vaultSetting)
+      .values({ key: OWNER_ID, value: expected, updatedAt: Date.now() })
+      .onConflictDoNothing()
+    if (normalizeOwnerId(await getSetting(db, OWNER_ID)) !== expected) {
+      throw new Error('This vault is bound to a different deployment owner')
+    }
+  }
+
+  // Claim the GitHub App slot atomically. The owner ID itself is already pinned,
+  // so the app client ID is now the one-time setup marker.
+  const existingClientId = await getSetting(db, GITHUB_CLIENT_ID)
+  if (existingClientId) throw new Error('This vault already has a sign-in app')
   const claimed = await db.insert(schema.vaultSetting)
-    .values({ key: OWNER_ID, value: app.ownerId, updatedAt: now })
+    .values({ key: GITHUB_CLIENT_ID, value: app.clientId, updatedAt: Date.now() })
     .onConflictDoNothing()
     .returning({ key: schema.vaultSetting.key })
-  if (claimed.length === 0) throw new Error('This vault already has an owner')
+  if (claimed.length === 0) {
+    const currentClientId = await getSetting(db, GITHUB_CLIENT_ID)
+    if (currentClientId !== app.clientId || await getSetting(db, GITHUB_CLIENT_SECRET)) {
+      throw new Error('This vault already has a sign-in app')
+    }
+  }
+
+  const sealed = await encryptCredentialValue(keys.encryptionKey, SECRET_AAD_ID, 1, app.clientSecret)
+  const now = Date.now()
   const upsert = (key: string, value: string) => db.insert(schema.vaultSetting)
     .values({ key, value, updatedAt: now })
     .onConflictDoUpdate({ target: schema.vaultSetting.key, set: { value, updatedAt: now } })
   await db.batch([
-    upsert(GITHUB_CLIENT_ID, app.clientId),
     upsert(GITHUB_CLIENT_SECRET, JSON.stringify({ e: sealed.encrypted, i: sealed.iv })),
     ...(app.ownerLogin && /^[A-Za-z0-9-]{1,39}$/.test(app.ownerLogin) ? [upsert(OWNER_LOGIN, app.ownerLogin)] : []),
   ])
