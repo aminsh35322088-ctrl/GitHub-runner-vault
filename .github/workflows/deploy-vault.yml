@@ -110,7 +110,7 @@ jobs:
 
           const bindingPattern = /(\{[^{}]*"binding"\s*:\s*"DB"[^{}]*\})/s
           config = config.replace(bindingPattern, (block) =>
-            block.replace(/("database_name"\s*:\s*"[^"]+"\s*,?)/, `$1\n      "database_id": "${databaseId}",`)
+            block.replace(/("database_name"\s*:\s*"[^"]+")\s*,?/, (_match, name) => `${name},\n      "database_id": "${databaseId}"`)
           )
           writeFileSync(configPath, config)
           console.log(`D1 database bound: ${databaseName}`)
