@@ -215,7 +215,7 @@ looked up for you; for a private one, also enter its numeric repository id. Pull
 **4. Point the runner at it** — set the Actions variable `VAULT_URL` (or `RUNNER_VAULT_URL`, depending on your workflow)
 to the Worker URL and install `client/vault.mjs` (see [Runner client](#runner-client)).
 
-Deploying from a terminal instead: `pnpm install && pnpm deploy` (needs `wrangler login`). `SETUP_CODE` can be set with
+Deploying from a terminal instead: `cd app && pnpm install && pnpm deploy` (needs `wrangler login`). `SETUP_CODE` can be set with
 `pnpm exec wrangler secret put SETUP_CODE` from `app/`.
 
 ### Where the key lives
@@ -265,11 +265,11 @@ Everything below is optional. A normal deployment sets only `SETUP_CODE`; the re
 pnpm install
 pnpm typecheck                       # tsc
 pnpm test                            # workerd tests + client tests
-cd app && echo 'SETUP_CODE=a local setup phrase' > .dev.vars && pnpm dev   # then open /setup
+cd app && printf 'SETUP_CODE=a local setup phrase\\n' > .dev.vars && pnpm dev   # then open /setup
 ```
 
 `app/.dev.vars` is git-ignored. Local dev uses a local D1; the schema is created on first request like in production.
-The table SQL lives in `db/drizzle-app/*.sql`; after editing it run `pnpm embed-schema` (tests fail if the generated
+The table SQL lives in `app/db/drizzle-app/*.sql`; after editing it run `pnpm --filter runner-vault-app embed-schema` (tests fail if the generated
 `app/src/lib/schema-sql.generated.ts` is stale).
 
 Run `pnpm validate` for typecheck, tests and production build. Tests cover: encryption and AAD binding, availability rules, one-time links (including concurrent use and concurrent creation), documentation

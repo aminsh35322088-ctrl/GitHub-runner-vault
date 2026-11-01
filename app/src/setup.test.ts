@@ -6,12 +6,13 @@ import { consumeSetupState, newSetupState, resetVaultKeyCache, SETUP_MAX_FAILURE
 const ORIGIN = 'https://vault.test'
 const CODE = 'correct horse battery staple'
 
-const req = (method: string, path: string, init: { form?: Record<string, string>; cookie?: string } = {}) =>
+const req = (method: string, path: string, init: { form?: Record<string, string>; cookie?: string; ip?: string } = {}) =>
   app.handle(new Request(`${ORIGIN}${path}`, {
     method,
     redirect: 'manual',
     headers: {
       ...(init.cookie ? { cookie: init.cookie } : {}),
+      ...(init.ip ? { 'cf-connecting-ip': init.ip } : {}),
       ...(init.form ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
     },
     body: init.form ? new URLSearchParams(init.form).toString() : undefined,
@@ -40,11 +41,14 @@ describe('first-time setup flow', () => {
     expect(setCookie).toMatch(/Max-Age=1800/)
   })
 
-  test('too many wrong codes lock the form even for the right code', async () => {
-    for (let i = 0; i < SETUP_MAX_FAILURES; i++) await req('POST', '/setup/unlock', { form: { code: 'wrong wrong wrong' } })
-    const res = await req('POST', '/setup/unlock', { form: { code: CODE } })
-    expect(res.headers.get('location')).toContain('error=locked')
-    expect(res.headers.get('set-cookie')).toBeNull()
+  test('setup lockout is per source IP and does not lock out another owner', async () => {
+    for (let i = 0; i < SETUP_MAX_FAILURES; i++) await req('POST', '/setup/unlock', { ip: '192.0.2.30', form: { code: 'wrong wrong wrong' } })
+    const blocked = await req('POST', '/setup/unlock', { ip: '192.0.2.30', form: { code: CODE } })
+    expect(blocked.headers.get('location')).toContain('error=locked')
+    expect(blocked.headers.get('set-cookie')).toBeNull()
+    const otherIp = await req('POST', '/setup/unlock', { ip: '192.0.2.31', form: { code: CODE } })
+    expect(otherIp.headers.get('location')).toBe(`${ORIGIN}/setup`)
+    expect(otherIp.headers.get('set-cookie')).toContain('HttpOnly')
   })
 
   test('the GitHub callback does nothing without the setup cookie', async () => {

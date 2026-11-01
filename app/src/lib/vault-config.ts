@@ -23,7 +23,6 @@ const GITHUB_CLIENT_ID = 'github_client_id'
 const GITHUB_CLIENT_SECRET = 'github_client_secret'
 const OWNER_ID = 'owner_github_id'
 const SETUP_STATE = 'setup_state'
-const SETUP_FAILURES = 'setup_failures'
 // The secret is bound to this label (see credential-crypto.ts) so it cannot be
 // swapped with another encrypted row.
 const SECRET_AAD_ID = 'setting-github-client-secret'
@@ -195,21 +194,32 @@ export async function setupCodeMatches(provided: unknown, e: VaultEnv): Promise<
   return diff === 0
 }
 
-/** Brute-force brake: at most SETUP_MAX_FAILURES wrong codes per hour. */
-export async function setupLockedOut(db: Db, now: number): Promise<boolean> {
-  const raw = await getSetting(db, SETUP_FAILURES)
-  if (!raw) return false
-  const [count, since] = raw.split(':').map(Number)
-  if (!Number.isFinite(count) || !Number.isFinite(since)) return false
-  if (now - since! > SETUP_FAILURE_WINDOW_MS) return false
-  return count! >= SETUP_MAX_FAILURES
-}
-
-export async function recordSetupFailure(db: Db, now: number): Promise<void> {
-  const raw = await getSetting(db, SETUP_FAILURES)
-  const [count, since] = raw ? raw.split(':').map(Number) : [0, now]
-  const fresh = !raw || !Number.isFinite(since) || now - since! > SETUP_FAILURE_WINDOW_MS
-  await putSetting(db, SETUP_FAILURES, fresh ? `1:${now}` : `${(count ?? 0) + 1}:${since}`, now)
+/**
+ * Atomically consume a setup-code attempt for this source IP and time window.
+ * The IP is HMACed with the vault auth secret; only the digest is stored in D1.
+ * A single UPSERT/RETURNING statement prevents concurrent requests bypassing the limit.
+ */
+export async function consumeSetupAttempt(db: Db, authSecret: string, now: number, sourceIp: string | null): Promise<boolean> {
+  const identity = sourceIp?.trim() || 'unknown'
+  const digest = new Uint8Array(await crypto.subtle.sign('HMAC', await hmacKey(authSecret), enc.encode(identity)))
+  const suffix = Array.from(digest.subarray(0, 16), (b) => b.toString(16).padStart(2, '0')).join('')
+  const key = `setup_attempts_${suffix}`
+  const storedValue = schema.vaultSetting.value
+  const separator = orm.sql`instr(${storedValue}, ':')`
+  const nextValue = orm.sql<string>`CASE
+    WHEN ${separator} = 0
+      OR CAST(substr(${storedValue}, ${separator} + 1) AS INTEGER) <= ${now - SETUP_FAILURE_WINDOW_MS}
+    THEN ${`1:${now}`}
+    ELSE (CAST(substr(${storedValue}, 1, ${separator} - 1) AS INTEGER) + 1)
+      || ':' || substr(${storedValue}, ${separator} + 1)
+    END`
+  const [row] = await db.insert(schema.vaultSetting)
+    .values({ key, value: `1:${now}`, updatedAt: now })
+    .onConflictDoUpdate({ target: schema.vaultSetting.key, set: { value: nextValue, updatedAt: now } })
+    .returning({ value: storedValue })
+  const [count, since] = (row?.value ?? '').split(':').map(Number)
+  return Number.isSafeInteger(count) && count! >= 1 && count! <= SETUP_MAX_FAILURES
+    && Number.isFinite(since) && now - since! <= SETUP_FAILURE_WINDOW_MS
 }
 
 async function hmacKey(secret: string): Promise<CryptoKey> {

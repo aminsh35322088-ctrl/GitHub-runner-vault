@@ -14,7 +14,7 @@ import { ensureSchema } from './lib/schema.ts'
 import { loadRunnerPolicyInput } from './lib/runner-policy.ts'
 import {
   SETUP_COOKIE, buildManifest, consumeSetupState, convertManifest, isConfigured, issueSetupCookie, loadVaultKeys,
-  newSetupState, recordSetupFailure, saveGithubApp, setupCodeMatches, setupCodeStatus, setupCookieValid, setupLockedOut,
+  newSetupState, consumeSetupAttempt, saveGithubApp, setupCodeMatches, setupCodeStatus, setupCookieValid,
   MIN_SETUP_CODE_LENGTH, type VaultEnv,
 } from './lib/vault-config.ts'
 import { Button } from './components/ui/button'
@@ -250,12 +250,9 @@ export const app = new Spiceflow()
     const to = (q: string) => new Response(null, { status: 303, headers: { Location: new URL(`/setup${q}`, origin).toString() } })
     if (await isConfigured(db, e, keys)) return to('')
     const now = Date.now()
-    if (await setupLockedOut(db, now)) return to('?error=locked')
+    if (!(await consumeSetupAttempt(db, keys.authSecret, now, request.headers.get('cf-connecting-ip')))) return to('?error=locked')
     const form = await request.formData().catch(() => null)
-    if (!form || !(await setupCodeMatches(form.get('code'), e))) {
-      await recordSetupFailure(db, now)
-      return to('?error=code')
-    }
+    if (!form || !(await setupCodeMatches(form.get('code'), e))) return to('?error=code')
     const cookie = await issueSetupCookie(keys.authSecret, now)
     const res = to('')
     res.headers.append('Set-Cookie', `${SETUP_COOKIE}=${cookie.value}; Path=/; Max-Age=${cookie.maxAgeSeconds}; HttpOnly; Secure; SameSite=Lax`)

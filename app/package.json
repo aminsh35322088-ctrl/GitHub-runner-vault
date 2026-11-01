@@ -10,10 +10,12 @@
   },
   "scripts": {
     "dev": "vite dev",
-    "build": "vite build",
-    "test": "vitest run",
+    "build": "node scripts/embed-schema.mjs --check && vite build",
+    "test": "node scripts/embed-schema.mjs --check && vitest run",
     "typecheck": "tsc --noEmit",
-    "types": "wrangler types --env-file .dev.vars.example"
+    "types": "wrangler types --env-file .dev.vars.example",
+    "embed-schema": "node scripts/embed-schema.mjs",
+    "deploy": "wrangler deploy"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
@@ -35,11 +37,11 @@
   },
   "cloudflare": {
     "bindings": {
-      "BETTER_AUTH_SECRET": {
-        "description": "Any random string used to sign auth sessions and cookies. No length or format requirement. Generate with `openssl rand -base64 32`."
+      "SETUP_CODE": {
+        "description": "Choose a private phrase of at least 12 characters. It unlocks first-time owner setup once."
       },
-      "ENCRYPTION_KEY": {
-        "description": "Required. Exactly 32 random bytes, base64-encoded (44 characters), used for AES-256-GCM encryption of credentials at rest. Never derive it from BETTER_AUTH_SECRET. Back it up securely; rotating it requires an explicit credential re-encryption migration. Generate with openssl rand -base64 32."
+      "VAULT_MASTER_KEY": {
+        "description": "Optional base64-encoded 32-byte master key. Set before storing credentials to keep the key outside D1."
       }
     }
   },

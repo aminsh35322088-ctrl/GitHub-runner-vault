@@ -3,7 +3,7 @@
 // `wrangler d1 migrations apply`. Statements are made idempotent (IF NOT EXISTS)
 // so the same code also adopts databases that were migrated by wrangler earlier.
 //
-//   node scripts/embed-schema.mjs          write app/src/lib/schema-sql.generated.ts
+//   node scripts/embed-schema.mjs          write src/lib/schema-sql.generated.ts
 //   node scripts/embed-schema.mjs --check  fail if the generated file is out of date
 
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs'

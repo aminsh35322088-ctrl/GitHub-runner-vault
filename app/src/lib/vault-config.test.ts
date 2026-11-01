@@ -4,8 +4,8 @@ import { getDb, schema } from 'db'
 import * as orm from 'drizzle-orm'
 import {
   buildManifest, consumeSetupState, convertManifest, issueSetupCookie, keysFromMaster, loadGithubOAuth, loadOwnerId,
-  loadVaultKeys, newSetupState, parseConversion, recordSetupFailure, resetVaultKeyCache, saveGithubApp, setupCodeMatches,
-  setupCodeStatus, setupCookieValid, setupLockedOut, SETUP_COOKIE, SETUP_MAX_FAILURES, SETUP_SESSION_MS, putSetting,
+  loadVaultKeys, newSetupState, parseConversion, consumeSetupAttempt, resetVaultKeyCache, saveGithubApp, setupCodeMatches,
+  setupCodeStatus, setupCookieValid, SETUP_COOKIE, SETUP_MAX_FAILURES, SETUP_SESSION_MS, putSetting,
 } from './vault-config.ts'
 import { ensureSchema, resetSchemaCheck } from './schema.ts'
 import { SCHEMA_MIGRATIONS } from './schema-sql.generated.ts'
@@ -112,12 +112,24 @@ describe('setup gate', () => {
     expect(await setupCodeMatches('short', { SETUP_CODE: 'short' })).toBe(false)
   })
 
-  test('repeated wrong codes lock setup for the hour', async () => {
+  test('setup attempts are isolated per source IP and expire after one hour', async () => {
     const now = Date.now()
-    expect(await setupLockedOut(db, now)).toBe(false)
-    for (let i = 0; i < SETUP_MAX_FAILURES; i++) await recordSetupFailure(db, now)
-    expect(await setupLockedOut(db, now)).toBe(true)
-    expect(await setupLockedOut(db, now + 61 * 60_000)).toBe(false)
+    const sourceIp = '192.0.2.10'
+    for (let i = 0; i < SETUP_MAX_FAILURES; i++) {
+      expect(await consumeSetupAttempt(db, 'a'.repeat(40), now, sourceIp)).toBe(true)
+    }
+    expect(await consumeSetupAttempt(db, 'a'.repeat(40), now, sourceIp)).toBe(false)
+    expect(await consumeSetupAttempt(db, 'a'.repeat(40), now, '192.0.2.11')).toBe(true)
+    expect(await consumeSetupAttempt(db, 'a'.repeat(40), now + 61 * 60_000, sourceIp)).toBe(true)
+    expect(JSON.stringify(await db.select().from(schema.vaultSetting))).not.toContain(sourceIp)
+  })
+
+  test('concurrent setup attempts are counted atomically', async () => {
+    const now = Date.now()
+    const results = await Promise.all(Array.from({ length: 20 }, () =>
+      consumeSetupAttempt(db, 'a'.repeat(40), now, '198.51.100.20')))
+    expect(results.filter(Boolean)).toHaveLength(SETUP_MAX_FAILURES)
+    expect(results.filter((value) => !value)).toHaveLength(20 - SETUP_MAX_FAILURES)
   })
 
   test('setup cookie: valid, expired, tampered, wrong secret', async () => {

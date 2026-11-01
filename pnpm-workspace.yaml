@@ -1,6 +1,6 @@
-# pnpm 11+ uses allowBuilds for reviewed dependency install scripts.
 packages:
-  - ./*
+  - ./app
+  - ./app/*
 
 allowBuilds:
   esbuild: true

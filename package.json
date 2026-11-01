@@ -4,8 +4,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "pnpm -r typecheck",
-    "embed-schema": "node scripts/embed-schema.mjs",
-    "test": "node scripts/embed-schema.mjs --check && pnpm --filter runner-vault-app test && node --test client/vault.test.mjs",
+    "embed-schema": "pnpm --filter runner-vault-app embed-schema",
+    "test": "pnpm --filter runner-vault-app test && node --test client/vault.test.mjs",
     "build": "pnpm --filter runner-vault-app build",
     "validate": "pnpm typecheck && pnpm test && pnpm build",
     "deploy": "pnpm build && pnpm --filter runner-vault-app exec wrangler deploy"
