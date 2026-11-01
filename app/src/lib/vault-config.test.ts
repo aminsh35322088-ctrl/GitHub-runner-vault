@@ -96,10 +96,17 @@ describe('GitHub app and owner storage', () => {
     expect(await loadOwnerId(db, {})).toBeNull()
   })
 
-  test('Worker variables override stored values', async () => {
+  test('the first build-derived owner is pinned in D1 and cannot be changed by later builds', async () => {
+    expect(await loadOwnerId(db, { OWNER_GITHUB_ID: '111' })).toBe('111')
+    expect(await loadOwnerId(db, { OWNER_GITHUB_ID: '222' })).toBe('111')
+    const row = await db.select().from(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'owner_github_id'))
+    expect(row[0]?.value).toBe('111')
+  })
+
+  test('stored owner identity takes precedence over later build variables', async () => {
     const keys = await loadVaultKeys(db, {})
     await saveGithubApp(db, keys, { clientId: 'stored', clientSecret: 'stored-secret', ownerId: '5' }, '5')
-    expect(await loadOwnerId(db, { OWNER_GITHUB_ID: '9' })).toBe('9')
+    expect(await loadOwnerId(db, { OWNER_GITHUB_ID: '9' })).toBe('5')
     expect(await loadGithubOAuth(db, { GITHUB_CLIENT_ID: 'e', GITHUB_CLIENT_SECRET: 'f' }, keys)).toEqual({ clientId: 'e', clientSecret: 'f' })
   })
 })
@@ -122,7 +129,7 @@ describe('setup state', () => {
     const keys = await loadVaultKeys(db, {})
     await saveGithubApp(db, keys, { clientId: 'first', clientSecret: 'first-secret', ownerId: '111', ownerLogin: 'alice' }, '111')
     await expect(saveGithubApp(db, keys, { clientId: 'second', clientSecret: 'second-secret', ownerId: '111', ownerLogin: 'mallory' }, '111'))
-      .rejects.toThrow(/already has an owner/)
+      .rejects.toThrow(/already has a sign-in app/)
     expect(await loadOwnerId(db, {})).toBe('111')
     expect(await loadOwnerLogin(db)).toBe('alice')
     expect(await loadGithubOAuth(db, {}, keys)).toEqual({ clientId: 'first', clientSecret: 'first-secret' })
