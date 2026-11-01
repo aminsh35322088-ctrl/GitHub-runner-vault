@@ -3,7 +3,7 @@ import { getDb, schema } from 'db'
 import * as orm from 'drizzle-orm'
 import { importEncryptionKey } from './credential-crypto.ts'
 import {
-  deleteCredential, getCredentialForOwner, listCredentialsForOwner, listRegistryForRunner,
+  createCredential, deleteCredential, getCredentialForOwner, listCredentialsForOwner, listRegistryForRunner,
   readCredentialValue, registerExternallyManaged, requestRegistration, setEnabled, setVisibility,
   storeCredentialValue, MAX_TEMPORARY_MS,
 } from './credential-service.ts'
@@ -109,6 +109,48 @@ describe('registration requests', () => {
     const rows = await db.select().from(schema.credentialAudit).where(orm.eq(schema.credentialAudit.credentialName, name))
     expect(rows.map((r) => r.action)).toContain('registration_requested')
     expect(rows[0]?.actor).toBe('runner:abc')
+  })
+})
+
+describe('direct owner dashboard creation', () => {
+  test('creates an active credential with encrypted value and audited metadata', async () => {
+    const { db, key, now } = await setup()
+    const name = uniqueName('PANEL')
+    const result = await createCredential(db, key, {
+      name, service: 'Cloudflare', purpose: 'Manage production DNS',
+      value: SECRET, lifetime: 'permanent', expiresAt: null, visible: true,
+      delivery: 'proxy', allowedHosts: ['api.cloudflare.com'],
+      authHeader: 'Authorization', authScheme: 'Bearer', now,
+    })
+    expect(result).toMatchObject({ ok: true, value: { name } })
+    if (!result.ok) return
+    const row = await getCredentialForOwner(db, result.value.id)
+    expect(row).toMatchObject({
+      name, service: 'Cloudflare', purpose: 'Manage production DNS',
+      status: 'active', visible: true, hasValue: true,
+      allowedHosts: ['api.cloudflare.com'], authHeader: 'Authorization', authScheme: 'Bearer',
+    })
+    const used = await readCredentialValue(db, key, name, now)
+    expect(used).toMatchObject({ ok: true, value: SECRET })
+    const audit = await db.select().from(schema.credentialAudit).where(orm.eq(schema.credentialAudit.credentialId, result.value.id))
+    expect(audit.map((entry) => entry.action)).toContain('credential_created')
+    expect(JSON.stringify(audit)).not.toContain(SECRET)
+  })
+
+  test('rejects unsafe hosts and duplicate names without storing a credential', async () => {
+    const { db, key, now } = await setup()
+    const name = uniqueName('PANEL')
+    const input = {
+      name, service: 'Custom API', purpose: 'Test custom provider',
+      value: SECRET, lifetime: 'permanent' as const, expiresAt: null,
+      visible: true, delivery: 'proxy' as const, allowedHosts: ['*.example.com'],
+      authHeader: 'Authorization', authScheme: 'Bearer' as const, now,
+    }
+    expect(await createCredential(db, key, input)).toMatchObject({ ok: false, error: 'invalid_hosts' })
+    expect(await db.select().from(schema.credential).where(orm.eq(schema.credential.name, name))).toHaveLength(0)
+    const safe = { ...input, allowedHosts: ['api.example.com'] }
+    expect(await createCredential(db, key, safe)).toMatchObject({ ok: true })
+    expect(await createCredential(db, key, safe)).toMatchObject({ ok: false, error: 'exists' })
   })
 })
 
