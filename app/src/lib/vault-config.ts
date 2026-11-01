@@ -146,8 +146,11 @@ export async function loadOwnerId(db: Db, e: VaultEnv): Promise<string | null> {
   return normalizeOwnerId(e.OWNER_GITHUB_ID) ?? normalizeOwnerId(await getSetting(db, OWNER_ID))
 }
 
-export async function saveGithubApp(db: Db, keys: VaultKeys, app: { clientId: string; clientSecret: string; ownerId: string; ownerLogin?: string }): Promise<void> {
+export async function saveGithubApp(db: Db, keys: VaultKeys, app: { clientId: string; clientSecret: string; ownerId: string; ownerLogin?: string }, expectedOwnerId: unknown): Promise<void> {
+  const expected = normalizeOwnerId(expectedOwnerId)
+  if (!expected) throw new Error('deployment owner is not provisioned')
   if (!normalizeOwnerId(app.ownerId)) throw new Error('invalid owner id')
+  if (app.ownerId !== expected) throw new Error('GitHub account does not match deployment owner')
   const sealed = await encryptCredentialValue(keys.encryptionKey, SECRET_AAD_ID, 1, app.clientSecret)
   const now = Date.now()
   // Claim the owner slot atomically: if two browsers finish setup at once, exactly
