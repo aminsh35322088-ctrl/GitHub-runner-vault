@@ -197,7 +197,7 @@ Sign in at `https://<origin>/login` with the owner GitHub account.
 You need a Cloudflare account and a GitHub account. No command line, no API token and no hand-made secrets.
 
 **1. Deploy** — press the button, sign in to Cloudflare, and when it asks for `SETUP_CODE` type any phrase of at least
-12 characters (write it down; you use it once).
+12 characters (write it down; you use it once). The Deploy Button targets the self-contained `app/` project, which includes its own database workspace and lockfile; it does not depend on files outside that directory.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/tree/main/app)
 

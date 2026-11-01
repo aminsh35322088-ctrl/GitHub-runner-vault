@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const dir = join(root, 'db/drizzle-app')
-const out = join(root, 'app/src/lib/schema-sql.generated.ts')
+const out = join(root, 'src/lib/schema-sql.generated.ts')
 
 function idempotent(statement) {
   return statement
