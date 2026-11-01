@@ -19,7 +19,6 @@ import {
 } from './lib/vault-config.ts'
 import { Button } from './components/ui/button'
 import { runnerApp } from './runner-api.ts'
-import { normalizeOwnerId } from './lib/owner.ts'
 import { cn } from './lib/utils'
 import { Badge } from './components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './components/ui/table'
