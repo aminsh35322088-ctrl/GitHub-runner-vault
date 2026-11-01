@@ -27,8 +27,8 @@ function testOutboundService(request: Request): Response {
 }
 
 export default defineConfig(async () => {
-  // Run before cloudflare() reads Wrangler config. This also covers the default
-  // Workers Builds deploy command (npx wrangler deploy), not only `pnpm build`.
+  // Workers Builds detects the package.json build script. Resolve the owner
+  // before creating cloudflare() so its generated runtime config includes the ID.
   const deploymentOwnerId = await injectDeployOwner()
   return {
     server: { port, strictPort: true },
