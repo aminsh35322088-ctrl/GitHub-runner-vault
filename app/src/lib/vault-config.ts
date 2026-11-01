@@ -175,30 +175,36 @@ export async function saveGithubApp(db: Db, keys: VaultKeys, app: { clientId: st
     }
   }
 
-  // Claim the GitHub App slot atomically. The owner ID itself is already pinned,
-  // so the app client ID is now the one-time setup marker.
+  // Claim the GitHub App slot and encrypted secret in one D1 batch. The
+  // pre-check allows recovery if the same app ID was written by an earlier
+  // interrupted attempt, while the unique key makes concurrent different apps
+  // race safely: only the winning ID and its secret can be stored.
   const existingClientId = await getSetting(db, GITHUB_CLIENT_ID)
-  if (existingClientId) throw new Error('This vault already has a sign-in app')
-  const claimed = await db.insert(schema.vaultSetting)
-    .values({ key: GITHUB_CLIENT_ID, value: app.clientId, updatedAt: Date.now() })
-    .onConflictDoNothing()
-    .returning({ key: schema.vaultSetting.key })
-  if (claimed.length === 0) {
-    const currentClientId = await getSetting(db, GITHUB_CLIENT_ID)
-    if (currentClientId !== app.clientId || await getSetting(db, GITHUB_CLIENT_SECRET)) {
-      throw new Error('This vault already has a sign-in app')
-    }
+  const existingSecret = await getSetting(db, GITHUB_CLIENT_SECRET)
+  if (existingClientId && existingClientId !== app.clientId) {
+    throw new Error('This vault already has a sign-in app')
   }
+  if (existingSecret) throw new Error('This vault already has a sign-in app')
 
   const sealed = await encryptCredentialValue(keys.encryptionKey, SECRET_AAD_ID, 1, app.clientSecret)
   const now = Date.now()
-  const upsert = (key: string, value: string) => db.insert(schema.vaultSetting)
-    .values({ key, value, updatedAt: now })
-    .onConflictDoUpdate({ target: schema.vaultSetting.key, set: { value, updatedAt: now } })
   await db.batch([
-    upsert(GITHUB_CLIENT_SECRET, JSON.stringify({ e: sealed.encrypted, i: sealed.iv })),
-    ...(app.ownerLogin && /^[A-Za-z0-9-]{1,39}$/.test(app.ownerLogin) ? [upsert(OWNER_LOGIN, app.ownerLogin)] : []),
+    db.insert(schema.vaultSetting)
+      .values({ key: GITHUB_CLIENT_ID, value: app.clientId, updatedAt: now })
+      .onConflictDoNothing(),
+    db.insert(schema.vaultSetting)
+      .values({ key: GITHUB_CLIENT_SECRET, value: JSON.stringify({ e: sealed.encrypted, i: sealed.iv }), updatedAt: now })
+      .onConflictDoNothing(),
   ])
+
+  if (await getSetting(db, GITHUB_CLIENT_ID) !== app.clientId || !await getSetting(db, GITHUB_CLIENT_SECRET)) {
+    throw new Error('This vault already has a sign-in app')
+  }
+  if (app.ownerLogin && /^[A-Za-z0-9-]{1,39}$/.test(app.ownerLogin)) {
+    await db.insert(schema.vaultSetting)
+      .values({ key: OWNER_LOGIN, value: app.ownerLogin, updatedAt: now })
+      .onConflictDoUpdate({ target: schema.vaultSetting.key, set: { value: app.ownerLogin, updatedAt: now } })
+  }
 }
 
 /** True once sign-in and an owner exist, whether from Worker secrets or from setup. */
