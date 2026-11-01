@@ -39,9 +39,14 @@ jobs:
           set -euo pipefail
           cd app
           WORKERS_CI=1 pnpm build
-          grep -Eq '"OWNER_GITHUB_ID": "[1-9][0-9]*"' wrangler.jsonc
-          cd ..
-          git checkout -- app/wrangler.jsonc
+          found=0
+          for output in dist .wrangler; do
+            if [[ -d "$output" ]] && grep -R -Eq '"OWNER_GITHUB_ID": "[1-9][0-9]*"' "$output"; then
+              found=1
+              break
+            fi
+          done
+          test "$found" -eq 1
 
       - name: Validate the standalone Deploy Button project
         shell: bash
