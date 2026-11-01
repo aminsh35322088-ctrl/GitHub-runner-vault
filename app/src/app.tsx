@@ -14,7 +14,7 @@ import { ensureSchema } from './lib/schema.ts'
 import { loadRunnerPolicyInput } from './lib/runner-policy.ts'
 import { presetForService } from './lib/presets.ts'
 import {
-  SETUP_STATE_COOKIE, SETUP_STATE_MAX_AGE_SECONDS, buildManifest, convertManifest, isConfigured, loadOwnerLogin, loadVaultKeys,
+  SETUP_STATE_COOKIE, SETUP_STATE_MAX_AGE_SECONDS, buildManifest, convertManifest, isConfigured, loadOwnerId, loadOwnerLogin, loadVaultKeys,
   newSetupState, saveGithubApp, setupStateMatches, type VaultEnv,
 } from './lib/vault-config.ts'
 import { Button } from './components/ui/button'
@@ -202,7 +202,7 @@ export const app = new Spiceflow()
     const db = getDb()
     const e = vaultEnv()
     const keys = await loadVaultKeys(db, e)
-    const expectedOwnerId = normalizeOwnerId(e.OWNER_GITHUB_ID)
+    const expectedOwnerId = await loadOwnerId(db, e)
     if (!expectedOwnerId) {
       return <Message title="Waiting for deployment verification" text="This vault stays locked until the Deploy to Cloudflare workflow verifies and provisions its GitHub owner. Reload this page after deployment finishes." />
     }
@@ -238,7 +238,7 @@ export const app = new Spiceflow()
     const keys = await loadVaultKeys(db, e)
     const origin = getRequestOrigin(request)
     if (await isConfigured(db, e, keys)) return new Response(null, { status: 303, headers: { Location: new URL('/setup', origin).toString() } })
-    if (!normalizeOwnerId(e.OWNER_GITHUB_ID)) return new Response(null, { status: 303, headers: { Location: new URL('/setup?error=provisioning', origin).toString(), 'Cache-Control': 'no-store' } })
+    if (!await loadOwnerId(db, e)) return new Response(null, { status: 303, headers: { Location: new URL('/setup?error=provisioning', origin).toString(), 'Cache-Control': 'no-store' } })
     const state = newSetupState()
     const manifest = buildManifest(origin, crypto.randomUUID().slice(0, 6))
     const attr = (v: string) => v.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -265,7 +265,7 @@ export const app = new Spiceflow()
     const origin = getRequestOrigin(request)
     const to = (q: string) => new Response(null, { status: 303, headers: { Location: new URL(q, origin).toString() } })
     if (await isConfigured(db, e, keys)) return to('/login')
-    const expectedOwnerId = normalizeOwnerId(e.OWNER_GITHUB_ID)
+    const expectedOwnerId = await loadOwnerId(db, e)
     if (!expectedOwnerId) return to('/setup?error=provisioning')
     const params = new URL(request.url).searchParams
     if (!setupStateMatches(request.headers.get('cookie'), params.get('state'))) return to('/setup?error=github')
