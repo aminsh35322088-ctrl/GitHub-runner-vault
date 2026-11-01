@@ -1,6 +1,4 @@
 import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 
 type GitHubRepository = {
   full_name?: string
@@ -16,30 +14,13 @@ function repositoryFromRemote(remote: string): { owner: string; repo: string } {
   return { owner: match[1], repo: match[2] }
 }
 
-function writeOwnerVar(config: string, ownerId: string): string {
-  const vars = config.match(/("vars"\s*:\s*)\{([\s\S]*?)\}/m)
-  if (!vars) throw new Error('wrangler.jsonc must contain a top-level vars object')
-
-  const ownerEntry = /("OWNER_GITHUB_ID"\s*:\s*)"[^"]*"/
-  let body: string
-  if (ownerEntry.test(vars[2])) {
-    body = vars[2].replace(ownerEntry, '$1"' + ownerId + '"')
-  } else {
-    const existing = vars[2].trim().replace(/,\s*$/, '')
-    body = existing
-      ? '\n' + existing + ',\n    "OWNER_GITHUB_ID": "' + ownerId + '"\n  '
-      : '\n    "OWNER_GITHUB_ID": "' + ownerId + '"\n  '
-  }
-  return config.replace(vars[0], vars[1] + '{' + body + '}')
-}
-
 /**
  * Workers Builds exposes WORKERS_CI=1. The Git origin belongs to the
  * repository that Cloudflare actually checked out (the deployer's copy or
  * an explicitly imported fork), so its GitHub owner is the deployment owner.
  */
-export async function injectDeployOwner(): Promise<void> {
-  if (process.env.WORKERS_CI !== '1') return
+export async function injectDeployOwner(): Promise<string | null> {
+  if (process.env.WORKERS_CI !== '1') return null
 
   const remote = execFileSync('git', ['remote', 'get-url', 'origin'], {
     encoding: 'utf8',
@@ -69,9 +50,6 @@ export async function injectDeployOwner(): Promise<void> {
     throw new Error('GitHub returned an invalid numeric repository owner ID')
   }
 
-  const configPath = resolve(process.cwd(), 'wrangler.jsonc')
-  const before = readFileSync(configPath, 'utf8')
-  const after = writeOwnerVar(before, ownerId)
-  if (after !== before) writeFileSync(configPath, after)
   console.log('[deploy-owner] bound GitHub user ID ' + ownerId + ' from ' + owner + '/' + repo)
+  return ownerId
 }
