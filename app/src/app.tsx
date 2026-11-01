@@ -196,7 +196,7 @@ export const app = new Spiceflow()
   })
 
   // ── Deployment-bound owner setup ──────────────────────────────────
-  // The deployment workflow provisions OWNER_GITHUB_ID before this flow is enabled.
+  // Workers Builds derives OWNER_GITHUB_ID from the checked-out GitHub repository before this flow is enabled.
   .page('/setup', async ({ request }) => {
     const db = getDb()
     const e = vaultEnv()
