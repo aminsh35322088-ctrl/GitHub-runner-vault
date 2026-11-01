@@ -7,7 +7,7 @@
 //    ENCRYPTION_KEY secrets (older deployments) keep working unchanged.
 //  - GitHub sign-in: created through GitHub's app-manifest flow from /setup. The
 //    client secret is stored encrypted; its creator must match the immutable owner
-//    ID provisioned by the Deploy to Cloudflare GitHub Actions bootstrap.
+//    ID derived by the Workers Builds repository bootstrap.
 //  - /setup stays locked until that deployment identity exists; visitors cannot
 //    claim ownership by arriving first.
 
