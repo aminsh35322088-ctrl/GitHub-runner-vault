@@ -11,7 +11,7 @@ import { env } from 'cloudflare:workers'
 import { getDb, getRequestOrigin, getSession } from './db.ts'
 import { loadVaultKeys, type VaultEnv } from './lib/vault-config.ts'
 import {
-  deleteCredential, getCredentialForOwner, registerExternallyManaged, setEnabled, setVisibility, storeCredentialValue, validateStoreInput,
+  createCredential, deleteCredential, getCredentialForOwner, registerExternallyManaged, setEnabled, setVisibility, storeCredentialValue, validateStoreInput,
 } from './lib/credential-service.ts'
 import { consumeEnrollmentLink, peekEnrollmentLink, releaseEnrollmentLink } from './lib/enrollment.ts'
 import { revokeRunnerSessions } from './lib/runner-session.ts'
@@ -42,6 +42,13 @@ const storeSchema = z.object({
 })
 export type StoreForm = z.input<typeof storeSchema>
 
+const createCredentialSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  service: z.string().trim().min(1).max(80),
+  purpose: z.string().trim().min(1).max(500),
+  form: storeSchema,
+})
+
 function toStoreInput(form: z.output<typeof storeSchema>, now: number) {
   return {
     value: form.value,
@@ -58,6 +65,16 @@ function toStoreInput(form: z.output<typeof storeSchema>, now: number) {
 
 async function key() {
   return (await loadVaultKeys(getDb(), env as unknown as VaultEnv)).encryptionKey
+}
+
+/** Create a credential directly from the authenticated owner dashboard. */
+export async function createCredentialAction(input: { name: string; service: string; purpose: string; form: StoreForm }) {
+  await requireOwner()
+  const parsed = createCredentialSchema.parse(input)
+  const now = Date.now()
+  const result = await createCredential(getDb(), await key(), { name: parsed.name, service: parsed.service, purpose: parsed.purpose, ...toStoreInput(parsed.form, now) })
+  if (!result.ok) fail(result)
+  return { ok: true as const, id: result.value.id, name: result.value.name }
 }
 
 /** Registration page submit: uses the one-time link, then stores the value. */
