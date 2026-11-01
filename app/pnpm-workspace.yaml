@@ -1,0 +1,7 @@
+packages:
+  - ./db
+
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true

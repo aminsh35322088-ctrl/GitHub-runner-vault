@@ -10,7 +10,14 @@ import { env } from 'cloudflare:workers'
 import { Spiceflow } from 'spiceflow'
 import { Head } from 'spiceflow/react'
 import { getDb, getAuth, getSession, getRequestOrigin, requirePageSession } from './db.ts'
-import { hasGithubOAuthConfig } from './lib/auth-config.ts'
+import { ensureSchema } from './lib/schema.ts'
+import { loadRunnerPolicyInput } from './lib/runner-policy.ts'
+import {
+  SETUP_COOKIE, buildManifest, consumeSetupState, convertManifest, isConfigured, issueSetupCookie, loadVaultKeys,
+  newSetupState, consumeSetupAttempt, saveGithubApp, setupCodeMatches, setupCodeStatus, setupCookieValid,
+  MIN_SETUP_CODE_LENGTH, type VaultEnv,
+} from './lib/vault-config.ts'
+import { Button } from './components/ui/button'
 import { runnerApp } from './runner-api.ts'
 import { cn } from './lib/utils'
 import { Badge } from './components/ui/badge'
@@ -120,7 +127,14 @@ function Message({ title, text }: { title: string; text: string }) {
   )
 }
 
+const vaultEnv = () => env as unknown as VaultEnv
+
 export const app = new Spiceflow()
+  // The vault creates its own tables on first request (no migration step).
+  .use(async (_ctx, next) => {
+    await ensureSchema(env.DB)
+    return next()
+  })
   .use(async ({ request }, next) => {
     const url = new URL(request.url)
     if (url.pathname.startsWith('/api/auth')) {
@@ -132,6 +146,7 @@ export const app = new Spiceflow()
   })
 
   .layout('/login', async ({ children, request }) => <Shell request={request}>{children}</Shell>)
+  .layout('/setup', async ({ children, request }) => <Shell request={request}>{children}</Shell>)
   .layout('/vault/*', async ({ children, request }) => <Shell request={request} signedIn>{children}</Shell>)
 
   .get('/', ({ request }) => Response.redirect(new URL('/vault', request.url).toString(), 302))
@@ -152,10 +167,8 @@ export const app = new Spiceflow()
     const redirectTo = safeRedirectPath(new URL(request.url).searchParams.get('redirect'))
     if (session) throw redirect(redirectTo)
     const { LoginButton } = await import('./components/login-button')
-    const githubOAuthConfigured = hasGithubOAuthConfig(env as unknown as {
-      GITHUB_CLIENT_ID?: string
-      GITHUB_CLIENT_SECRET?: string
-    })
+    const keys = await loadVaultKeys(getDb(), vaultEnv())
+    const githubOAuthConfigured = await isConfigured(getDb(), vaultEnv(), keys)
     return (
       <div className="flex justify-center py-24">
         <div className="text-center max-w-sm space-y-4">
@@ -165,10 +178,10 @@ export const app = new Spiceflow()
             <LoginButton callbackURL={redirectTo} />
           ) : (
             <div role="status" className="rounded-lg border border-border bg-muted/40 p-4 text-left space-y-2">
-              <p className="text-sm font-medium">GitHub sign-in is not configured yet.</p>
+              <p className="text-sm font-medium">This vault is not set up yet.</p>
               <p className="text-sm text-muted-foreground">
-                Add both <code>GITHUB_CLIENT_ID</code> and <code>GITHUB_CLIENT_SECRET</code> as encrypted
-                Worker secrets, then redeploy. The vault remains locked until OAuth is configured.
+                The person who deployed it finishes setup once on the <a className="underline" href="/setup">setup page</a>.
+                Until then the vault stays locked.
               </p>
             </div>
           )}
@@ -177,14 +190,112 @@ export const app = new Spiceflow()
     )
   })
 
+  // ── First-time setup ──────────────────────────────────────────────
+  .page('/setup', async ({ request }) => {
+    const db = getDb()
+    const e = vaultEnv()
+    const keys = await loadVaultKeys(db, e)
+    if (await isConfigured(db, e, keys)) {
+      return <Message title="Already set up" text="Sign-in is configured. Use the login page to open the vault." />
+    }
+    const status = setupCodeStatus(e)
+    if (status !== 'ok') {
+      return (
+        <Message
+          title="Choose a setup code first"
+          text={`Add a Worker secret named SETUP_CODE (any phrase of at least ${MIN_SETUP_CODE_LENGTH} characters) in the Cloudflare dashboard under Settings → Variables and Secrets, then reload this page.`}
+        />
+      )
+    }
+    const now = Date.now()
+    const failed = new URL(request.url).searchParams.get('error')
+    if (!(await setupCookieValid(keys.authSecret, request.headers.get('cookie'), now))) {
+      return (
+        <div className="max-w-sm mx-auto py-16 space-y-4">
+          <h1 className="text-xl font-semibold tracking-tight">Set up your vault</h1>
+          <p className="text-sm text-muted-foreground">Enter the setup code you chose when you deployed this vault.</p>
+          <form method="post" action="/setup/unlock" className="space-y-3">
+            <input name="code" type="password" required autoComplete="off" className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" aria-label="Setup code" />
+            <Button type="submit">Continue</Button>
+          </form>
+          {failed === 'code' && <p role="alert" className="text-sm text-destructive">That code was not accepted.</p>}
+          {failed === 'locked' && <p role="alert" className="text-sm text-destructive">Too many attempts. Try again in an hour.</p>}
+        </div>
+      )
+    }
+    const origin = getRequestOrigin(request)
+    const state = await newSetupState(db, now)
+    const manifest = buildManifest(origin, crypto.randomUUID().slice(0, 6))
+    return (
+      <div className="max-w-md mx-auto py-16 space-y-4">
+        <h1 className="text-xl font-semibold tracking-tight">Connect your GitHub account</h1>
+        <p className="text-sm text-muted-foreground">
+          One click creates a private GitHub App owned by you. It is used only so that you can sign in here; it asks for no repository access.
+          GitHub will show you the app before it is created. Whoever creates it becomes the vault's only owner.
+        </p>
+        {failed === 'github' && <p role="alert" className="text-sm text-destructive">GitHub setup did not complete. Try again.</p>}
+        <form method="post" action={`https://github.com/settings/apps/new?state=${state}`}>
+          <input type="hidden" name="manifest" value={JSON.stringify(manifest)} />
+          <Button type="submit">Create the GitHub App</Button>
+        </form>
+      </div>
+    )
+  })
+
+  .post('/setup/unlock', async ({ request }) => {
+    const db = getDb()
+    const e = vaultEnv()
+    const keys = await loadVaultKeys(db, e)
+    const origin = getRequestOrigin(request)
+    const to = (q: string) => new Response(null, { status: 303, headers: { Location: new URL(`/setup${q}`, origin).toString() } })
+    if (await isConfigured(db, e, keys)) return to('')
+    const now = Date.now()
+    if (!(await consumeSetupAttempt(db, keys.authSecret, now, request.headers.get('cf-connecting-ip')))) return to('?error=locked')
+    const form = await request.formData().catch(() => null)
+    if (!form || !(await setupCodeMatches(form.get('code'), e))) return to('?error=code')
+    const cookie = await issueSetupCookie(keys.authSecret, now)
+    const res = to('')
+    res.headers.append('Set-Cookie', `${SETUP_COOKIE}=${cookie.value}; Path=/; Max-Age=${cookie.maxAgeSeconds}; HttpOnly; Secure; SameSite=Lax`)
+    return res
+  })
+
+  .get('/setup/github/callback', async ({ request }) => {
+    const db = getDb()
+    const e = vaultEnv()
+    const keys = await loadVaultKeys(db, e)
+    const origin = getRequestOrigin(request)
+    const to = (q: string) => new Response(null, { status: 303, headers: { Location: new URL(q, origin).toString() } })
+    if (await isConfigured(db, e, keys)) return to('/login')
+    const now = Date.now()
+    if (!(await setupCookieValid(keys.authSecret, request.headers.get('cookie'), now))) return to('/setup')
+    const params = new URL(request.url).searchParams
+    if (!(await consumeSetupState(db, params.get('state'), now))) return to('/setup?error=github')
+    const converted = await convertManifest(params.get('code') ?? '')
+    if (!converted) return to('/setup?error=github')
+    await saveGithubApp(db, keys, converted)
+    const res = to('/login')
+    res.headers.append('Set-Cookie', `${SETUP_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`)
+    return res
+  })
+
   // ── Registry ──────────────────────────────────────────────────────
   .page('/vault', async ({ request }) => {
     await requirePageSession(request)
     const rows = await listCredentialsForOwner(getDb())
     const now = Date.now()
+    const runnerConfigured = (await loadRunnerPolicyInput(getDb())) !== null || Boolean((env as unknown as VaultEnv).RUNNER_REPOSITORY)
     return (
       <div className="space-y-4">
         <h1 className="text-lg font-semibold tracking-tight">Credentials</h1>
+        {!runnerConfigured && (
+          <div role="status" className="rounded-lg border border-border bg-muted/40 p-4 space-y-1">
+            <p className="text-sm font-medium">Next step: connect your runner repository</p>
+            <p className="text-sm text-muted-foreground">
+              Runners cannot reach the vault until you say which repository and workflow may.{' '}
+              <a className="underline" href="/vault/settings">Open settings</a>.
+            </p>
+          </div>
+        )}
         {rows.length === 0 ? (
           <p className="text-sm text-muted-foreground">Nothing registered yet. A model on the runner asks for a credential and gives you a one-time link.</p>
         ) : (
@@ -288,10 +399,23 @@ export const app = new Spiceflow()
 
   .page('/vault/settings', async ({ request }) => {
     await requirePageSession(request)
-    const { RevokeSessionsButton, AddExternalForm } = await import('./components/credential-actions.tsx')
+    const { RevokeSessionsButton, AddExternalForm, RunnerPolicyForm } = await import('./components/credential-actions.tsx')
+    const policy = await loadRunnerPolicyInput(getDb())
+    const fixedByEnv = Boolean((env as unknown as VaultEnv).RUNNER_REPOSITORY)
     return (
       <div className="space-y-8 max-w-2xl">
         <h1 className="text-lg font-semibold tracking-tight">Settings</h1>
+        <section className="space-y-2">
+          <h2 className="text-sm font-semibold">Runner repository</h2>
+          <p className="text-sm text-muted-foreground">
+            Only this repository's workflow, on this branch, can sign in as a runner. Pull-request runs are never accepted.
+          </p>
+          {fixedByEnv ? (
+            <p className="text-sm text-muted-foreground">This is fixed by the Worker's RUNNER_* variables and cannot be changed here.</p>
+          ) : (
+            <RunnerPolicyForm defaults={{ repository: policy?.repository ?? '', branch: policy?.branch ?? 'main', workflowFile: policy?.workflowFile ?? 'rdc-lab.yml', repositoryId: policy?.repositoryId ?? '' }} />
+          )}
+        </section>
         <section className="space-y-2">
           <h2 className="text-sm font-semibold">Runner sessions</h2>
           <p className="text-sm text-muted-foreground">Sessions last 30 minutes. Revoking invalidates every session issued so far, for example after a runner reset.</p>

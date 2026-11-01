@@ -5,8 +5,9 @@ import { Spiceflow, json } from 'spiceflow'
 import { z } from 'zod'
 import { env } from 'cloudflare:workers'
 import { getDb } from 'db'
-import { importEncryptionKey } from './lib/credential-crypto.ts'
-import { cachedJwksSource, policyFromEnv } from './lib/oidc.ts'
+import { loadVaultKeys, type VaultEnv } from './lib/vault-config.ts'
+import { cachedJwksSource } from './lib/oidc.ts'
+import { loadRunnerPolicy } from './lib/runner-policy.ts'
 import { deriveSessionKey } from './lib/runner-session.ts'
 import { createSession, registry, requestCredential, useCredential, type RunnerDeps } from './lib/runner-core.ts'
 import { getRequestOrigin } from './db.ts'
@@ -16,11 +17,13 @@ const jwks = cachedJwksSource()
 async function buildDeps(request: Request): Promise<RunnerDeps> {
   const e = env as unknown as Record<string, unknown>
   const origin = getRequestOrigin(request)
+  const db = getDb()
+  const keys = await loadVaultKeys(db, e as VaultEnv)
   return {
-    db: getDb(),
-    encryptionKey: await importEncryptionKey(e.ENCRYPTION_KEY),
-    sessionKey: await deriveSessionKey(e.BETTER_AUTH_SECRET),
-    policy: policyFromEnv(e, origin),
+    db,
+    encryptionKey: keys.encryptionKey,
+    sessionKey: await deriveSessionKey(keys.authSecret),
+    policy: await loadRunnerPolicy(db, e, origin),
     jwks,
     origin,
     fetchFn: fetch,

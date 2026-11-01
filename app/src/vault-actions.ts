@@ -8,13 +8,14 @@
 import { z } from 'zod'
 import { getActionRequest } from 'spiceflow'
 import { env } from 'cloudflare:workers'
-import { getDb, getSession } from './db.ts'
-import { importEncryptionKey } from './lib/credential-crypto.ts'
+import { getDb, getRequestOrigin, getSession } from './db.ts'
+import { loadVaultKeys, type VaultEnv } from './lib/vault-config.ts'
 import {
   deleteCredential, getCredentialForOwner, registerExternallyManaged, setEnabled, setVisibility, storeCredentialValue, validateStoreInput,
 } from './lib/credential-service.ts'
 import { consumeEnrollmentLink, peekEnrollmentLink, releaseEnrollmentLink } from './lib/enrollment.ts'
 import { revokeRunnerSessions } from './lib/runner-session.ts'
+import { DEFAULT_EVENTS, resolveRepositoryId, saveRunnerPolicy } from './lib/runner-policy.ts'
 
 async function requireOwner() {
   const session = await getSession(getActionRequest())
@@ -56,7 +57,7 @@ function toStoreInput(form: z.output<typeof storeSchema>, now: number) {
 }
 
 async function key() {
-  return importEncryptionKey((env as unknown as Record<string, unknown>).ENCRYPTION_KEY)
+  return (await loadVaultKeys(getDb(), env as unknown as VaultEnv)).encryptionKey
 }
 
 /** Registration page submit: uses the one-time link, then stores the value. */
@@ -137,4 +138,27 @@ export async function revokeRunnerSessionsAction() {
   await requireOwner()
   await revokeRunnerSessions(getDb(), Date.now())
   return { ok: true as const }
+}
+
+const runnerSchema = z.object({
+  repository: z.string().trim().max(140),
+  branch: z.string().trim().max(100),
+  workflowFile: z.string().trim().max(100),
+  /** Only needed for a private repository; public ones are looked up. */
+  repositoryId: z.string().trim().max(20).optional(),
+})
+export type RunnerForm = z.input<typeof runnerSchema>
+
+/** Settings: which repository/workflow the runner API trusts. */
+export async function saveRunnerPolicyAction(form: RunnerForm) {
+  await requireOwner()
+  const parsed = runnerSchema.parse(form)
+  const repositoryId = parsed.repositoryId || (await resolveRepositoryId(parsed.repository))
+  if (!repositoryId) {
+    throw new Error('Could not look up that repository. Check the name, or enter its numeric id (needed for private repositories).')
+  }
+  const audience = getRequestOrigin(getActionRequest())
+  await saveRunnerPolicy(getDb(), {
+    repository: parsed.repository, repositoryId, branch: parsed.branch, workflowFile: parsed.workflowFile, events: DEFAULT_EVENTS,
+  }, audience)
 }

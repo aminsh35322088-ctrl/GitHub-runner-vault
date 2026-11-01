@@ -1,8 +1,7 @@
 /// <reference types="vitest/config" />
 // Read D1 migration SQL files so they can be applied in the workerd setup file
-import path from 'node:path'
 import { cloudflare } from '@cloudflare/vite-plugin'
-import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-pool-workers'
+import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { spiceflowPlugin } from 'spiceflow/vite'
@@ -27,10 +26,6 @@ function testOutboundService(request: Request): Response {
 }
 
 export default defineConfig(async () => {
-  const migrations = process.env.VITEST
-    ? await readD1Migrations(path.join(__dirname, '../db/drizzle-app'))
-    : []
-
   return {
     server: { port, strictPort: true },
     clearScreen: false,
@@ -43,8 +38,7 @@ export default defineConfig(async () => {
             wrangler: { configPath: './wrangler.test.jsonc' },
             miniflare: {
               bindings: {
-                TEST_MIGRATIONS: migrations,
-                BETTER_AUTH_SECRET: 'test-secret-at-least-32-characters-long!!',
+                SETUP_CODE: 'correct horse battery staple',
               },
               outboundService: testOutboundService,
             },

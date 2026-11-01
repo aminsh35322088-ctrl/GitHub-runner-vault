@@ -1,2 +1,4 @@
-BETTER_AUTH_SECRET= # Required: openssl rand -base64 32
-ENCRYPTION_KEY= # Optional: openssl rand -base64 32 (if not set, derived from BETTER_AUTH_SECRET)
+# Pick any phrase of at least 12 characters. It proves you are the person who deployed this
+# vault when you first open it, and is not needed afterwards. Every other key is generated
+# by the vault itself.
+SETUP_CODE=

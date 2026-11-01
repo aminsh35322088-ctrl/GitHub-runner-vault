@@ -50,7 +50,7 @@ The runner is **not** a trust boundary. An agent may have elevated permissions a
 | Agent tricks the owner into a bad setup | Models only *propose* a name and setup notes. The **owner** chooses hosts, auth header, lifetime and visibility. Notes are shown as plain text with the real hostname next to each link. |
 | Someone else gets a runner session | Runner identity is a **GitHub OIDC token** pinned to each deployment's repository name and numeric id, exact ref, event and workflow. Pull-request events are refused. |
 | Stolen session | 30-minute sessions, rate limits, append-only audit log, and an owner-side **revoke all sessions** button. |
-| Someone else logs in to the owner UI | GitHub OAuth restricted to **one numeric account id**; cookie sessions only. |
+| Someone else logs in to the owner UI | Sign-in uses a **private GitHub App created by you** and is restricted to **one numeric account id** (the app's creator); cookie sessions only. |
 | Agent edits the vault code | The vault runs as a separate Cloudflare Worker. |
 
 What the vault does **not** protect against: an agent that is allowed to call an approved host can do anything that token
@@ -107,9 +107,9 @@ One flat registry; a credential has these properties:
 hiding, deleting or expiry takes effect on the very next request. A missing, hidden, disabled or expired credential all
 answer the same `unavailable` (no probing for hidden names).
 
-**Encryption.** Values are AES-256-GCM encrypted with `ENCRYPTION_KEY` (mandatory, exactly 32 random bytes, base64). The
-authenticated data binds each ciphertext to `credential:{id}:v{keyVersion}`, so a ciphertext copied to another row will
-not decrypt. There is no derived or fallback key.
+**Encryption.** Values are AES-256-GCM encrypted with a 32-byte key derived (HKDF) from a random master key the vault
+generates on first use. The authenticated data binds each ciphertext to `credential:{id}:v{keyVersion}`, so a ciphertext
+copied to another row will not decrypt. See [Where the key lives](#where-the-key-lives) for the trade-off.
 
 **Setup documentation** attached by a model is validated against a strict schema (unknown keys rejected, size limits,
 https-only links with public hostnames, control and bidi characters stripped) and rendered as plain text. It must state
@@ -194,113 +194,60 @@ Sign in at `https://<origin>/login` with the owner GitHub account.
 
 ## Deployment
 
-Prerequisites: Node.js 24+, pnpm 12+, a Cloudflare account, and a GitHub account.
-The deployment helper uses Wrangler for Cloudflare authentication. Set `GH_TOKEN` (or `GITHUB_TOKEN`) only when
-the runner repository is private and GitHub's unauthenticated API cannot read its metadata.
+You need a Cloudflare account and a GitHub account. No command line, no API token and no hand-made secrets.
 
-**1. Install and authenticate**
+**1. Deploy** — press the button, sign in to Cloudflare, and when it asks for `SETUP_CODE` type any phrase of at least
+12 characters (write it down; you use it once). The Deploy Button targets the self-contained `app/` project, which includes its own database workspace and lockfile; it does not depend on files outside that directory.
 
-```bash
-pnpm install --frozen-lockfile
-cd app
-pnpm exec wrangler login
-cd ..
-```
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/tree/main/app)
 
-**2. Deploy interactively**
+Cloudflare creates the Worker and its D1 database in your account. The Worker creates its own tables on the first
+request, so there is no migration step.
 
-```bash
-pnpm vault:deploy
-```
+**2. Connect GitHub** — open your Worker's URL (`https://<name>.<you>.workers.dev`), enter the setup code, and press
+*Create the GitHub App*. GitHub shows you the app it is about to create; confirm. The vault stores the sign-in
+credentials encrypted and records you as the only owner. From then on `/setup` is closed.
 
-The first run explicitly asks for the Worker name, owner GitHub username, trusted runner repository, exact branch,
-workflow file and allowed event types; none are silently inferred from this source repository. It resolves the GitHub
-owner/repository numeric IDs through the GitHub API (for a private repository,
-provide a GitHub token through `GH_TOKEN` or enter the repository ID when prompted).
+**3. Choose your runner repository** — sign in, open *Settings → Runner repository* and enter the repository, branch and
+workflow file that may use the vault (for example `you/your-runner-repo`, `main`, `rdc-lab.yml`). Public repositories are
+looked up for you; for a private one, also enter its numeric repository id. Pull-request runs are never accepted.
 
-The helper creates an ignored local Wrangler config and creates (or reuses) the D1 database named `<WORKER_NAME>-db`,
-applies migrations, builds with that config, deploys the Worker and generates two cryptographic secrets. It never writes
-installation values into tracked source files. Re-run with `pnpm vault:deploy -- --configure` to change the trust configuration.
+**4. Point the runner at it** — set the Actions variable `VAULT_URL` (or `RUNNER_VAULT_URL`, depending on your workflow)
+to the Worker URL and install `client/vault.mjs` (see [Runner client](#runner-client)).
 
-### Non-interactive CI deployment
+Deploying from a terminal instead: `cd app && pnpm install && pnpm deploy` (needs `wrangler login`). `SETUP_CODE` can be set with
+`pnpm exec wrangler secret put SETUP_CODE` from `app/`.
 
-Trusted CI can run the same private-source deployment path without prompts:
+### Where the key lives
 
-```bash
-pnpm vault:deploy -- --non-interactive
-```
+By default the master key is generated by the Worker and stored in the same D1 database as the encrypted values, so
+nobody has to create or paste a key. That protects against anything that sees ciphertext but not the key *in use* (for
+example a copied credential row), but **not** against someone who can read the whole D1 database. If that matters to you,
+add a Worker secret `VAULT_MASTER_KEY` (32 random bytes, base64: `openssl rand -base64 32`) **before storing your first
+credential**; it takes precedence and the database copy is never used. Changing the master key later makes existing
+values undecryptable, so re-enter them.
 
-It requires `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `GH_TOKEN`, `VAULT_BETTER_AUTH_SECRET`,
-`VAULT_ENCRYPTION_KEY`, and the following installation settings:
+Existing deployments that already have `BETTER_AUTH_SECRET` and `ENCRYPTION_KEY` secrets keep using them unchanged.
 
-- `VAULT_DEPLOY_WORKER_NAME`
-- `VAULT_DEPLOY_OWNER_GITHUB_USERNAME`
-- `VAULT_DEPLOY_RUNNER_REPOSITORY`
-- `VAULT_DEPLOY_BRANCH`
-- `VAULT_DEPLOY_WORKFLOW_FILE`
-- `VAULT_DEPLOY_ALLOWED_EVENTS` (comma-separated; pull-request events are rejected)
-- `VAULT_DEPLOY_PUBLIC_ORIGIN` (optional)
+### Starting over
 
-The auth and encryption secrets must be persistent across deployments. The deploy helper discovers an existing D1
-by the exact `<WORKER_NAME>-db` name and reuses it; it creates the database only when no exact match exists. If D1
-listing fails or returns an unexpected response, deployment stops rather than risking an accidental duplicate DB.
-
-The local files `app/wrangler.local.jsonc` and `.vault.secrets.json` are private installation state and are ignored by
-Git. Back up `.vault.secrets.json` securely: losing `ENCRYPTION_KEY` makes stored credentials unrecoverable. Never
-commit either file.
-
-**3. Configure GitHub owner login**
-
-After deployment, Wrangler prints the Worker URL. Create a GitHub OAuth App (GitHub → Settings → Developer settings
-→ OAuth Apps → New) with:
-
-- Homepage URL: the deployed Worker origin
-- Authorization callback URL: `<WORKER_ORIGIN>/api/auth/callback/github`
-
-Then set the OAuth credentials as Worker secrets:
-
-```bash
-cd app
-pnpm exec wrangler secret put GITHUB_CLIENT_ID --config wrangler.local.jsonc
-pnpm exec wrangler secret put GITHUB_CLIENT_SECRET --config wrangler.local.jsonc
-cd ..
-```
-
-The owner GitHub account entered during deployment is the only account allowed to sign in.
-
-**4. Connect the runner repository**
-
-Set the repository Actions variable `VAULT_URL` to the deployed Worker origin. The trusted workflow must request an
-OIDC token with `permissions: id-token: write`; only the repository, numeric repository ID, ref, event and exact
-workflow reference configured during deployment are accepted. Pull-request events are rejected.
-
-**5. Verify**
-
-```bash
-curl -i -X POST "$VAULT_URL/api/runner/session"
-```
-
-Without an OIDC bearer token, the expected response is `401`. A `503 vault_not_configured` indicates a missing
-installation setting or secret. Sign in at `<WORKER_ORIGIN>/login` after configuring the GitHub OAuth App.
+If sign-in is misconfigured, delete the sign-in settings and open `/setup` again (D1 console):
+`DELETE FROM vault_setting WHERE key IN ('github_client_id','github_client_secret','owner_github_id');`
+Stored credentials are not touched.
 
 ## Configuration reference
 
-All installation-specific values are supplied by the interactive deploy command and kept in the ignored local
-`app/wrangler.local.jsonc` file. No per-account values belong in the tracked Wrangler config.
+Everything below is optional. A normal deployment sets only `SETUP_CODE`; the rest is configured in the UI.
 
-| Name | Kind | Required | Notes |
-| --- | --- | --- | --- |
-| `PUBLIC_ORIGIN` | var | no | Optional canonical HTTPS origin for a custom domain. By default, the Worker uses the actual request origin. |
-| `OWNER_GITHUB_ID` | var | yes | Numeric GitHub user ID resolved from the username entered during setup. |
-| `RUNNER_REPOSITORY` | var | yes | Exact `owner/name` of the trusted Actions repository. |
-| `RUNNER_REPOSITORY_ID` | var | yes | Numeric GitHub repository ID; prevents name-reuse impersonation. |
-| `RUNNER_ALLOWED_REFS` | var | yes | Comma-separated exact refs accepted for OIDC. |
-| `RUNNER_ALLOWED_EVENTS` | var | yes | Comma-separated allowed event names; pull-request events are rejected. |
-| `RUNNER_ALLOWED_WORKFLOW_REFS` | var | yes | Exact GitHub `job_workflow_ref` allowlist. |
-| `BETTER_AUTH_SECRET` | secret | yes | Generated automatically and uploaded by the deploy helper. |
-| `ENCRYPTION_KEY` | secret | yes | Generated automatically; 32 random bytes, base64. Back it up securely. |
-| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | secret | yes for owner login | Created after deployment in a GitHub OAuth App and uploaded manually. |
-| `DB` | D1 binding | yes | Created and bound automatically by the deploy helper for each installation. |
+| Name | Kind | Notes |
+| --- | --- | --- |
+| `SETUP_CODE` | secret | Phrase (12+ characters) that lets you run first-time setup. Unused afterwards. |
+| `VAULT_MASTER_KEY` | secret | Keeps the key out of D1 (see above). |
+| `PUBLIC_ORIGIN` | var | Canonical HTTPS origin for a custom domain. By default the actual request origin is used. |
+| `OWNER_GITHUB_ID`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | var / secrets | Override the values `/setup` stores (for example to use your own OAuth app). |
+| `RUNNER_REPOSITORY`, `RUNNER_REPOSITORY_ID`, `RUNNER_ALLOWED_REFS`, `RUNNER_ALLOWED_EVENTS`, `RUNNER_ALLOWED_WORKFLOW_REFS` | vars | Fix the runner policy in configuration; then the Settings form is read-only. |
+| `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY` | secrets | Legacy explicit keys; both must be set to be used. |
+| `DB` | D1 binding | Created automatically on deploy. |
 
 ## Operations
 
@@ -309,21 +256,21 @@ All installation-specific values are supplied by the interactive deploy command 
 - **Disable quickly:** *Disable* or *Hide* takes effect on the next request.
 - **Delete:** destroys the stored ciphertext; the audit trail stays.
 - **Audit log:** `/vault/audit`. Rows contain runner identity, credential, result and sanitized request metadata. Caller-controlled purpose, body, headers, names that fail validation and secret values are not persisted.
-- **Rotating `ENCRYPTION_KEY`:** not automated. Re-enter the credentials after changing the key (old ciphertexts will not decrypt).
-- **Backups:** D1 holds only ciphertext and metadata. Back up `ENCRYPTION_KEY` separately.
+- **Rotating the key:** not automated. Re-enter the credentials after changing `VAULT_MASTER_KEY` (old ciphertexts will not decrypt).
+- **Backups:** D1 holds ciphertext and metadata (and, unless you set `VAULT_MASTER_KEY`, the master key). Treat exports like secrets.
 
 ## Development and tests
 
 ```bash
 pnpm install
 pnpm typecheck                       # tsc
-pnpm test                            # 208 workerd tests + client tests
-cd app && CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH=./wrangler.local.jsonc npx vite dev  # after first-time setup
+pnpm test                            # workerd tests + client tests
+cd app && printf 'SETUP_CODE=a local setup phrase\\n' > .dev.vars && pnpm dev   # then open /setup
 ```
 
-`app/.dev.vars` (git-ignored) supplies local `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY`, and GitHub OAuth values.
-The local Wrangler config is generated by the first-time deployment setup and contains that installation's D1 binding
-and trusted GitHub settings; do not copy it into source control.
+`app/.dev.vars` is git-ignored. Local dev uses a local D1; the schema is created on first request like in production.
+The table SQL lives in `app/db/drizzle-app/*.sql`; after editing it run `pnpm --filter runner-vault-app embed-schema` (tests fail if the generated
+`app/src/lib/schema-sql.generated.ts` is stale).
 
 Run `pnpm validate` for typecheck, tests and production build. Tests cover: encryption and AAD binding, availability rules, one-time links (including concurrent use and concurrent creation), documentation
 validation, OIDC verification (bad algorithm, issuer, audience, expiry, repository, ref, event, tampering, JWKS refresh and
@@ -332,9 +279,9 @@ redaction in every encoding, timeouts) and the runner API end to end (including 
 
 ## Known limits and roadmap
 
-- Runner delivery is proxy-only. Legacy `inject` rows are disabled and hidden by migration 0013.
+- Runner delivery is proxy-only. Legacy `inject` rows are disabled and hidden.
 - OIDC proves the workflow run, not a single process; any process able to read the job's OIDC request variables can request a run-bound token. Keep the workflow job trusted and minimize untrusted code in it.
-- No automatic `ENCRYPTION_KEY` rotation tooling.
+- No automatic key rotation tooling.
 - No GitHub-side validation test for stored tokens (`validation` stays `not_tested`).
 - Suggested hardening after first deploy: a branch ruleset on `main` of this repository and Cloudflare Access in front of `/vault/*` as a second owner gate.
 - Runner integration is deployment-specific: install client/vault.mjs in the trusted repository and set its VAULT_URL Actions variable. Pin the client revision and review upgrades.
@@ -343,10 +290,10 @@ redaction in every encoding, timeouts) and the runner API end to end (including 
 
 | Path | What |
 | --- | --- |
-| `app/` | The Worker: Spiceflow (React Server Components) owner UI, runner API, BetterAuth GitHub login |
+| `app/` | The Worker: Spiceflow (React Server Components) owner UI, runner API, BetterAuth GitHub login, first-time `/setup` |
 | `app/src/lib/` | Crypto, policy, docs schema, enrollment links, credential service, OIDC, sessions, proxy, runner core |
 | `app/src/runner-api.ts` | HTTP routes for runners; logic is in `lib/runner-core.ts` |
-| `db/` | Drizzle schema and D1 migrations (`db/drizzle-app/`) |
+| `db/` | Drizzle schema (types) and the baseline SQL (`db/drizzle-app/`), embedded into the Worker |
 | `client/vault.mjs` | Zero-dependency runner client |
 | `docs/runner-usage.md` | Runner-side usage and `doc.json` schema |
 | `SECURITY.md`, `NOTICE.md` | Trust model, upstream credit |

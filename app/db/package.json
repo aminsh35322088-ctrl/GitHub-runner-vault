@@ -1,0 +1,27 @@
+{
+  "name": "db",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Drizzle schema (types) and baseline SQL for the vault D1 database",
+  "exports": {
+    ".": {
+      "workerd": "./src/workerd.ts",
+      "default": "./src/node.ts"
+    },
+    "./package.json": "./package.json",
+    "./schema": "./src/app-schema.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "drizzle-orm": "1.0.0-rc.1",
+    "typescript": "^6.0.2",
+    "ulid": "^3.0.2"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.1"
+  }
+}
