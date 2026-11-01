@@ -178,12 +178,11 @@ export async function isConfigured(db: Db, e: VaultEnv, keys: VaultKeys): Promis
 
 // ── setup state ───────────────────────────────────────────────────
 //
-// There is no setup password. Whoever completes GitHub's manifest flow first
-// becomes the owner, so open the new vault's URL right after deploying. The flow
-// is bound to one browser: /setup hands out a random state in an HttpOnly cookie
-// and GitHub must return the same value. GitHub itself authenticates the creator
-// (their numeric id becomes the owner id), and a vault claimed by someone else
-// is visible at once because /login and /setup show who owns it.
+// The deployment workflow provisions the expected numeric GitHub owner ID before
+// /setup is enabled. The manifest callback must return that exact creator ID. The
+// flow is also bound to one browser: /setup hands out a random state in an HttpOnly
+// cookie and GitHub must return the same value. The atomic database claim is a
+// second guard; it is not used to choose the owner.
 
 export const SETUP_STATE_COOKIE = 'vault_setup_state'
 export const SETUP_STATE_MAX_AGE_SECONDS = 30 * 60
