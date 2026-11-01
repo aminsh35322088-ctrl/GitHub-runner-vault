@@ -201,7 +201,7 @@ You need a Cloudflare account and a GitHub account. No command line, no API toke
 
 **1. Deploy** — press the button and authorize GitHub and Cloudflare. Cloudflare clones the project into your
 GitHub account and deploys it through Workers Builds. During the build, the project reads the actual Git origin,
-resolves the repository owner's numeric GitHub ID through GitHub's API, and injects it as the Worker's
+reads the repository owner's numeric ID from GitHub's public repository-page metadata (avoiding the unauthenticated REST API rate limit), and injects it as the Worker's
 `OWNER_GITHUB_ID` runtime variable. The first Worker request pins that ID in D1. No GitHub Actions setup, manual
 owner ID, setup code, or extra Cloudflare token is required. Use a personal GitHub account; organization-owned repositories are intentionally rejected.
 
