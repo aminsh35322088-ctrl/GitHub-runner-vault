@@ -11,7 +11,7 @@ be able to read it.*
   token, makes the call, and returns the response. **The token never reaches the runner.**
 - The agent can **ask the owner** to register a missing credential: it gets a **one-time link** to give to the owner, who
   opens a web page, reads the agent's setup notes, chooses the rules and pastes the token.
-- The **owner** has a small web UI to see, hide, disable, expire, replace and delete credentials, and to read an audit log.
+- The **owner** can create credentials directly from a searchable, categorized provider catalog in the dashboard (or choose a custom service), as well as see, hide, disable, expire, replace and delete credentials and read an audit log.
 
 > Seeded from [remorses/sigillo](https://github.com/remorses/sigillo) (see `NOTICE.md`). The multi-tenant secrets-manager
 > parts were removed; what remains is a single-owner registry with a proxy and a runner API.
@@ -82,9 +82,10 @@ Registering a new credential:
 
 1. The agent finds the name missing in `list` and runs `request` with a setup document.
 2. The vault creates a **pending, hidden** entry and returns a **one-time link** (about 15 minutes, works once).
-3. The owner opens the link (must be signed in with GitHub), reads the notes, sets **allowed hosts, auth header/scheme,
+3. The owner opens the link (must be signed in with GitHub), reads the notes, reviews **allowed hosts, auth header/scheme,
    lifetime, expiry and visibility**, pastes the token and saves. The link is consumed atomically.
-4. The credential becomes **Active**; the agent sees it in `list` and can `use` it.
+4. Alternatively, the owner can create the credential directly from **Add credential** in the dashboard without a runner request.
+5. The credential becomes **Active**; the agent sees it in `list` and can `use` it.
 
 ## Credential model
 
@@ -181,6 +182,8 @@ Exit codes: `0` ok, `2` vault refused, `3` upstream HTTP error. See `docs/runner
 should expect. The trusted runner workflow must request `permissions: id-token: write` and set `VAULT_URL` to the deployed Worker origin.
 
 ## Owner UI
+
+From the dashboard, choose **Add credential** to browse the built-in provider catalog (Cloudflare, Railway, GitHub, Vercel, Netlify, DigitalOcean, OpenAI, Anthropic, Groq, Mistral, Hugging Face, Stripe, Sentry, Supabase, Pinecone and Slack), search by provider/category, or add a custom service. Known providers prefill their documented API host and auth header; the owner can inspect and edit these values before creating a credential. This path works independently of any runner/model registration request. The runner registration flow uses the same provider catalog for its defaults.
 
 Sign in at `https://<origin>/login` with the owner GitHub account.
 
