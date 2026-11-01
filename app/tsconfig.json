@@ -4,14 +4,27 @@
     "rootDir": "src",
     "outDir": "dist",
     "noEmit": true,
-    "lib": ["ESNext", "DOM"],
-    "types": ["@cloudflare/vitest-pool-workers/types"],
+    "lib": [
+      "ESNext",
+      "DOM"
+    ],
+    "types": [
+      "@cloudflare/vitest-pool-workers/types"
+    ],
     "module": "esnext",
     "moduleResolution": "bundler",
-    "customConditions": ["workerd"],
+    "customConditions": [
+      "workerd"
+    ],
     "paths": {
-      "sigillo-app/src/*": ["./src/*"]
-    }
+      "sigillo-app/src/*": [
+        "./src/*"
+      ]
+    },
+    "allowImportingTsExtensions": true
   },
-  "include": ["src", "worker-configuration.d.ts"]
+  "include": [
+    "src",
+    "worker-configuration.d.ts"
+  ]
 }
