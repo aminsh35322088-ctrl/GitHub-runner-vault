@@ -249,7 +249,8 @@ Everything below is optional. A normal deployment sets nothing; everything is co
 | --- | --- | --- |
 | `VAULT_MASTER_KEY` | secret | Keeps the key out of D1 (see above). |
 | `PUBLIC_ORIGIN` | var | Canonical HTTPS origin for a custom domain. By default the actual request origin is used. |
-| `OWNER_GITHUB_ID`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | var / secrets | Override the values `/setup` stores (for example to use your own OAuth app). |
+| `OWNER_GITHUB_ID` | secret | Provisioned automatically by the Deploy workflow from the GitHub repository owner's numeric ID. Do not set it from user input. |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | vars / secrets | Optional override for the private GitHub sign-in App created through `/setup`. |
 | `RUNNER_REPOSITORY`, `RUNNER_REPOSITORY_ID`, `RUNNER_ALLOWED_REFS`, `RUNNER_ALLOWED_EVENTS`, `RUNNER_ALLOWED_WORKFLOW_REFS` | vars | Fix the runner policy in configuration; then the Settings form is read-only. |
 | `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY` | secrets | Legacy explicit keys; both must be set to be used. |
 | `DB` | D1 binding | Created automatically on deploy. |
