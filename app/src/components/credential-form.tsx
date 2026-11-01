@@ -9,7 +9,7 @@ import { ErrorBoundary } from 'spiceflow/react'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { NativeSelect } from './ui/native-select'
-import { submitRegistrationAction, replaceCredentialAction, type StoreForm } from '../vault-actions.ts'
+import { createCredentialAction, submitRegistrationAction, replaceCredentialAction, type StoreForm } from '../vault-actions.ts'
 
 export type FormDefaults = {
   delivery: 'proxy'
@@ -30,7 +30,7 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   )
 }
 
-export function CredentialForm({ mode, token, id, defaults, preset = null }: { mode: 'register' | 'replace'; token?: string; id?: string; defaults: FormDefaults; preset?: { label: string } | null }) {
+export function CredentialForm({ mode, token, id, defaults, preset = null }: { mode: 'create' | 'register' | 'replace'; token?: string; id?: string; defaults: FormDefaults; preset?: { label: string; docsUrl?: string } | null }) {
   const [lifetime, setLifetime] = useState(defaults.lifetime)
   const [errorMessage, setErrorMessage] = useState('')
   const [saving, setSaving] = useState(false)
@@ -64,9 +64,17 @@ export function CredentialForm({ mode, token, id, defaults, preset = null }: { m
               authHeader: String(formData.get('authHeader') ?? 'Authorization'),
               authScheme: String(formData.get('authScheme') ?? 'Bearer') as StoreForm['authScheme'],
             }
-            if (mode === 'register') await submitRegistrationAction(token!, form)
+            if (mode === 'create') {
+              const created = await createCredentialAction({
+                name: String(formData.get('name') ?? ''),
+                service: String(formData.get('service') ?? ''),
+                purpose: String(formData.get('purpose') ?? ''),
+                form,
+              })
+              window.location.assign(`/vault/credentials/${created.id}`)
+            } else if (mode === 'register') await submitRegistrationAction(token!, form)
             else await replaceCredentialAction(id!, form)
-            window.location.assign('/vault')
+            if (mode !== 'create') window.location.assign('/vault')
           } catch {
             setErrorMessage('The credential could not be saved. Check the values and link status, then try again.')
           } finally {
@@ -74,6 +82,21 @@ export function CredentialForm({ mode, token, id, defaults, preset = null }: { m
           }
         }}
       >
+        {mode === 'create' && (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Credential name" hint="Unique name exposed to authorized runners.">
+              <Input name="name" required maxLength={80} placeholder="e.g. production-cloudflare" className="w-full font-mono" />
+            </Field>
+            <Field label="Service / provider">
+              <Input name="service" required maxLength={80} defaultValue={preset?.label ?? ''} placeholder="e.g. My API" className="w-full" />
+            </Field>
+            <div className="sm:col-span-2">
+              <Field label="Purpose" hint="What should this credential be used for?">
+                <Input name="purpose" required maxLength={500} placeholder="e.g. Manage DNS records for the production zone" className="w-full" />
+              </Field>
+            </div>
+          </div>
+        )}
         <Field label="Secret value" hint="Write-only. It is encrypted immediately and cannot be shown again.">
           <Input name="value" type="password" required autoComplete="new-password" spellCheck={false} className="w-full font-mono" />
         </Field>
@@ -91,7 +114,7 @@ export function CredentialForm({ mode, token, id, defaults, preset = null }: { m
         </div>
 
         {/* Known services come pre-filled; anything unfamiliar opens for the owner to decide. */}
-        <details open={!preset && mode === 'register'} className="rounded-md border border-border p-3 space-y-4">
+        <details open={!preset && (mode === 'register' || mode === 'create')} className="rounded-md border border-border p-3 space-y-4">
           <summary className="cursor-pointer text-sm font-medium">
             {preset ? `${preset.label}: ${defaults.allowedHosts.split('\n')[0]} (${defaults.authHeader}: ${defaults.authScheme}) — change` : 'Where this token may be used'}
           </summary>
@@ -122,7 +145,8 @@ export function CredentialForm({ mode, token, id, defaults, preset = null }: { m
         </label>
 
         {errorMessage && <p role="alert" aria-live="polite" className="text-sm text-destructive">{errorMessage}</p>}
-        <Button type="submit" disabled={saving}>{saving ? 'Saving…' : mode === 'register' ? 'Save and activate' : 'Replace value'}</Button>
+        {preset?.docsUrl && <p className="text-xs text-muted-foreground">Provider reference: <a className="underline" href={preset.docsUrl} target="_blank" rel="noopener noreferrer nofollow">official API documentation</a>. Review the settings before saving.</p>}
+        <Button type="submit" disabled={saving}>{saving ? 'Saving…' : mode === 'create' ? 'Review and create credential' : mode === 'register' ? 'Save and activate' : 'Replace value'}</Button>
       </form>
     </ErrorBoundary>
   )
