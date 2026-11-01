@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "vite dev",
-    "build": "node scripts/embed-schema.mjs --check && vite build",
+    "build": "node scripts/inject-deploy-owner.mjs && node scripts/embed-schema.mjs --check && vite build",
     "test": "node scripts/embed-schema.mjs --check && vitest run",
     "typecheck": "tsc --noEmit",
     "types": "wrangler types --env-file .dev.vars.example",
