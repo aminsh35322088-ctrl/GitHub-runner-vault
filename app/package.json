@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit",
     "types": "wrangler types --env-file .dev.vars.example",
     "embed-schema": "node scripts/embed-schema.mjs",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "validate": "pnpm -r typecheck && pnpm test && pnpm build"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
@@ -39,9 +40,6 @@
     "bindings": {
       "SETUP_CODE": {
         "description": "Choose a private phrase of at least 12 characters. It unlocks first-time owner setup once."
-      },
-      "VAULT_MASTER_KEY": {
-        "description": "Optional base64-encoded 32-byte master key. Set before storing credentials to keep the key outside D1."
       }
     }
   },
@@ -59,5 +57,6 @@
     "vite": "8.3.1",
     "vitest": "^4.1.10",
     "wrangler": "^4.114.0"
-  }
+  },
+  "packageManager": "pnpm@12.16.1"
 }

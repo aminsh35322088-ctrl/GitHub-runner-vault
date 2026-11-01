@@ -124,6 +124,15 @@ describe('setup gate', () => {
     expect(JSON.stringify(await db.select().from(schema.vaultSetting))).not.toContain(sourceIp)
   })
 
+  test('expired per-IP buckets are cleaned up', async () => {
+    const now = Date.now()
+    await consumeSetupAttempt(db, 'a'.repeat(40), now, '192.0.2.40')
+    await consumeSetupAttempt(db, 'a'.repeat(40), now + 60 * 60_000 + 1, '192.0.2.41')
+    const buckets = (await db.select().from(schema.vaultSetting))
+      .filter((row) => row.key.startsWith('setup_attempts_'))
+    expect(buckets).toHaveLength(1)
+  })
+
   test('concurrent setup attempts are counted atomically', async () => {
     const now = Date.now()
     const results = await Promise.all(Array.from({ length: 20 }, () =>

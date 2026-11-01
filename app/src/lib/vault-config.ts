@@ -203,6 +203,11 @@ export async function consumeSetupAttempt(db: Db, authSecret: string, now: numbe
   const identity = sourceIp?.trim() || 'unknown'
   const digest = new Uint8Array(await crypto.subtle.sign('HMAC', await hmacKey(authSecret), enc.encode(identity)))
   const suffix = Array.from(digest.subarray(0, 16), (b) => b.toString(16).padStart(2, '0')).join('')
+  // Remove expired per-IP buckets so address rotation cannot grow settings without bound.
+  await db.delete(schema.vaultSetting).where(orm.and(
+    orm.sql`substr(${schema.vaultSetting.key}, 1, 15) = 'setup_attempts_'`,
+    orm.lt(schema.vaultSetting.updatedAt, now - SETUP_FAILURE_WINDOW_MS),
+  ))
   const key = `setup_attempts_${suffix}`
   const storedValue = schema.vaultSetting.value
   const separator = orm.sql`instr(${storedValue}, ':')`

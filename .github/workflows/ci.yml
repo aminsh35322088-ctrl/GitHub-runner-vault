@@ -33,6 +33,16 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - name: Validate the standalone Deploy Button project
+        shell: bash
+        run: |
+          project="$(mktemp -d)"
+          trap 'rm -rf "$project"' EXIT
+          git archive HEAD app | tar -x -C "$project"
+          cd "$project/app"
+          pnpm install --frozen-lockfile
+          pnpm validate
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
