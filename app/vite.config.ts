@@ -6,6 +6,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { spiceflowPlugin } from 'spiceflow/vite'
 import { defineConfig } from 'vite'
+import { injectDeployOwner } from './scripts/inject-deploy-owner'
 
 const port = parseInt(process.env.PORT || '5188', 10)
 
@@ -26,6 +27,9 @@ function testOutboundService(request: Request): Response {
 }
 
 export default defineConfig(async () => {
+  // Run before cloudflare() reads Wrangler config. This also covers the default
+  // Workers Builds deploy command (npx wrangler deploy), not only `pnpm build`.
+  await injectDeployOwner()
   return {
     server: { port, strictPort: true },
     clearScreen: false,
