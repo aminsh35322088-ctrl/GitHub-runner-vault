@@ -67,6 +67,19 @@ export default defineConfig(async () => {
     },
     test: {
       setupFiles: ['./src/test-setup.ts'],
+      // Better Auth uses jose for GitHub OAuth/JWT handling. Bundle both through
+      // Vite's SSR optimizer so the Workers test runtime does not resolve jose's
+      // package-internal ESM imports through the pool's module fallback.
+      // See Cloudflare's Workers Vitest module-resolution guidance:
+      // https://developers.cloudflare.com/workers/testing/vitest-integration/known-issues/#module-resolution
+      deps: {
+        optimizer: {
+          ssr: {
+            enabled: true,
+            include: ['better-auth', 'better-auth-drizzle-adapter', 'jose'],
+          },
+        },
+      },
     },
   }
 })
