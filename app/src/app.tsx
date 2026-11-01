@@ -19,6 +19,7 @@ import {
 } from './lib/vault-config.ts'
 import { Button } from './components/ui/button'
 import { runnerApp } from './runner-api.ts'
+import { normalizeOwnerId } from './lib/owner.ts'
 import { cn } from './lib/utils'
 import { Badge } from './components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './components/ui/table'
@@ -201,6 +202,10 @@ export const app = new Spiceflow()
     const db = getDb()
     const e = vaultEnv()
     const keys = await loadVaultKeys(db, e)
+    const expectedOwnerId = normalizeOwnerId(e.OWNER_GITHUB_ID)
+    if (!expectedOwnerId) {
+      return <Message title="Waiting for deployment verification" text="This vault stays locked until the Deploy to Cloudflare workflow verifies and provisions its GitHub owner. Reload this page after deployment finishes." />
+    }
     if (await isConfigured(db, e, keys)) {
       const owner = await loadOwnerLogin(db)
       return (
@@ -215,10 +220,11 @@ export const app = new Spiceflow()
       <div className="max-w-md mx-auto py-16 space-y-4">
         <h1 className="text-xl font-semibold tracking-tight">Connect your GitHub account</h1>
         <p className="text-sm text-muted-foreground">
-          One click creates a private GitHub App owned by you. It is used only so that you can sign in here, and it asks for no repository access.
-          GitHub shows you the app before it is created. <strong>Whoever finishes this step first becomes the vault's only owner</strong>, so do it right after deploying.
+          This deployment is permanently bound to GitHub account ID <code>{expectedOwnerId}</code>. Create the private sign-in app with that same GitHub account. GitHub confirms the creator's numeric account ID; any other account is rejected.
         </p>
         {failed === 'github' && <p role="alert" className="text-sm text-destructive">GitHub setup did not complete. Try again.</p>}
+        {failed === 'owner_mismatch' && <p role="alert" className="text-sm text-destructive">This is not the GitHub account that owns the deployment repository. Switch accounts and try again.</p>}
+        {failed === 'provisioning' && <p role="status" className="text-sm text-muted-foreground">Owner verification is still being provisioned. Reload shortly.</p>}
         <form method="post" action="/setup/start">
           <Button type="submit">Create the GitHub App</Button>
         </form>
@@ -232,6 +238,7 @@ export const app = new Spiceflow()
     const keys = await loadVaultKeys(db, e)
     const origin = getRequestOrigin(request)
     if (await isConfigured(db, e, keys)) return new Response(null, { status: 303, headers: { Location: new URL('/setup', origin).toString() } })
+    if (!normalizeOwnerId(e.OWNER_GITHUB_ID)) return new Response(null, { status: 303, headers: { Location: new URL('/setup?error=provisioning', origin).toString(), 'Cache-Control': 'no-store' } })
     const state = newSetupState()
     const manifest = buildManifest(origin, crypto.randomUUID().slice(0, 6))
     const attr = (v: string) => v.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -258,12 +265,15 @@ export const app = new Spiceflow()
     const origin = getRequestOrigin(request)
     const to = (q: string) => new Response(null, { status: 303, headers: { Location: new URL(q, origin).toString() } })
     if (await isConfigured(db, e, keys)) return to('/login')
+    const expectedOwnerId = normalizeOwnerId(e.OWNER_GITHUB_ID)
+    if (!expectedOwnerId) return to('/setup?error=provisioning')
     const params = new URL(request.url).searchParams
     if (!setupStateMatches(request.headers.get('cookie'), params.get('state'))) return to('/setup?error=github')
     const converted = await convertManifest(params.get('code') ?? '')
     if (!converted) return to('/setup?error=github')
+    if (converted.ownerId !== expectedOwnerId) return to('/setup?error=owner_mismatch')
     try {
-      await saveGithubApp(db, keys, converted)
+      await saveGithubApp(db, keys, converted, expectedOwnerId)
     } catch {
       return to('/setup')
     }
