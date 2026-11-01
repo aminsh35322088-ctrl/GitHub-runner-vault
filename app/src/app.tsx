@@ -55,6 +55,7 @@ function Shell({ request, children, signedIn }: { request: Request; children: Re
             {signedIn && (
               <div className="flex items-center gap-4 text-sm text-muted-foreground">
                 <a href="/vault" className="hover:text-foreground">Credentials</a>
+                <a href="/vault/services" className="hover:text-foreground">Add credential</a>
                 <a href="/vault/audit" className="hover:text-foreground">Audit</a>
                 <a href="/vault/settings" className="hover:text-foreground">Settings</a>
                 <a href="/logout" className="hover:text-foreground">Sign out</a>
@@ -279,7 +280,7 @@ export const app = new Spiceflow()
     const runnerConfigured = (await loadRunnerPolicyInput(getDb())) !== null || Boolean((env as unknown as VaultEnv).RUNNER_REPOSITORY)
     return (
       <div className="space-y-4">
-        <h1 className="text-lg font-semibold tracking-tight">Credentials</h1>
+        <div className="flex items-center justify-between gap-3"><h1 className="text-lg font-semibold tracking-tight">Credentials</h1><a href="/vault/services" className="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground">+ Add credential</a></div>
         {!runnerConfigured && (
           <div role="status" className="rounded-lg border border-border bg-muted/40 p-4 space-y-1">
             <p className="text-sm font-medium">Next step: connect your runner repository</p>
@@ -290,7 +291,7 @@ export const app = new Spiceflow()
           </div>
         )}
         {rows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Nothing registered yet. A model on the runner asks for a credential and gives you a one-time link.</p>
+          <p className="text-sm text-muted-foreground">Nothing registered yet. Add a credential here, or let a model on the runner request one.</p>
         ) : (
           <Table>
             <TableHeader>
@@ -312,6 +313,21 @@ export const app = new Spiceflow()
         )}
       </div>
     )
+  })
+
+  // ── Owner-facing provider catalog and direct registration ─────────
+  .page('/vault/services', async ({ request }) => {
+    await requirePageSession(request)
+    const { ServiceCatalog } = await import('./components/service-catalog.tsx')
+    return <div className="space-y-5"><div><h1 className="text-lg font-semibold tracking-tight">Add a credential</h1><p className="text-sm text-muted-foreground mt-1">Choose a provider to prefill its API host and authentication style, or configure a custom service.</p></div><ServiceCatalog /></div>
+  })
+
+  .page('/vault/new', async ({ request }) => {
+    await requirePageSession(request)
+    const serviceId = new URL(request.url).searchParams.get('service') ?? ''
+    const preset = presetForService(serviceId)
+    const { CredentialForm } = await import('./components/credential-form.tsx')
+    return <div className="space-y-5 max-w-2xl"><div><a href="/vault/services" className="text-sm underline">← Provider catalog</a><h1 className="text-lg font-semibold tracking-tight mt-2">{preset ? `Configure ${preset.label}` : 'Configure a custom service'}</h1><p className="text-sm text-muted-foreground mt-1">Review the provider settings, enter the secret, and explicitly create the credential. The secret is write-only.</p></div><CredentialForm mode="create" preset={preset ? { label: preset.label, docsUrl: preset.docsUrl } : null} defaults={{ delivery: 'proxy', allowedHosts: preset?.hosts.join('\\n') ?? '', authHeader: preset?.authHeader ?? 'Authorization', authScheme: preset?.authScheme ?? 'Bearer', visible: true, lifetime: 'permanent' }} /></div>
   })
 
   // ── One-time registration link ──────────────────────────────────
