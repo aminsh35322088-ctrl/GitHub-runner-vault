@@ -7,9 +7,8 @@ function repositoryFromRemote(remote: string): { owner: string; repo: string } {
 }
 
 function metaContent(html: string, name: string): string | null {
-  const escaped = name.replace(/[.*+?^\x24{}()|[\]\\]/g, '\\$&')
-  const tag = html.match(new RegExp('<meta\\b(?=[^>]*\\bname=["\\']' + escaped + '["\\'])[^>]*>', 'i'))?.[0]
-  return tag?.match(/\\bcontent=["']([^"']+)["']/i)?.[1] ?? null
+  const tag = html.match(new RegExp(`<meta\\b(?=[^>]*\\bname="${name}")[^>]*>`, 'i'))?.[0]
+  return tag?.match(/\bcontent="([^"]+)"/i)?.[1] ?? null
 }
 
 /**
