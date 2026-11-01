@@ -17,7 +17,7 @@ describe('service presets', () => {
     expect(presetForService('Cloudflare')?.hosts).toEqual(['api.cloudflare.com'])
     expect(presetForService(' cloud-flare ')?.id).toBe('cloudflare')
     expect(presetForService('Railway')?.authScheme).toBe('Bearer')
-    expect(presetForService('Anthropic')).toMatchObject({ authHeader: 'x-api-key', authScheme: 'Raw' })
+    expect(presetForService('Anthropic')).toMatchObject({ authHeader: 'Authorization', authScheme: 'Bearer' })
   })
 
   test('never match by substring, so a model cannot smuggle a preset in', () => {
