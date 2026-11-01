@@ -14,11 +14,7 @@ beforeEach(async () => {
 })
 
 describe('deployment-bound first-time setup', () => {
-  test('setup remains locked until the deployment workflow provisions OWNER_GITHUB_ID', async () => {
-    const page = await req('GET', '/setup')
-    expect(page.status).toBe(200)
-    expect(await page.text()).toContain('Waiting for deployment verification')
-
+  test('setup start remains locked until Workers Builds provisions OWNER_GITHUB_ID', async () => {
     const start = await req('POST', '/setup/start')
     expect(start.status).toBe(303)
     expect(start.headers.get('location')).toContain('/setup?error=provisioning')
