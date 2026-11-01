@@ -214,7 +214,7 @@ export async function isConfigured(db: Db, e: VaultEnv, keys: VaultKeys): Promis
 
 // ── setup state ───────────────────────────────────────────────────
 //
-// The deployment workflow provisions the expected numeric GitHub owner ID before
+// Workers Builds derives and injects the expected numeric GitHub owner ID before
 // /setup is enabled. The manifest callback must return that exact creator ID. The
 // flow is also bound to one browser: /setup hands out a random state in an HttpOnly
 // cookie and GitHub must return the same value. The atomic database claim is a
