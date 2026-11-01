@@ -203,7 +203,7 @@ You need a Cloudflare account and a GitHub account. No command line, no API toke
 GitHub account and deploys it through Workers Builds. During the build, the project reads the actual Git origin,
 resolves the repository owner's numeric GitHub ID through GitHub's API, and injects it as the Worker's
 `OWNER_GITHUB_ID` runtime variable. The first Worker request pins that ID in D1. No GitHub Actions setup, manual
-owner ID, setup code, or extra Cloudflare token is required.
+owner ID, setup code, or extra Cloudflare token is required. Use a personal GitHub account; organization-owned repositories are intentionally rejected.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/tree/main/app)
 
@@ -222,7 +222,7 @@ looked up for you; for a private one, also enter its numeric repository id. Pull
 **4. Point the runner at it** — set the Actions variable `VAULT_URL` (or `RUNNER_VAULT_URL`, depending on your workflow)
 to the Worker URL and install `client/vault.mjs` (see [Runner client](#runner-client)).
 
-Deploying from a terminal instead: `cd app && pnpm install && pnpm deploy` (needs `wrangler login`).
+Deploying from a terminal instead: `cd app && pnpm install && WORKERS_CI=1 pnpm build && pnpm deploy` (Linux/macOS; needs `wrangler login` and a GitHub origin remote).
 
 ### Where the key lives
 
