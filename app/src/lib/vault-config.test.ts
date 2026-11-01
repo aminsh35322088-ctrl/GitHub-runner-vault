@@ -125,6 +125,25 @@ describe('setup state', () => {
     expect(setupStateMatches(`${SETUP_STATE_COOKIE}=short`, 'short')).toBe(false)
   })
 
+  test('an interrupted setup can resume with the same GitHub App ID', async () => {
+    const keys = await loadVaultKeys(db, {})
+    await db.insert(schema.vaultSetting).values({ key: 'owner_github_id', value: '55', updatedAt: Date.now() })
+    await db.insert(schema.vaultSetting).values({ key: 'github_client_id', value: 'Iv1.recovery', updatedAt: Date.now() })
+
+    await saveGithubApp(db, keys, {
+      clientId: 'Iv1.recovery',
+      clientSecret: 'recovered-secret',
+      ownerId: '55',
+      ownerLogin: 'recovered-owner',
+    }, '55')
+
+    expect(await loadGithubOAuth(db, {}, keys)).toEqual({
+      clientId: 'Iv1.recovery',
+      clientSecret: 'recovered-secret',
+    })
+    expect(await loadOwnerLogin(db)).toBe('recovered-owner')
+  })
+
   test('the first GitHub sign-in app claim wins and a second one is refused without overwriting', async () => {
     const keys = await loadVaultKeys(db, {})
     await saveGithubApp(db, keys, { clientId: 'first', clientSecret: 'first-secret', ownerId: '111', ownerLogin: 'alice' }, '111')
