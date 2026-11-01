@@ -196,8 +196,8 @@ export const app = new Spiceflow()
     )
   })
 
-  // ── First-time setup ──────────────────────────────────────────────
-  // No password: the first person to finish GitHub's manifest flow owns the vault.
+  // ── Deployment-bound owner setup ──────────────────────────────────
+  // The deployment workflow provisions OWNER_GITHUB_ID before this flow is enabled.
   .page('/setup', async ({ request }) => {
     const db = getDb()
     const e = vaultEnv()
