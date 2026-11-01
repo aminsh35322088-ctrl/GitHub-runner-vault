@@ -107,7 +107,7 @@ export async function requestRegistration(db: Db, req: RegistrationRequest): Pro
 export async function createCredential(
   db: Db,
   key: CryptoKey,
-  input: StoreInput & { name: string; service: string; purpose: string },
+  input: Omit<StoreInput, 'credentialId'> & { name: string; service: string; purpose: string },
 ): Promise<Result<{ id: string; name: string }>> {
   if (!validCredentialName(input.name)) return { ok: false, error: 'invalid_name' }
   if (reservedName(input.name)) return { ok: false, error: 'reserved_name' }
@@ -160,7 +160,7 @@ export type ValidatedStoreInput = {
 }
 
 /** Validate every owner-controlled value before a one-time registration link is consumed. */
-export function validateStoreInput(input: StoreInput): Result<ValidatedStoreInput> {
+export function validateStoreInput(input: Omit<StoreInput, 'credentialId'> & { credentialId?: string }): Result<ValidatedStoreInput> {
   if ((input as { delivery: string }).delivery !== 'proxy') {
     return { ok: false, error: 'invalid_value', detail: 'only proxy delivery is supported' }
   }
