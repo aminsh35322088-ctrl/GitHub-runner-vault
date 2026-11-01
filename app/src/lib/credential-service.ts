@@ -102,6 +102,39 @@ export async function requestRegistration(db: Db, req: RegistrationRequest): Pro
   return { ok: true, value: { credentialId, link } }
 }
 
+// ── Owner: create directly from the dashboard ──────────────────────────
+
+export async function createCredential(
+  db: Db,
+  key: CryptoKey,
+  input: StoreInput & { name: string; service: string; purpose: string },
+): Promise<Result<{ id: string; name: string }>> {
+  if (!validCredentialName(input.name)) return { ok: false, error: 'invalid_name' }
+  if (reservedName(input.name)) return { ok: false, error: 'reserved_name' }
+  const service = input.service.trim().slice(0, 80)
+  const purpose = input.purpose.trim().slice(0, 500)
+  if (!service || !purpose) return { ok: false, error: 'invalid_doc', detail: 'service and purpose are required' }
+  const validated = validateStoreInput(input)
+  if (!validated.ok) return validated
+  const [existing] = await db.select({ id: schema.credential.id })
+    .from(schema.credential).where(orm.eq(schema.credential.name, input.name)).limit(1)
+  if (existing) return { ok: false, error: 'exists' }
+
+  const id = crypto.randomUUID()
+  const sealed = await encryptCredentialValue(key, id, KEY_VERSION, validated.value.value)
+  await db.insert(schema.credential).values({
+    id, name: input.name, service, purpose, tokenType: '', status: 'active',
+    visible: input.visible, lifetime: input.lifetime, delivery: input.delivery,
+    allowedHosts: JSON.stringify(validated.value.hosts),
+    authHeader: validated.value.style.header, authScheme: validated.value.style.scheme,
+    externallyManaged: false, validation: 'not_tested', docJson: '{}',
+    valueEncrypted: sealed.encrypted, valueIv: sealed.iv, keyVersion: KEY_VERSION,
+    expiresAt: validated.value.expiresAt, createdAt: input.now, updatedAt: input.now,
+  })
+  await audit(db, { action: 'credential_created', actor: 'owner', credentialId: id, credentialName: input.name, result: 'ok', detail: input.lifetime + '/proxy', now: input.now })
+  return { ok: true, value: { id, name: input.name } }
+}
+
 // ── Owner: store / replace the value ───────────────────────────────────
 
 export type StoreInput = {
