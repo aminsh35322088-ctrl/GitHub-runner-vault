@@ -11,8 +11,9 @@
 - Runner identity is GitHub OIDC (RS256 only) restricted by repository id, ref and event.
   It authenticates the workflow run, not an individual process.
 - Owner login is a private GitHub App created through `/setup`; it is restricted to one numeric account id (the
-  app's creator) and sessions are cookie-only. `/setup` needs the deployer's `SETUP_CODE`, locks after 10 wrong
-  tries per hour, and closes permanently once an owner exists.
+  app's creator) and sessions are cookie-only. `/setup` is guarded by a one-time state cookie, claims the owner
+  atomically (first finisher wins), and closes permanently once an owner exists. The login page shows the owner's
+  GitHub login, so an unexpected owner is visible immediately; run setup right after deploying.
 - Models propose names and setup notes; the **owner** decides hosts, auth header, lifetime
   and visibility. Notes are treated as hostile text (strict schema, no HTML, visible link hosts).
 - `inject` delivery is stored as a setting but **not implemented yet**: the runner API refuses to
