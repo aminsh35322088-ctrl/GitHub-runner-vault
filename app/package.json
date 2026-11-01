@@ -36,13 +36,6 @@
     "ulid": "3.0.2",
     "zod": "4.6.5"
   },
-  "cloudflare": {
-    "bindings": {
-      "SETUP_CODE": {
-        "description": "Choose a private phrase of at least 12 characters. It unlocks first-time owner setup once."
-      }
-    }
-  },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.47.0",
     "@cloudflare/vitest-pool-workers": "^0.18.8",

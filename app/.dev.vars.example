@@ -1,4 +1,2 @@
-# Pick any phrase of at least 12 characters. It proves you are the person who deployed this
-# vault when you first open it, and is not needed afterwards. Every other key is generated
-# by the vault itself.
-SETUP_CODE=
+# Nothing is required. The vault generates its own keys and is configured in the browser (/setup).
+# Optional: VAULT_MASTER_KEY=<openssl rand -base64 32> keeps the master key out of the database.

@@ -30,7 +30,7 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   )
 }
 
-export function CredentialForm({ mode, token, id, defaults }: { mode: 'register' | 'replace'; token?: string; id?: string; defaults: FormDefaults }) {
+export function CredentialForm({ mode, token, id, defaults, preset = null }: { mode: 'register' | 'replace'; token?: string; id?: string; defaults: FormDefaults; preset?: { label: string } | null }) {
   const [lifetime, setLifetime] = useState(defaults.lifetime)
   const [errorMessage, setErrorMessage] = useState('')
   const [saving, setSaving] = useState(false)
@@ -90,28 +90,28 @@ export function CredentialForm({ mode, token, id, defaults }: { mode: 'register'
           </Field>
         </div>
 
-        <div className="rounded-md border border-border bg-muted/30 p-3">
-          <p className="text-sm font-medium">Runner delivery: Vault proxy</p>
-          <p className="mt-1 text-xs text-muted-foreground">The vault attaches this credential to approved HTTPS API calls. The raw value is never returned to the runner.</p>
-        </div>
-
-        <Field label="Allowed hosts" hint="One exact hostname per line, e.g. api.cloudflare.com. You decide this, not the model.">
-          <textarea name="hosts" rows={3} defaultValue={defaults.allowedHosts} required spellCheck={false}
-            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring" />
-        </Field>
-
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Auth header">
-            <Input name="authHeader" defaultValue={defaults.authHeader} className="w-full font-mono" />
+        {/* Known services come pre-filled; anything unfamiliar opens for the owner to decide. */}
+        <details open={!preset && mode === 'register'} className="rounded-md border border-border p-3 space-y-4">
+          <summary className="cursor-pointer text-sm font-medium">
+            {preset ? `${preset.label}: ${defaults.allowedHosts.split('\n')[0]} (${defaults.authHeader}: ${defaults.authScheme}) — change` : 'Where this token may be used'}
+          </summary>
+          <Field label="Allowed hosts" hint="One exact hostname per line. You decide this, not the model.">
+            <textarea name="hosts" rows={3} defaultValue={defaults.allowedHosts} required spellCheck={false}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring" />
           </Field>
-          <Field label="Auth scheme">
-            <NativeSelect className="w-full" name="authScheme" defaultValue={defaults.authScheme}>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Auth header">
+              <Input name="authHeader" defaultValue={defaults.authHeader} className="w-full font-mono" />
+            </Field>
+            <Field label="Auth scheme">
+              <NativeSelect className="w-full" name="authScheme" defaultValue={defaults.authScheme}>
                 <option value="Bearer">Bearer</option>
                 <option value="Token">Token</option>
                 <option value="Raw">Raw (value only)</option>
               </NativeSelect>
-          </Field>
-        </div>
+            </Field>
+          </div>
+        </details>
 
         <label className="flex items-start gap-2.5 cursor-pointer">
           <input type="checkbox" name="visible" defaultChecked={defaults.visible} className="mt-0.5 size-4 rounded border-border accent-primary" />

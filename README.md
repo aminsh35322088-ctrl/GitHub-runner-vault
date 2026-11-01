@@ -196,17 +196,18 @@ Sign in at `https://<origin>/login` with the owner GitHub account.
 
 You need a Cloudflare account and a GitHub account. No command line, no API token and no hand-made secrets.
 
-**1. Deploy** — press the button, sign in to Cloudflare, and when it asks for `SETUP_CODE` type any phrase of at least
-12 characters (write it down; you use it once). The Deploy Button targets the self-contained `app/` project, which includes its own database workspace and lockfile; it does not depend on files outside that directory.
+**1. Deploy** — press the button and sign in to Cloudflare. There is nothing to type: no secrets, no setup code. The Deploy Button targets the self-contained `app/` project, which includes its own database workspace and lockfile; it does not depend on files outside that directory.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/tree/main/app)
 
 Cloudflare creates the Worker and its D1 database in your account. The Worker creates its own tables on the first
 request, so there is no migration step.
 
-**2. Connect GitHub** — open your Worker's URL (`https://<name>.<you>.workers.dev`), enter the setup code, and press
+**2. Connect GitHub** — open your Worker's URL (`https://<name>.<you>.workers.dev`) right after deploying and press
 *Create the GitHub App*. GitHub shows you the app it is about to create; confirm. The vault stores the sign-in
-credentials encrypted and records you as the only owner. From then on `/setup` is closed.
+credentials encrypted and records you as the only owner. From then on `/setup` is closed. Do this straight away: whoever
+finishes setup first owns the vault. The login page always shows which GitHub account owns it, so a wrong owner is
+visible at once; if it is not you, delete the Worker's database and start again.
 
 **3. Choose your runner repository** — sign in, open *Settings → Runner repository* and enter the repository, branch and
 workflow file that may use the vault (for example `you/your-runner-repo`, `main`, `rdc-lab.yml`). Public repositories are
@@ -215,8 +216,7 @@ looked up for you; for a private one, also enter its numeric repository id. Pull
 **4. Point the runner at it** — set the Actions variable `VAULT_URL` (or `RUNNER_VAULT_URL`, depending on your workflow)
 to the Worker URL and install `client/vault.mjs` (see [Runner client](#runner-client)).
 
-Deploying from a terminal instead: `cd app && pnpm install && pnpm deploy` (needs `wrangler login`). `SETUP_CODE` can be set with
-`pnpm exec wrangler secret put SETUP_CODE` from `app/`.
+Deploying from a terminal instead: `cd app && pnpm install && pnpm deploy` (needs `wrangler login`).
 
 ### Where the key lives
 
@@ -237,11 +237,10 @@ Stored credentials are not touched.
 
 ## Configuration reference
 
-Everything below is optional. A normal deployment sets only `SETUP_CODE`; the rest is configured in the UI.
+Everything below is optional. A normal deployment sets nothing; everything is configured in the UI.
 
 | Name | Kind | Notes |
 | --- | --- | --- |
-| `SETUP_CODE` | secret | Phrase (12+ characters) that lets you run first-time setup. Unused afterwards. |
 | `VAULT_MASTER_KEY` | secret | Keeps the key out of D1 (see above). |
 | `PUBLIC_ORIGIN` | var | Canonical HTTPS origin for a custom domain. By default the actual request origin is used. |
 | `OWNER_GITHUB_ID`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | var / secrets | Override the values `/setup` stores (for example to use your own OAuth app). |
@@ -265,7 +264,7 @@ Everything below is optional. A normal deployment sets only `SETUP_CODE`; the re
 pnpm install
 pnpm typecheck                       # tsc
 pnpm test                            # workerd tests + client tests
-cd app && printf 'SETUP_CODE=a local setup phrase\\n' > .dev.vars && pnpm dev   # then open /setup
+cd app && pnpm dev   # then open /setup
 ```
 
 `app/.dev.vars` is git-ignored. Local dev uses a local D1; the schema is created on first request like in production.

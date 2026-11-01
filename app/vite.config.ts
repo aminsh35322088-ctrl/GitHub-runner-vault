@@ -38,7 +38,6 @@ export default defineConfig(async () => {
             wrangler: { configPath: './wrangler.test.jsonc' },
             miniflare: {
               bindings: {
-                SETUP_CODE: 'correct horse battery staple',
               },
               outboundService: testOutboundService,
             },

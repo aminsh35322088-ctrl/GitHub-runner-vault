@@ -12,10 +12,10 @@ import { Head } from 'spiceflow/react'
 import { getDb, getAuth, getSession, getRequestOrigin, requirePageSession } from './db.ts'
 import { ensureSchema } from './lib/schema.ts'
 import { loadRunnerPolicyInput } from './lib/runner-policy.ts'
+import { presetForService } from './lib/presets.ts'
 import {
-  SETUP_COOKIE, buildManifest, consumeSetupState, convertManifest, isConfigured, issueSetupCookie, loadVaultKeys,
-  newSetupState, consumeSetupAttempt, saveGithubApp, setupCodeMatches, setupCodeStatus, setupCookieValid,
-  MIN_SETUP_CODE_LENGTH, type VaultEnv,
+  SETUP_STATE_COOKIE, SETUP_STATE_MAX_AGE_SECONDS, buildManifest, convertManifest, isConfigured, loadOwnerLogin, loadVaultKeys,
+  newSetupState, saveGithubApp, setupStateMatches, type VaultEnv,
 } from './lib/vault-config.ts'
 import { Button } from './components/ui/button'
 import { runnerApp } from './runner-api.ts'
@@ -169,13 +169,17 @@ export const app = new Spiceflow()
     const { LoginButton } = await import('./components/login-button')
     const keys = await loadVaultKeys(getDb(), vaultEnv())
     const githubOAuthConfigured = await isConfigured(getDb(), vaultEnv(), keys)
+    const ownerLogin = githubOAuthConfigured ? await loadOwnerLogin(getDb()) : null
     return (
       <div className="flex justify-center py-24">
         <div className="text-center max-w-sm space-y-4">
           <h1 className="text-xl font-semibold tracking-tight">Runner Credential Vault</h1>
           <p className="text-sm text-muted-foreground">Sign in with the owner's GitHub account.</p>
           {githubOAuthConfigured ? (
-            <LoginButton callbackURL={redirectTo} />
+            <>
+              <LoginButton callbackURL={redirectTo} />
+              {ownerLogin && <p className="text-xs text-muted-foreground">This vault belongs to @{ownerLogin}.</p>}
+            </>
           ) : (
             <div role="status" className="rounded-lg border border-border bg-muted/40 p-4 text-left space-y-2">
               <p className="text-sm font-medium">This vault is not set up yet.</p>
@@ -191,72 +195,59 @@ export const app = new Spiceflow()
   })
 
   // ── First-time setup ──────────────────────────────────────────────
+  // No password: the first person to finish GitHub's manifest flow owns the vault.
   .page('/setup', async ({ request }) => {
     const db = getDb()
     const e = vaultEnv()
     const keys = await loadVaultKeys(db, e)
     if (await isConfigured(db, e, keys)) {
-      return <Message title="Already set up" text="Sign-in is configured. Use the login page to open the vault." />
-    }
-    const status = setupCodeStatus(e)
-    if (status !== 'ok') {
+      const owner = await loadOwnerLogin(db)
       return (
         <Message
-          title="Choose a setup code first"
-          text={`Add a Worker secret named SETUP_CODE (any phrase of at least ${MIN_SETUP_CODE_LENGTH} characters) in the Cloudflare dashboard under Settings → Variables and Secrets, then reload this page.`}
+          title="Already set up"
+          text={owner ? `This vault belongs to GitHub user @${owner}. If that is not you, delete this deployment and deploy again.` : 'Sign-in is configured. Use the login page to open the vault.'}
         />
       )
     }
-    const now = Date.now()
     const failed = new URL(request.url).searchParams.get('error')
-    if (!(await setupCookieValid(keys.authSecret, request.headers.get('cookie'), now))) {
-      return (
-        <div className="max-w-sm mx-auto py-16 space-y-4">
-          <h1 className="text-xl font-semibold tracking-tight">Set up your vault</h1>
-          <p className="text-sm text-muted-foreground">Enter the setup code you chose when you deployed this vault.</p>
-          <form method="post" action="/setup/unlock" className="space-y-3">
-            <input name="code" type="password" required autoComplete="off" className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" aria-label="Setup code" />
-            <Button type="submit">Continue</Button>
-          </form>
-          {failed === 'code' && <p role="alert" className="text-sm text-destructive">That code was not accepted.</p>}
-          {failed === 'locked' && <p role="alert" className="text-sm text-destructive">Too many attempts. Try again in an hour.</p>}
-        </div>
-      )
-    }
-    const origin = getRequestOrigin(request)
-    const state = await newSetupState(db, now)
-    const manifest = buildManifest(origin, crypto.randomUUID().slice(0, 6))
     return (
       <div className="max-w-md mx-auto py-16 space-y-4">
         <h1 className="text-xl font-semibold tracking-tight">Connect your GitHub account</h1>
         <p className="text-sm text-muted-foreground">
-          One click creates a private GitHub App owned by you. It is used only so that you can sign in here; it asks for no repository access.
-          GitHub will show you the app before it is created. Whoever creates it becomes the vault's only owner.
+          One click creates a private GitHub App owned by you. It is used only so that you can sign in here, and it asks for no repository access.
+          GitHub shows you the app before it is created. <strong>Whoever finishes this step first becomes the vault's only owner</strong>, so do it right after deploying.
         </p>
         {failed === 'github' && <p role="alert" className="text-sm text-destructive">GitHub setup did not complete. Try again.</p>}
-        <form method="post" action={`https://github.com/settings/apps/new?state=${state}`}>
-          <input type="hidden" name="manifest" value={JSON.stringify(manifest)} />
+        <form method="post" action="/setup/start">
           <Button type="submit">Create the GitHub App</Button>
         </form>
       </div>
     )
   })
 
-  .post('/setup/unlock', async ({ request }) => {
+  .post('/setup/start', async ({ request }) => {
     const db = getDb()
     const e = vaultEnv()
     const keys = await loadVaultKeys(db, e)
     const origin = getRequestOrigin(request)
-    const to = (q: string) => new Response(null, { status: 303, headers: { Location: new URL(`/setup${q}`, origin).toString() } })
-    if (await isConfigured(db, e, keys)) return to('')
-    const now = Date.now()
-    if (!(await consumeSetupAttempt(db, keys.authSecret, now, request.headers.get('cf-connecting-ip')))) return to('?error=locked')
-    const form = await request.formData().catch(() => null)
-    if (!form || !(await setupCodeMatches(form.get('code'), e))) return to('?error=code')
-    const cookie = await issueSetupCookie(keys.authSecret, now)
-    const res = to('')
-    res.headers.append('Set-Cookie', `${SETUP_COOKIE}=${cookie.value}; Path=/; Max-Age=${cookie.maxAgeSeconds}; HttpOnly; Secure; SameSite=Lax`)
-    return res
+    if (await isConfigured(db, e, keys)) return new Response(null, { status: 303, headers: { Location: new URL('/setup', origin).toString() } })
+    const state = newSetupState()
+    const manifest = buildManifest(origin, crypto.randomUUID().slice(0, 6))
+    const attr = (v: string) => v.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    // GitHub needs the manifest as a form POST from the browser, so hand the browser a
+    // tiny page that submits it. The state also goes in an HttpOnly cookie so the
+    // callback can prove it comes back to the same browser.
+    const page = `<!doctype html><meta charset="utf-8"><meta name="robots" content="noindex"><title>Redirecting to GitHub</title>
+<form id="f" method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${attr(JSON.stringify(manifest))}"><noscript><button>Continue to GitHub</button></noscript></form>
+<script>document.getElementById('f').submit()</script>`
+    return new Response(page, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Set-Cookie': `${SETUP_STATE_COOKIE}=${state}; Path=/; Max-Age=${SETUP_STATE_MAX_AGE_SECONDS}; HttpOnly; Secure; SameSite=Lax`,
+      },
+    })
   })
 
   .get('/setup/github/callback', async ({ request }) => {
@@ -266,15 +257,17 @@ export const app = new Spiceflow()
     const origin = getRequestOrigin(request)
     const to = (q: string) => new Response(null, { status: 303, headers: { Location: new URL(q, origin).toString() } })
     if (await isConfigured(db, e, keys)) return to('/login')
-    const now = Date.now()
-    if (!(await setupCookieValid(keys.authSecret, request.headers.get('cookie'), now))) return to('/setup')
     const params = new URL(request.url).searchParams
-    if (!(await consumeSetupState(db, params.get('state'), now))) return to('/setup?error=github')
+    if (!setupStateMatches(request.headers.get('cookie'), params.get('state'))) return to('/setup?error=github')
     const converted = await convertManifest(params.get('code') ?? '')
     if (!converted) return to('/setup?error=github')
-    await saveGithubApp(db, keys, converted)
+    try {
+      await saveGithubApp(db, keys, converted)
+    } catch {
+      return to('/setup')
+    }
     const res = to('/login')
-    res.headers.append('Set-Cookie', `${SETUP_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`)
+    res.headers.append('Set-Cookie', `${SETUP_STATE_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`)
     return res
   })
 
@@ -333,6 +326,7 @@ export const app = new Spiceflow()
       return <Message title="Registration closed" text="This credential is no longer accepting a value. Ask the runner for a fresh registration request." />
     }
     const { CredentialForm } = await import('./components/credential-form.tsx')
+    const preset = presetForService(credential.service)
     return (
       <div className="space-y-6 max-w-2xl">
         <div>
@@ -341,7 +335,7 @@ export const app = new Spiceflow()
           <p className="text-xs text-muted-foreground mt-1">Link expires in about {Math.max(1, Math.round((link.expiresAt - Date.now()) / 60_000))} min and works once.</p>
         </div>
         {credential.doc && <DocView doc={credential.doc} />}
-        <CredentialForm mode="register" token={params.token} defaults={{ delivery: 'proxy', allowedHosts: '', authHeader: 'Authorization', authScheme: 'Bearer', visible: true, lifetime: 'permanent' }} />
+        <CredentialForm mode="register" token={params.token} preset={preset ? { label: preset.label } : null} defaults={{ delivery: 'proxy', allowedHosts: preset ? preset.hosts.join('\n') : '', authHeader: preset?.authHeader ?? 'Authorization', authScheme: preset?.authScheme ?? 'Bearer', visible: true, lifetime: 'permanent' }} />
       </div>
     )
   })
