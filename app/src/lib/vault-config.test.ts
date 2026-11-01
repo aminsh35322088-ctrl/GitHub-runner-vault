@@ -66,30 +66,39 @@ describe('key derivation', () => {
 describe('GitHub app and owner storage', () => {
   test('stores the client secret encrypted and reads it back', async () => {
     const keys = await loadVaultKeys(db, {})
-    await saveGithubApp(db, keys, { clientId: 'Iv1.abc', clientSecret: 'super-secret-client-value', ownerId: '318252513' })
+    await saveGithubApp(db, keys, { clientId: 'Iv1.abc', clientSecret: 'super-secret-client-value', ownerId: '318252513' }, '318252513')
     const raw = JSON.stringify(await db.select().from(schema.vaultSetting))
     expect(raw).not.toContain('super-secret-client-value')
     expect(await loadGithubOAuth(db, {}, keys)).toEqual({ clientId: 'Iv1.abc', clientSecret: 'super-secret-client-value' })
     expect(await loadOwnerId(db, {})).toBe('318252513')
   })
 
+  test('deployment owner binding rejects missing and mismatched identities', async () => {
+    const keys = await loadVaultKeys(db, {})
+    const app = { clientId: 'Iv1.owner', clientSecret: 'secret', ownerId: '111' }
+    await expect(saveGithubApp(db, keys, app, null)).rejects.toThrow(/not provisioned/)
+    await expect(saveGithubApp(db, keys, app, '222')).rejects.toThrow(/does not match deployment owner/)
+    expect(await loadOwnerId(db, {})).toBeNull()
+    expect(await loadGithubOAuth(db, {}, keys)).toBeNull()
+  })
+
   test('a ciphertext copied under another label does not decrypt', async () => {
     const keys = await loadVaultKeys(db, {})
-    await saveGithubApp(db, keys, { clientId: 'id', clientSecret: 'secret-value', ownerId: '1' })
+    await saveGithubApp(db, keys, { clientId: 'id', clientSecret: 'secret-value', ownerId: '1' }, '1')
     await putSetting(db, 'github_client_secret', '{"e":"AAAA","i":"AAAA"}')
     expect(await loadGithubOAuth(db, {}, keys)).toBeNull()
   })
 
   test('refuses an invalid owner id and returns nothing before setup', async () => {
     const keys = await loadVaultKeys(db, {})
-    await expect(saveGithubApp(db, keys, { clientId: 'a', clientSecret: 'b', ownerId: 'octocat' })).rejects.toThrow()
+    await expect(saveGithubApp(db, keys, { clientId: 'a', clientSecret: 'b', ownerId: 'octocat' }, '5')).rejects.toThrow()
     expect(await loadGithubOAuth(db, {}, keys)).toBeNull()
     expect(await loadOwnerId(db, {})).toBeNull()
   })
 
   test('Worker variables override stored values', async () => {
     const keys = await loadVaultKeys(db, {})
-    await saveGithubApp(db, keys, { clientId: 'stored', clientSecret: 'stored-secret', ownerId: '5' })
+    await saveGithubApp(db, keys, { clientId: 'stored', clientSecret: 'stored-secret', ownerId: '5' }, '5')
     expect(await loadOwnerId(db, { OWNER_GITHUB_ID: '9' })).toBe('9')
     expect(await loadGithubOAuth(db, { GITHUB_CLIENT_ID: 'e', GITHUB_CLIENT_SECRET: 'f' }, keys)).toEqual({ clientId: 'e', clientSecret: 'f' })
   })
@@ -111,8 +120,8 @@ describe('setup state', () => {
 
   test('the first claim wins and a second one is refused without overwriting', async () => {
     const keys = await loadVaultKeys(db, {})
-    await saveGithubApp(db, keys, { clientId: 'first', clientSecret: 'first-secret', ownerId: '111', ownerLogin: 'alice' })
-    await expect(saveGithubApp(db, keys, { clientId: 'second', clientSecret: 'second-secret', ownerId: '222', ownerLogin: 'mallory' }))
+    await saveGithubApp(db, keys, { clientId: 'first', clientSecret: 'first-secret', ownerId: '111', ownerLogin: 'alice' }, '111')
+    await expect(saveGithubApp(db, keys, { clientId: 'second', clientSecret: 'second-secret', ownerId: '111', ownerLogin: 'mallory' }, '111'))
       .rejects.toThrow(/already has an owner/)
     expect(await loadOwnerId(db, {})).toBe('111')
     expect(await loadOwnerLogin(db)).toBe('alice')
@@ -121,7 +130,7 @@ describe('setup state', () => {
 
   test('owner login is only kept when it is a valid GitHub login', async () => {
     const keys = await loadVaultKeys(db, {})
-    await saveGithubApp(db, keys, { clientId: 'a', clientSecret: 'b', ownerId: '5', ownerLogin: '<script>' })
+    await saveGithubApp(db, keys, { clientId: 'a', clientSecret: 'b', ownerId: '5', ownerLogin: '<script>' }, '5')
     expect(await loadOwnerLogin(db)).toBeNull()
     await putSetting(db, 'owner_github_login', 'bad login!')
     expect(await loadOwnerLogin(db)).toBeNull()
