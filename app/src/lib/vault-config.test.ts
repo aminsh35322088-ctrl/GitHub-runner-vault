@@ -125,7 +125,7 @@ describe('setup state', () => {
     expect(setupStateMatches(`${SETUP_STATE_COOKIE}=short`, 'short')).toBe(false)
   })
 
-  test('the first claim wins and a second one is refused without overwriting', async () => {
+  test('the first GitHub sign-in app claim wins and a second one is refused without overwriting', async () => {
     const keys = await loadVaultKeys(db, {})
     await saveGithubApp(db, keys, { clientId: 'first', clientSecret: 'first-secret', ownerId: '111', ownerLogin: 'alice' }, '111')
     await expect(saveGithubApp(db, keys, { clientId: 'second', clientSecret: 'second-secret', ownerId: '111', ownerLogin: 'mallory' }, '111'))
