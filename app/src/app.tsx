@@ -203,7 +203,7 @@ export const app = new Spiceflow()
     const keys = await loadVaultKeys(db, e)
     const expectedOwnerId = await loadOwnerId(db, e)
     if (!expectedOwnerId) {
-      return <Message title="Waiting for deployment verification" text="This vault stays locked until the Deploy to Cloudflare workflow verifies and provisions its GitHub owner. Reload this page after deployment finishes." />
+      return <Message title="Waiting for deployment verification" text="This vault stays locked until Workers Builds verifies the checked-out GitHub repository owner and injects its numeric ID. Reload after the deployment build finishes." />
     }
     if (await isConfigured(db, e, keys)) {
       const owner = await loadOwnerLogin(db)
