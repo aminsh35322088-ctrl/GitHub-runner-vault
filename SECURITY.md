@@ -11,7 +11,7 @@
 - Runner identity is GitHub OIDC (RS256 only) restricted by repository id, ref and event.
   It authenticates the workflow run, not an individual process.
 - During Workers Builds, the build reads the checked-out Git origin and resolves its repository owner through the
-  GitHub API. The resulting numeric `OWNER_GITHUB_ID` is injected as a Worker runtime variable; it is public identity
+  public repository-page metadata (not the rate-limited unauthenticated REST API). The resulting numeric `OWNER_GITHUB_ID` is injected as a Worker runtime variable; it is public identity
   metadata, not a credential. On first use, the Worker atomically pins that expected ID in D1, so later repository
   transfers or build metadata changes cannot silently transfer ownership. `/setup` remains locked without a valid
   deployment owner. The private GitHub App created through `/setup` must have the exact same numeric creator ID;
