@@ -76,7 +76,7 @@ export default defineConfig(async () => {
         optimizer: {
           ssr: {
             enabled: true,
-            include: ['better-auth', 'better-auth-drizzle-adapter', 'jose'],
+            include: ['better-auth'],
           },
         },
       },
