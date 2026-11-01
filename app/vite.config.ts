@@ -6,7 +6,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { spiceflowPlugin } from 'spiceflow/vite'
 import { defineConfig } from 'vite'
-import { injectDeployOwner } from './scripts/inject-deploy-owner'
+import { injectDeployOwner } from './scripts/inject-deploy-owner.ts'
 
 const port = parseInt(process.env.PORT || '5188', 10)
 
