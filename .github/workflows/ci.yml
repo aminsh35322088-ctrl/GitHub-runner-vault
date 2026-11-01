@@ -38,7 +38,7 @@ jobs:
         run: |
           set -euo pipefail
           cd app
-          WORKERS_CI=1 node scripts/inject-deploy-owner.mjs
+          WORKERS_CI=1 pnpm build
           grep -Eq '"OWNER_GITHUB_ID": "[1-9][0-9]*"' wrangler.jsonc
           cd ..
           git checkout -- app/wrangler.jsonc
