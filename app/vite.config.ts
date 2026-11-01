@@ -29,7 +29,7 @@ function testOutboundService(request: Request): Response {
 export default defineConfig(async () => {
   // Run before cloudflare() reads Wrangler config. This also covers the default
   // Workers Builds deploy command (npx wrangler deploy), not only `pnpm build`.
-  await injectDeployOwner()
+  const deploymentOwnerId = await injectDeployOwner()
   return {
     server: { port, strictPort: true },
     clearScreen: false,
@@ -59,6 +59,7 @@ export default defineConfig(async () => {
       // setter priority. See https://github.com/cloudflare/workers-sdk/issues/13869
       !process.env.VITEST
         ? cloudflare({
+            ...(deploymentOwnerId ? { config: { vars: { OWNER_GITHUB_ID: deploymentOwnerId } } } : {}),
             viteEnvironment: {
               name: 'rsc',
               childEnvironments: ['ssr'],
