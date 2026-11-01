@@ -85,7 +85,7 @@ export function CredentialForm({ mode, token, id, defaults, preset = null }: { m
         {mode === 'create' && (
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Credential name" hint="Unique name exposed to authorized runners.">
-              <Input name="name" required maxLength={80} placeholder="e.g. production-cloudflare" className="w-full font-mono" />
+              <Input name="name" required maxLength={80} placeholder="e.g. PRODUCTION_CLOUDFLARE" className="w-full font-mono" />
             </Field>
             <Field label="Service / provider">
               <Input name="service" required maxLength={80} defaultValue={preset?.label ?? ''} placeholder="e.g. My API" className="w-full" />
@@ -114,7 +114,7 @@ export function CredentialForm({ mode, token, id, defaults, preset = null }: { m
         </div>
 
         {/* Known services come pre-filled; anything unfamiliar opens for the owner to decide. */}
-        <details open={!preset && (mode === 'register' || mode === 'create')} className="rounded-md border border-border p-3 space-y-4">
+        <details open={mode === 'create' || (!preset && mode === 'register')} className="rounded-md border border-border p-3 space-y-4">
           <summary className="cursor-pointer text-sm font-medium">
             {preset ? `${preset.label}: ${defaults.allowedHosts.split('\n')[0]} (${defaults.authHeader}: ${defaults.authScheme}) — change` : 'Where this token may be used'}
           </summary>
