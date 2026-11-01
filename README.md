@@ -199,21 +199,21 @@ Sign in at `https://<origin>/login` with the owner GitHub account.
 
 You need a Cloudflare account and a GitHub account. No command line, no API token and no hand-made secrets.
 
-**1. Deploy** — press the button and authorize GitHub and Cloudflare. The Deploy Button creates a repository under the
-authenticated GitHub account. Enable GitHub Actions when the deploy page asks you to, then continue. The
-`Deploy Runner Vault` workflow deploys the Worker and reads the repository owner's numeric GitHub ID from GitHub's
-`repository_dispatch` event. It writes that ID to the Cloudflare Worker as the `OWNER_GITHUB_ID` secret. The Worker
-keeps owner setup locked until this workflow succeeds.
+**1. Deploy** — press the button and authorize GitHub and Cloudflare. Cloudflare clones the project into your
+GitHub account and deploys it through Workers Builds. During the build, the project reads the actual Git origin,
+resolves the repository owner's numeric GitHub ID through GitHub's API, and injects it as the Worker's
+`OWNER_GITHUB_ID` runtime variable. The first Worker request pins that ID in D1. No GitHub Actions setup, manual
+owner ID, setup code, or extra Cloudflare token is required.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/tree/main/app)
 
 The Worker and its D1 database are provisioned in your Cloudflare account. The schema is created on first request.
 
-**2. Confirm the owner** — after the GitHub Actions deployment succeeds, open your Worker's URL
-(`https://<name>.<you>.workers.dev`) and press *Create the GitHub App*. Use the same GitHub account that owns the
-repository created by Deploy to Cloudflare. GitHub returns the App creator's numeric account ID; the Worker compares
-it with the pre-provisioned `OWNER_GITHUB_ID`. A different account is rejected, and opening the Worker first cannot
-claim ownership. Once matched, the owner is stored atomically and `/setup` closes permanently.
+**2. Confirm the owner** — open your Worker's URL (`https://<name>.<you>.workers.dev`) and press
+*Create the GitHub App*. Use the same GitHub account that owns the repository created by Deploy to Cloudflare.
+GitHub returns the App creator's numeric account ID; the Worker compares it with the pinned deployment owner ID.
+A different account is rejected, and opening the Worker first cannot claim ownership. Once matched, the sign-in
+credentials are stored encrypted and `/setup` closes permanently.
 
 **3. Choose your runner repository** — sign in, open *Settings → Runner repository* and enter the repository, branch and
 workflow file that may use the vault (for example `you/your-runner-repo`, `main`, `rdc-lab.yml`). Public repositories are
