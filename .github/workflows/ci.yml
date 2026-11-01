@@ -33,6 +33,16 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - name: Verify Workers Builds owner derivation from Git origin
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd app
+          WORKERS_CI=1 node scripts/inject-deploy-owner.mjs
+          grep -Eq '"OWNER_GITHUB_ID": "[1-9][0-9]*"' wrangler.jsonc
+          cd ..
+          git checkout -- app/wrangler.jsonc
+
       - name: Validate the standalone Deploy Button project
         shell: bash
         run: |
