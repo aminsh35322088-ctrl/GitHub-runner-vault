@@ -18,6 +18,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const env = process.env
 
@@ -182,4 +183,9 @@ async function main() {
   die('commands: list | request | use')
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main().catch((e) => die(e instanceof Error ? e.message : String(e)))
+// Resolve symlinks: the runner installs this file behind a `vault` symlink, so argv[1] is the link path.
+const invokedDirectly = (() => {
+  try { return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url)) } catch { return false }
+})()
+
+if (invokedDirectly) main().catch((e) => die(e instanceof Error ? e.message : String(e)))

@@ -31,9 +31,9 @@ function startStub() {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, seen, port: server.address().port })))
 }
 
-function run(args, env) {
+function run(args, env, script = new URL('./vault.mjs', import.meta.url).pathname) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [new URL('./vault.mjs', import.meta.url).pathname, ...args], { env: { PATH: process.env.PATH, ...env } })
+    const child = spawn(process.execPath, [script, ...args], { env: { PATH: process.env.PATH, ...env } })
     let stdout = '', stderr = ''
     child.stdout.on('data', (c) => (stdout += c))
     child.stderr.on('data', (c) => (stderr += c))
@@ -96,4 +96,24 @@ test('refuses plain http for non-local hosts and missing OIDC variables', async 
   assert.match((await run(['list'], { VAULT_URL: 'http://vault.example.com' })).stderr, /https/)
   const r = await run(['list'], { VAULT_URL: 'http://localhost:9', VAULT_SESSION_FILE: '/nonexistent/x' })
   assert.match(r.stderr, /id-token: write/)
+})
+
+test('works when invoked through a symlink (how the runner installs it)', async () => {
+  const { server, port } = await startStub()
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-link-'))
+  const link = path.join(dir, 'vault')
+  fs.symlinkSync(new URL('./vault.mjs', import.meta.url).pathname, link)
+  try {
+    const out = await run(['list'], {
+      VAULT_URL: `http://localhost:${port}`,
+      ACTIONS_ID_TOKEN_REQUEST_URL: `http://127.0.0.1:${port}/oidc`,
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'req-token',
+      VAULT_SESSION_FILE: path.join(dir, 'session.json'),
+    }, link)
+    assert.equal(out.code, 0, out.stderr)
+    assert.match(out.stdout, /CF_TOKEN/)
+  } finally {
+    server.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
