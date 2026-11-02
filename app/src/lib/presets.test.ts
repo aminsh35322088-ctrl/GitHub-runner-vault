@@ -21,6 +21,7 @@ describe('service presets', () => {
     expect(presetForService('Cloudflare')?.hosts).toEqual(['api.cloudflare.com'])
     expect(presetForService(' cloud-flare ')?.id).toBe('cloudflare')
     expect(presetForService('Railway')?.authScheme).toBe('Bearer')
+    expect(presetForService('Northflank')).toMatchObject({ hosts: ['api.northflank.com'], authHeader: 'Authorization', authScheme: 'Bearer' })
     expect(presetForService('Anthropic')).toMatchObject({ authHeader: 'Authorization', authScheme: 'Bearer' })
   })
 
@@ -42,6 +43,7 @@ describe('service presets', () => {
     const { defaultPurposeForService } = await import('./presets.ts')
     expect(defaultPurposeForService('Cloudflare')).toBe('Manage zones, DNS, Workers and account resources.')
     expect(defaultPurposeForService('GitHub')).toBe('Manage repositories, issues, pull requests and workflows.')
+    expect(defaultPurposeForService('Northflank')).toBe('Manage Northflank projects, services, deployments and workloads.')
     expect(defaultPurposeForService('Custom API')).toBe('Use the Custom API credential through the vault proxy.')
   })
 })
