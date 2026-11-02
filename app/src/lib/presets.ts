@@ -45,3 +45,8 @@ export function presetForService(service: string): ServicePreset | null {
   const key = service.toLowerCase().replace(/[^a-z0-9]/g, '')
   return SERVICE_CATALOG.find((p) => p.id === key || p.label.toLowerCase().replace(/[^a-z0-9]/g, '') === key) ?? null
 }
+
+/** Format exact host allowlist entries for the newline-based owner form field. */
+export function formatAllowedHosts(hosts: readonly string[]): string {
+  return hosts.join('\n')
+}

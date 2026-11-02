@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { presetForService, SERVICE_CATALOG } from './presets.ts'
+import { formatAllowedHosts, presetForService, SERVICE_CATALOG } from './presets.ts'
 import { normalizeAllowedHosts, normalizeAuthStyle } from './credential-input.ts'
 
 describe('service presets', () => {
@@ -9,6 +9,10 @@ describe('service presets', () => {
     for (const provider of SERVICE_CATALOG) {
       expect(provider.docsUrl).toMatch(/^https:\/\//)
       expect(normalizeAllowedHosts(provider.hosts).ok, provider.id).toBe(true)
+      const formValue = formatAllowedHosts(provider.hosts)
+      expect(formValue).not.toContain('\\n')
+      expect(formValue.split(/\s+/).filter(Boolean)).toEqual(provider.hosts)
+      expect(normalizeAllowedHosts(formValue.split(/[\s,]+/).filter(Boolean)).ok, provider.id).toBe(true)
       expect(normalizeAuthStyle(provider.authHeader, provider.authScheme).ok, provider.id).toBe(true)
     }
   })

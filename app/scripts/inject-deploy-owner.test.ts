@@ -28,27 +28,55 @@ describe('deploy owner identity', () => {
 
   it('refuses an organization owner with a clear reason instead of binding it', async () => {
     const f = (async () => json({ id: 7, login: 'acme', type: 'Organization' })) as unknown as typeof fetch
-    expect(await injectDeployOwner({} as NodeJS.ProcessEnv, f, remote('git@github.com:acme/vault.git')))
+    const actionsContext = {
+      GITHUB_REPOSITORY_OWNER_ID: '7',
+      GITHUB_REPOSITORY_OWNER: 'acme',
+      GITHUB_REPOSITORY: 'acme/vault',
+    } as NodeJS.ProcessEnv
+    expect(await injectDeployOwner(actionsContext, f, remote('git@github.com:acme/vault.git')))
       .toEqual({ id: null, login: 'acme', repo: 'acme/vault', error: 'organization' })
   })
 
-  it('falls back to the Actions owner id, then the profile page, and otherwise stays locked without failing the build', async () => {
+  it('uses a matching Actions owner context and otherwise stays locked when the API is unavailable', async () => {
     const down = (async () => new Response('x', { status: 403 })) as unknown as typeof fetch
-    expect(await injectDeployOwner({ GITHUB_REPOSITORY_OWNER_ID: '42' } as NodeJS.ProcessEnv, down, remote('https://github.com/octocat/vault')))
+    const matchingActionsContext = {
+      GITHUB_REPOSITORY_OWNER_ID: '42',
+      GITHUB_REPOSITORY_OWNER: 'octocat',
+      GITHUB_REPOSITORY: 'octocat/vault',
+    } as NodeJS.ProcessEnv
+    expect(await injectDeployOwner(matchingActionsContext, down, remote('https://github.com/octocat/vault')))
+      .toMatchObject({ id: '42', login: 'octocat', repo: 'octocat/vault' })
+    expect(await injectDeployOwner({
+      ...matchingActionsContext,
+      GITHUB_REPOSITORY_OWNER: 'someone-else',
+      GITHUB_REPOSITORY: 'someone-else/other',
+    } as NodeJS.ProcessEnv, down, remote('https://github.com/octocat/vault')))
+      .toEqual({ id: null, login: 'octocat', repo: 'octocat/vault', error: 'lookup_failed' })
+    expect(await injectDeployOwner({
+      ...matchingActionsContext,
+      GITHUB_REPOSITORY: 'octocat/another-repo',
+    } as NodeJS.ProcessEnv, down, remote('https://github.com/octocat/vault')))
       .toMatchObject({ id: '42' })
-    const html = (async (u: string) => String(u).startsWith('https://api.')
-      ? new Response('x', { status: 403 })
-      : new Response('<meta name="octolytics-dimension-user_id" content="318252513"><meta name="octolytics-dimension-user_login" content="octocat">')) as unknown as typeof fetch
-    expect(await injectDeployOwner({} as NodeJS.ProcessEnv, html, remote('https://github.com/octocat/vault')))
-      .toMatchObject({ id: '318252513', login: 'octocat' })
+    let requests = 0
+    const htmlResponse = (async () => {
+      requests += 1
+      return new Response('<meta name="octolytics-dimension-user_id" content="318252513"><meta name="octolytics-dimension-user_login" content="octocat">')
+    }) as unknown as typeof fetch
+    expect(await injectDeployOwner({} as NodeJS.ProcessEnv, htmlResponse, remote('https://github.com/octocat/vault')))
+      .toEqual({ id: null, login: 'octocat', repo: 'octocat/vault', error: 'lookup_failed' })
+    expect(requests).toBe(1)
     expect(await injectDeployOwner({} as NodeJS.ProcessEnv, down, remote('https://github.com/octocat/vault')))
       .toEqual({ id: null, login: 'octocat', repo: 'octocat/vault', error: 'lookup_failed' })
   })
 
-  it('does not accept a profile page that names a different login', async () => {
-    const f = (async (u: string) => String(u).startsWith('https://api.')
-      ? new Response('x', { status: 500 })
-      : new Response('<meta name="octolytics-dimension-user_id" content="5"><meta name="octolytics-dimension-user_login" content="someone-else">')) as unknown as typeof fetch
-    expect((await injectDeployOwner({} as NodeJS.ProcessEnv, f, remote('https://github.com/octocat/vault'))).id).toBeNull()
+  it('rejects an Actions ID when the repository owner context alone mismatches the origin', async () => {
+    const f = (async () => new Response('x', { status: 500 })) as unknown as typeof fetch
+    const env = {
+      GITHUB_REPOSITORY_OWNER_ID: '42',
+      GITHUB_REPOSITORY_OWNER: 'octocat',
+      GITHUB_REPOSITORY: 'another-owner/vault',
+    } as NodeJS.ProcessEnv
+    expect(await injectDeployOwner(env, f, remote('https://github.com/octocat/vault')))
+      .toEqual({ id: null, login: 'octocat', repo: 'octocat/vault', error: 'lookup_failed' })
   })
 })

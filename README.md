@@ -201,7 +201,7 @@ Choose the deployment path that matches how you work. Every supported build path
 
 ### 1. Deploy to Cloudflare button
 
-The Deploy Button is the quickest route. Authorize GitHub and Cloudflare; Cloudflare creates a new repository under the GitHub account authorizing deployment, provisions D1, and deploys through Workers Builds. During the Vite build, the checked-out GitHub origin is used to resolve the numeric account ID from the public GitHub profile metadata. That ID becomes the Worker runtime variable `OWNER_GITHUB_ID` and is pinned in D1 on first request.
+The Deploy Button is the quickest route. Authorize GitHub and Cloudflare; Cloudflare creates a new repository under the GitHub account authorizing deployment, provisions D1, and deploys through Workers Builds. During the Vite build, the checked-out GitHub origin is used to resolve the numeric account ID through GitHub's typed JSON user API. If that API is unavailable, the immutable Actions owner ID is accepted only when both `GITHUB_REPOSITORY_OWNER` and the owner in `GITHUB_REPOSITORY` match the checked-out origin. HTML profile metadata is never treated as proof of a personal account; if identity cannot be verified, `/setup` stays locked until `RUNNER_VAULT_OWNER_GITHUB_ID` is configured. That ID becomes the Worker runtime variable `OWNER_GITHUB_ID` and is pinned in D1 on first request.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/tree/main/app)
 
@@ -220,7 +220,7 @@ To import your own fork:
 
 For an existing Worker, use **Settings → Builds → Connect** and select the same repository. The Worker name must match `name` in `app/wrangler.jsonc` (default: `runner-vault`); change the config name too if you intentionally use a different Worker name. The GitHub repository should be your personal fork. If you intentionally connect a repository owned by someone else, add the build variable `RUNNER_VAULT_OWNER_GITHUB_ID` with your own numeric GitHub user ID under **Settings → Builds → Build variables**; that explicit value overrides the repository owner.
 
-Workers Builds runs the same build-time owner resolver. The deploy command reuses that build, then resolves the `DB` D1 binding and deploys through Wrangler. If D1 does not exist, the deploy helper creates it.
+Workers Builds runs the same build-time owner resolver. The deploy command reuses that build, then resolves the `DB` D1 binding and deploys through Wrangler. If D1 does not exist, the deploy helper creates it. For owner lookup reliability, provide `GH_TOKEN` or `GITHUB_TOKEN` as an encrypted Workers Builds build variable; the deploy helper sends it only to GitHub's user API.
 
 **Important — D1 permissions:** Cloudflare's automatically generated Workers Builds API token does not include D1 permissions by default. To let the helper discover/create D1 automatically, open **My Profile → API Tokens**, find the token selected in this Worker under **Settings → Builds → API token**, and add **Account → D1 Read** and **Account → D1 Edit**. Keep the user-scoped token selected for Workers Builds.
 
@@ -247,7 +247,7 @@ gh auth login
 pnpm deploy
 ```
 
-Alternatively, set `RUNNER_VAULT_OWNER_GITHUB_ID` to the numeric ID of the intended personal GitHub account for that build. GitHub Actions builds without a Git checkout can use their trusted `GITHUB_REPOSITORY_OWNER_ID` context. The Worker still checks the GitHub App creator against the resolved ID during `/setup`.
+Alternatively, set `RUNNER_VAULT_OWNER_GITHUB_ID` to the numeric ID of the intended personal GitHub account for that build; this explicit value takes priority. When a Git origin exists but GitHub's JSON API is unavailable, the Actions owner-ID fallback is accepted only if both `GITHUB_REPOSITORY_OWNER` and the owner portion of `GITHUB_REPOSITORY` match the checked-out origin. A mismatch or missing context leaves the Worker locked. GitHub Actions builds without a Git checkout can use their trusted `GITHUB_REPOSITORY_OWNER_ID` context. The Worker still checks the GitHub App creator against the resolved ID during `/setup`.
 
 ### 4. Manual upload / dashboard editor without Git
 

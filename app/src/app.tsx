@@ -12,7 +12,7 @@ import { Head } from 'spiceflow/react'
 import { getDb, getAuth, getSession, getRequestOrigin, requirePageSession } from './db.ts'
 import { ensureSchema } from './lib/schema.ts'
 import { loadRunnerPolicyInput } from './lib/runner-policy.ts'
-import { presetForService } from './lib/presets.ts'
+import { formatAllowedHosts, presetForService } from './lib/presets.ts'
 import {
   SETUP_STATE_COOKIE, SETUP_STATE_MAX_AGE_SECONDS, buildManifest, convertManifest, isConfigured, loadOwnerId, loadOwnerLogin, loadVaultKeys,
   newSetupState, saveGithubApp, setupStateMatches, type VaultEnv,
@@ -338,7 +338,7 @@ export const app = new Spiceflow()
     const serviceId = new URL(request.url).searchParams.get('service') ?? ''
     const preset = presetForService(serviceId)
     const { CredentialForm } = await import('./components/credential-form.tsx')
-    return <div className="space-y-5 max-w-2xl"><div><a href="/vault/services" className="text-sm underline">← Provider catalog</a><h1 className="text-lg font-semibold tracking-tight mt-2">{preset ? `Configure ${preset.label}` : 'Configure a custom service'}</h1><p className="text-sm text-muted-foreground mt-1">Review the provider settings, enter the secret, and explicitly create the credential. The secret is write-only.</p></div><CredentialForm mode="create" preset={preset ? { label: preset.label, docsUrl: preset.docsUrl } : null} defaults={{ delivery: 'proxy', allowedHosts: preset?.hosts.join('\\n') ?? '', authHeader: preset?.authHeader ?? 'Authorization', authScheme: preset?.authScheme ?? 'Bearer', visible: true, lifetime: 'permanent' }} /></div>
+    return <div className="space-y-5 max-w-2xl"><div><a href="/vault/services" className="text-sm underline">← Provider catalog</a><h1 className="text-lg font-semibold tracking-tight mt-2">{preset ? `Configure ${preset.label}` : 'Configure a custom service'}</h1><p className="text-sm text-muted-foreground mt-1">Review the provider settings, enter the secret, and explicitly create the credential. The secret is write-only.</p></div><CredentialForm mode="create" preset={preset ? { label: preset.label, docsUrl: preset.docsUrl } : null} defaults={{ delivery: 'proxy', allowedHosts: preset ? formatAllowedHosts(preset.hosts) : '', authHeader: preset?.authHeader ?? 'Authorization', authScheme: preset?.authScheme ?? 'Bearer', visible: true, lifetime: 'permanent' }} /></div>
   })
 
   // ── One-time registration link ──────────────────────────────────
@@ -362,7 +362,7 @@ export const app = new Spiceflow()
           <p className="text-xs text-muted-foreground mt-1">Link expires in about {Math.max(1, Math.round((link.expiresAt - Date.now()) / 60_000))} min and works once.</p>
         </div>
         {credential.doc && <DocView doc={credential.doc} />}
-        <CredentialForm mode="register" token={params.token} preset={preset ? { label: preset.label } : null} defaults={{ delivery: 'proxy', allowedHosts: preset ? preset.hosts.join('\n') : '', authHeader: preset?.authHeader ?? 'Authorization', authScheme: preset?.authScheme ?? 'Bearer', visible: true, lifetime: 'permanent' }} />
+        <CredentialForm mode="register" token={params.token} preset={preset ? { label: preset.label } : null} defaults={{ delivery: 'proxy', allowedHosts: preset ? formatAllowedHosts(preset.hosts) : '', authHeader: preset?.authHeader ?? 'Authorization', authScheme: preset?.authScheme ?? 'Bearer', visible: true, lifetime: 'permanent' }} />
       </div>
     )
   })
