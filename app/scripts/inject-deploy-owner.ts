@@ -22,11 +22,6 @@ function repositoryFromRemote(remote: string): { owner: string; repo: string } {
   return { owner: match[1], repo: match[2] }
 }
 
-function metaContent(html: string, name: string): string | null {
-  const tag = html.match(new RegExp(`<meta\\b(?=[^>]*\\bname="${name}")[^>]*>`, 'i'))?.[0]
-  return tag?.match(/\bcontent="([^"]+)"/i)?.[1] ?? null
-}
-
 function validatedId(value: string | undefined, source: string): string {
   const id = value?.trim() ?? ''
   if (!GITHUB_ID_PATTERN.test(id)) {
@@ -35,10 +30,31 @@ function validatedId(value: string | undefined, source: string): string {
   return id
 }
 
-export function resolveGitHubActionsOwnerId(env: NodeJS.ProcessEnv = process.env): string | null {
+function actionsContextMatchesOwner(env: NodeJS.ProcessEnv, expectedOwner: string): boolean {
+  const contextOwner = env.GITHUB_REPOSITORY_OWNER?.trim()
+  const repository = env.GITHUB_REPOSITORY?.trim()
+  if (!contextOwner || !repository) return false
+  const parts = repository.split('/')
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return false
+  const expected = expectedOwner.toLowerCase()
+  return contextOwner.toLowerCase() === expected && parts[0].toLowerCase() === expected
+}
+
+/**
+ * Trust the immutable Actions owner ID for a checked-out origin only when both
+ * repository context values identify the same owner as that origin.
+ */
+export function resolveGitHubActionsOwnerId(
+  env: NodeJS.ProcessEnv = process.env,
+  expectedOwner?: string,
+): string | null {
   const value = env.GITHUB_REPOSITORY_OWNER_ID
   if (!value) return null
   const ownerId = validatedId(value, 'GITHUB_REPOSITORY_OWNER_ID')
+  if (expectedOwner && !actionsContextMatchesOwner(env, expectedOwner)) {
+    console.warn('[deploy-owner] ignoring GitHub Actions owner ID because its repository context does not match the checked-out origin owner')
+    return null
+  }
   console.log('[deploy-owner] using GitHub Actions repository owner ID ' + ownerId)
   return ownerId
 }
@@ -79,35 +95,17 @@ async function lookupViaApi(owner: string, fetchFn: Fetch, env: NodeJS.ProcessEn
   }
 }
 
-/** Last resort: the public profile page's metadata. */
-async function lookupViaProfileHtml(owner: string, fetchFn: Fetch): Promise<Lookup> {
-  try {
-    const response = await fetchFn('https://github.com/' + encodeURIComponent(owner), {
-      headers: { Accept: 'text/html', 'User-Agent': 'runner-vault-deploy-owner' },
-      signal: AbortSignal.timeout(10_000),
-    })
-    if (!response.ok) return null
-    const html = await response.text()
-    const id = metaContent(html, 'octolytics-dimension-user_id')
-    const login = metaContent(html, 'octolytics-dimension-user_login')
-    if (!id || !login) return null
-    // The profile page does not state the account type; the manifest flow rejects
-    // organizations later because the App must be created by a User.
-    return { id: validatedId(id, 'GitHub profile'), login, type: 'User' }
-  } catch {
-    return null
-  }
-}
-
 /**
  * Resolve the owner before every production Vite build. Never throws for a lookup
  * problem (only for a malformed explicit ID): the Worker simply stays locked.
  *
  * Priority:
- * 1. Explicit numeric ID (`RUNNER_VAULT_OWNER_GITHUB_ID`).
- * 2. Owner of the checked-out GitHub origin: JSON API, then
- *    GitHub Actions' immutable owner id, then the profile page.
- * 3. GitHub Actions' owner id / authenticated GitHub CLI when there is no GitHub origin.
+ * 1. Explicit numeric ID (RUNNER_VAULT_OWNER_GITHUB_ID).
+ * 2. Checked-out GitHub origin via the typed JSON API, then a matching Actions
+ *    owner ID whose repository context matches that origin.
+ * 3. Without a Git origin, GitHub Actions' owner ID / authenticated GitHub CLI.
+ *
+ * HTML profile metadata is not trusted because it cannot prove account type.
  */
 export async function injectDeployOwner(
   env: NodeJS.ProcessEnv = process.env,
@@ -142,14 +140,9 @@ export async function injectDeployOwner(
       console.log('[deploy-owner] bound GitHub account ID ' + found.id + ' from ' + repo)
       return { id: found.id, login: found.login, repo }
     }
-    const actionsId = resolveGitHubActionsOwnerId(env)
+    const actionsId = resolveGitHubActionsOwnerId(env, identity.owner)
     if (actionsId) return { id: actionsId, login: identity.owner, repo }
-    const scraped = await lookupViaProfileHtml(identity.owner, fetchFn)
-    if (scraped && scraped.login.toLowerCase() === identity.owner.toLowerCase()) {
-      console.log('[deploy-owner] bound GitHub account ID ' + scraped.id + ' from ' + repo + ' (profile page)')
-      return { id: scraped.id, login: scraped.login, repo }
-    }
-    console.warn('[deploy-owner] could not look up ' + identity.owner + '; setup stays locked until RUNNER_VAULT_OWNER_GITHUB_ID is set')
+    console.warn('[deploy-owner] could not verify ' + identity.owner + ' as a personal GitHub account; setup stays locked until RUNNER_VAULT_OWNER_GITHUB_ID is set')
     return { id: null, login: identity.owner, repo, error: 'lookup_failed' }
   }
 

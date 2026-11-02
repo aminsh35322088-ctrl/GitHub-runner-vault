@@ -8,7 +8,7 @@ This directory is the self-contained Cloudflare Worker project. It includes the 
 
 Use the button in the repository's root README. Cloudflare creates a new repository under the GitHub account authorizing the deployment, provisions the D1 resource, and configures Workers Builds.
 
-During the production Vite build, the project reads the checked-out GitHub `origin`, resolves the owner's numeric ID from the public GitHub profile metadata, and injects it as the Worker's `OWNER_GITHUB_ID` runtime variable. The first Worker request pins that ID in D1. The GitHub App created during `/setup` must belong to that exact personal GitHub account.
+During the production Vite build, the project reads the checked-out GitHub origin and resolves the owner through GitHub's typed JSON user API. If the API is unavailable, the immutable Actions owner ID is accepted only when both `GITHUB_REPOSITORY_OWNER` and the owner portion of `GITHUB_REPOSITORY` match that origin. HTML profile metadata is never treated as proof of a personal account. If the identity cannot be verified, `/setup` stays locked until `RUNNER_VAULT_OWNER_GITHUB_ID` is explicitly set. To avoid anonymous API rate limits, you may provide `GH_TOKEN` as an encrypted Workers Builds build variable; the resolver also accepts `GITHUB_TOKEN`. The first Worker request pins the resulting ID in D1. The GitHub App created during `/setup` must belong to that exact personal GitHub account.
 
 The button's source URL is fixed to the upstream repository; it does not deploy a pre-existing fork's commits. To deploy your existing fork instead, use the Dashboard GitHub connection below.
 
