@@ -239,6 +239,8 @@ Existing deployments that already have `BETTER_AUTH_SECRET` and `ENCRYPTION_KEY`
 
 ### Starting over
 
+Existing D1 owner pins are preserved during upgrades. To rebind a legacy vault that was claimed by the wrong first visitor, delete only the owner/sign-in settings below; the next request pins the current repository owner. Service credentials are not touched.
+
 If sign-in is misconfigured, delete the sign-in settings and open `/setup` again (D1 console):
 `DELETE FROM vault_setting WHERE key IN ('github_client_id','github_client_secret','owner_github_id','owner_github_login');`
 Stored credentials are not touched.
