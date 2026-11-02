@@ -4,6 +4,15 @@
 
 export const CREDENTIAL_NAME = /^[A-Z][A-Z0-9_]{1,63}$/
 
+/** Normalize a human label to the environment-variable name expected by runners. */
+export function normalizeCredentialName(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const normalized = value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').replace(/_+/g, '_')
+  const leadingLetter = normalized.replace(/^[0-9_]+/, '')
+  return leadingLetter.slice(0, 64)
+}
+
 export function validCredentialName(name: unknown): name is string {
   return typeof name === 'string' && CREDENTIAL_NAME.test(name)
 }

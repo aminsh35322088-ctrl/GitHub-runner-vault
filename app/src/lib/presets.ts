@@ -41,6 +41,13 @@ export const SERVICE_CATALOG: ServicePreset[] = [
   { id: 'slack', label: 'Slack', category: 'Communication', description: 'Use Slack Web API methods and workspace integrations.', docsUrl: 'https://api.slack.com/authentication/token-types', hosts: ['slack.com'], authHeader: 'Authorization', authScheme: 'Bearer' },
 ]
 
+export function defaultPurposeForService(service: string): string {
+  const preset = presetForService(service)
+  if (preset) return preset.description
+  const label = service.trim().slice(0, 80) || 'custom service'
+  return `Use the ${label} credential through the vault proxy.`
+}
+
 export function presetForService(service: string): ServicePreset | null {
   const key = service.toLowerCase().replace(/[^a-z0-9]/g, '')
   return SERVICE_CATALOG.find((p) => p.id === key || p.label.toLowerCase().replace(/[^a-z0-9]/g, '') === key) ?? null

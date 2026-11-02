@@ -21,7 +21,7 @@ export VAULT_URL=https://<vault-origin>
 
 node vault.mjs list
 node vault.mjs use CF_API_TOKEN GET https://api.cloudflare.com/client/v4/user/tokens/verify --purpose "verify token"
-node vault.mjs request --name RAILWAY_TOKEN --service Railway --purpose "deploy" --doc doc.json
+node vault.mjs request --name RAILWAY_TOKEN --service Railway --doc doc.json
 ```
 
 `request` prints a one-time link for the owner and nothing secret. The model never

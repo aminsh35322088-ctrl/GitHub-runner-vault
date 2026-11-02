@@ -134,7 +134,7 @@ Only Active + Visible entries. Never values, hosts or ids.
 
 ### `POST /api/runner/registrations`
 
-Body `{ name, service, purpose, doc }`, where `doc` follows the schema in `docs/runner-usage.md`.
+Body `{ name, service, doc }`, where `doc` follows the schema in `docs/runner-usage.md`. The vault generates purpose automatically from the service catalog.
 `200 { link, expiresAt }`: give the link to the owner. `400 invalid_name | reserved_name | invalid_doc` (with `detail`),
 `409 exists`, `429 rate_limited` (10 per hour).
 
@@ -175,7 +175,7 @@ export VAULT_URL=https://<your-vault-origin>
 
 node client/vault.mjs list
 node client/vault.mjs use CF_API_TOKEN GET https://api.cloudflare.com/client/v4/user/tokens/verify --purpose "verify token"
-node client/vault.mjs request --name RAILWAY_TOKEN --service Railway --purpose "deploy" --doc doc.json
+node client/vault.mjs request --name RAILWAY_TOKEN --service Railway --doc doc.json
 ```
 
 Exit codes: `0` ok, `2` vault refused, `3` upstream HTTP error. See `docs/runner-usage.md` for `doc.json` and what a model
@@ -183,17 +183,17 @@ should expect. The trusted runner workflow must request `permissions: id-token: 
 
 ## Owner UI
 
-From the dashboard, choose **Add credential** to browse the built-in provider catalog (Cloudflare, Railway, GitHub, Vercel, Netlify, DigitalOcean, OpenAI, Anthropic, Groq, Mistral, Hugging Face, Stripe, Sentry, Supabase, Pinecone and Slack), search by provider/category, or add a custom service. Known providers prefill their documented API host and auth header; the owner can inspect and edit these values before creating a credential. This path works independently of any runner/model registration request. The runner registration flow uses the same provider catalog for its defaults.
+From the dashboard, choose **Add credential** to browse the built-in provider catalog (Cloudflare, Railway, GitHub, Vercel, Netlify, DigitalOcean, OpenAI, Anthropic, Groq, Mistral, Hugging Face, Stripe, Sentry, Supabase, Pinecone and Slack), search by provider/category, or add a custom service. Known providers prefill their documented API host and auth header; the owner can inspect and edit these values before creating a credential. This path works independently of any runner/model registration request. Purpose is generated from the selected service; no purpose field is required. On supported providers, entering a token triggers server-side verification and saving repeats the check before encryption. GitHub classic OAuth scopes and Cloudflare User/Account Token policies are shown where the provider API exposes them. GitHub does not expose a complete Fine-grained PAT permission list through its general authentication endpoint. New Cloudflare `cfat_` Account Tokens are routed directly to the Account Token verification endpoint and show an Account ID field next to the token input. The runner registration flow uses the same provider catalog for its defaults.
 
 Sign in at `https://<origin>/login` with the owner GitHub account.
 
 | Page | What it does |
 | --- | --- |
 | `/vault` | Credential list: status, delivery, expiry, last used. |
-| `/vault/register/<link>` | The one-time registration page: the agent's setup notes above a write-only secret field, plus hosts, auth header/scheme, lifetime, expiry and visibility. |
+| `/vault/register/<link>` | The one-time registration page: the agent's setup notes above a write-only secret field, automatic token verification and permission inspection, plus advanced host, auth, lifetime, expiry and visibility controls. |
 | `/vault/credentials/<id>` | Details, enable/disable, show/hide, delete, replace value or rules, recent activity. Stored values are never displayed. |
 | `/vault/audit` | Append-only audit log (database triggers block updates and deletes). |
-| `/vault/settings` | **Revoke all runner sessions**; add a metadata-only entry (for example `GITHUB_TOKEN`). |
+| `/vault/settings` | Configure the runner repository, **revoke all runner sessions**, review advanced-settings guidance and add metadata-only entries (for example `GITHUB_TOKEN`). |
 
 ## Deployment
 

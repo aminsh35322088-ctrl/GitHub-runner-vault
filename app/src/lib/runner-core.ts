@@ -84,18 +84,18 @@ export async function registry(deps: RunnerDeps, authorization: string | null) {
 export async function requestCredential(
   deps: RunnerDeps,
   authorization: string | null,
-  input: { name: unknown; service: unknown; purpose: unknown; doc: unknown },
+  input: { name: unknown; service: unknown; purpose?: unknown; doc: unknown },
 ) {
   const auth = await authenticate(deps, authorization)
   if (!auth.ok) return auth.res
-  if (typeof input.name !== 'string' || typeof input.service !== 'string' || typeof input.purpose !== 'string') {
+  if (typeof input.name !== 'string' || typeof input.service !== 'string') {
     return fail(400, 'invalid_request')
   }
   if (await countSince(deps.db, 'registration_requested', deps.now - 3600_000) >= REGISTRATION_LIMIT_PER_HOUR) {
     return fail(429, 'rate_limited')
   }
   const result = await requestRegistration(deps.db, {
-    name: input.name, service: input.service, purpose: input.purpose, doc: input.doc,
+    name: input.name, service: input.service, purpose: typeof input.purpose === 'string' ? input.purpose : undefined, doc: input.doc,
     requestedBy: auth.session.sub, now: deps.now,
   })
   if (!result.ok) return fail(result.error === 'exists' ? 409 : 400, result.error, result.detail ? { detail: result.detail } : {})

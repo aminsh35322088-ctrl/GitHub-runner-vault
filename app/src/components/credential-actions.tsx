@@ -58,12 +58,12 @@ export function AddExternalForm() {
   const { error, run } = useRun()
   return (
     <form className="flex flex-col gap-3 max-w-md" action={async (fd: FormData) => {
-      await run(() => addExternalAction({ name: String(fd.get('name') ?? ''), service: String(fd.get('service') ?? ''), purpose: String(fd.get('purpose') ?? '') }))
+      await run(() => addExternalAction({ name: String(fd.get('name') ?? ''), service: String(fd.get('service') ?? '') }))
     }}>
       <Input name="name" placeholder="GITHUB_TOKEN" required className="font-mono" />
       <Input name="service" placeholder="Service (GitHub)" required />
-      <Input name="purpose" placeholder="What is it for" required />
-      <Button type="submit" variant="outline">Add metadata-only entry</Button>
+      <p className="text-sm text-muted-foreground">Purpose is generated automatically from the selected service.</p>
+      <Button type="submit" variant="outline" className="min-h-11">Add metadata-only entry</Button>
       {error && <span className="text-xs text-destructive">{error}</span>}
     </form>
   )

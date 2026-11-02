@@ -43,31 +43,89 @@ function Shell({ request, children, signedIn }: { request: Request; children: Re
     <html lang="en" className={cn('h-dvh', dark ? 'dark' : undefined)} suppressHydrationWarning>
       <Head>
         <Head.Meta charSet="UTF-8" />
-        <Head.Meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <Head.Meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
         <Head.Meta name="robots" content="noindex, nofollow" />
         <Head.Title>Runner Credential Vault</Head.Title>
       </Head>
       <body className="flex h-dvh flex-col bg-background font-sans antialiased">
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
-        <nav className="shrink-0 border-b border-border">
-          <div className="max-w-(--content-max-width) mx-auto border-x border-border flex h-14 items-center justify-between px-4 sm:px-6">
+        <nav className="z-20 shrink-0 border-b border-border bg-background">
+          <div className="mx-auto flex h-14 max-w-(--content-max-width) items-center justify-between px-3 sm:border-x sm:px-6">
             <a href="/vault" className="font-semibold tracking-tight">Runner Credential Vault</a>
             {signedIn && (
-              <div className="flex items-center gap-4 text-sm text-muted-foreground">
-                <a href="/vault" className="hover:text-foreground">Credentials</a>
-                <a href="/vault/services" className="hover:text-foreground">Add credential</a>
-                <a href="/vault/audit" className="hover:text-foreground">Audit</a>
-                <a href="/vault/settings" className="hover:text-foreground">Settings</a>
-                <a href="/logout" className="hover:text-foreground">Sign out</a>
-              </div>
+              <>
+                <div className="hidden items-center gap-5 text-sm text-muted-foreground sm:flex">
+                  <a href="/vault" className="hover:text-foreground">Credentials</a>
+                  <a href="/vault/services" className="hover:text-foreground">Add credential</a>
+                  <a href="/vault/audit" className="hover:text-foreground">Audit</a>
+                  <a href="/vault/settings" className="hover:text-foreground">Settings</a>
+                  <a href="/logout" className="hover:text-foreground">Sign out</a>
+                </div>
+                <a href="/logout" className="rounded-lg border border-border px-3 py-2 text-sm sm:hidden">Sign out</a>
+              </>
             )}
           </div>
         </nav>
         <div className="min-h-0 grow overflow-y-auto">
-          <main className="max-w-(--content-max-width) mx-auto border-x border-border min-h-full p-4 sm:p-6">{children}</main>
+          <main className="mx-auto min-h-full max-w-(--content-max-width) px-3 pb-24 pt-4 sm:border-x sm:px-6 sm:pb-8 sm:pt-6">{children}</main>
         </div>
+        {signedIn && (
+          <nav aria-label="Mobile navigation" className="fixed inset-x-0 bottom-0 z-30 border-t border-border bg-background/95 pb-[env(safe-area-inset-bottom)] shadow-[0_-6px_24px_-16px_rgba(0,0,0,.35)] backdrop-blur sm:hidden">
+            <div className="mx-auto grid max-w-md grid-cols-4 gap-1 px-2 pt-2">
+              {[
+                { href: '/vault', label: 'Credentials' },
+                { href: '/vault/services', label: 'Add' },
+                { href: '/vault/audit', label: 'Audit' },
+                { href: '/vault/settings', label: 'Settings' },
+              ].map((item) => {
+                const current = new URL(request.url).pathname
+                const active = item.href === '/vault' ? current === '/vault' : current === item.href || current.startsWith(item.href + '/')
+                return <a key={item.href} href={item.href} aria-current={active ? 'page' : undefined} className={cn('flex min-h-11 items-center justify-center rounded-lg px-1 text-center text-xs font-medium', active ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted')}>{item.label}</a>
+              })}
+            </div>
+          </nav>
+        )}
       </body>
     </html>
+  )
+}
+
+function CredentialValidationSummary({ value }: { value: string | null }) {
+  if (!value) return null
+  let report: {
+    status?: string
+    identity?: string
+    tokenType?: string
+    message?: string
+    permissionsComplete?: boolean
+    permissions?: Array<{ name?: string; access?: string; scope?: string; resources?: string[] }>
+  }
+  try { report = JSON.parse(value) as typeof report } catch { return null }
+  if (!report || typeof report !== 'object') return null
+  return (
+    <section className="space-y-3 rounded-xl border border-border p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold">Token verification & permissions</h2>
+        <Badge variant={report.status === 'valid' ? 'secondary' : 'outline'}>{report.status ?? 'Not verified'}</Badge>
+      </div>
+      <p className="text-sm text-muted-foreground">{report.message ?? 'No validation message available.'}</p>
+      <div className="flex flex-wrap gap-2 text-xs">
+        {report.identity && <span className="rounded-full border border-border px-2.5 py-1">{report.identity}</span>}
+        {report.tokenType && <span className="rounded-full border border-border px-2.5 py-1">{report.tokenType}</span>}
+        {report.permissionsComplete && <span className="rounded-full border border-border px-2.5 py-1">Complete permission list</span>}
+      </div>
+      {report.permissions?.length ? (
+        <ul className="grid gap-2 sm:grid-cols-2">
+          {report.permissions.map((item, index) => (
+            <li key={index} className="min-w-0 rounded-lg border border-border px-3 py-2">
+              <p className="break-words text-sm font-medium">{item.name ?? 'Permission'}</p>
+              <p className="break-words text-xs text-muted-foreground">{item.access ?? 'unknown'}{item.scope ? ` · ${item.scope}` : ''}</p>
+              {item.resources?.length ? <p className="mt-1 break-all text-xs text-muted-foreground">{item.resources.join(', ')}</p> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
   )
 }
 
@@ -290,8 +348,8 @@ export const app = new Spiceflow()
     const now = Date.now()
     const runnerConfigured = (await loadRunnerPolicyInput(getDb())) !== null || Boolean((env as unknown as VaultEnv).RUNNER_REPOSITORY)
     return (
-      <div className="space-y-4">
-        <div className="flex items-center justify-between gap-3"><h1 className="text-lg font-semibold tracking-tight">Credentials</h1><a href="/vault/services" className="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground">+ Add credential</a></div>
+      <div className="mx-auto w-full min-w-0 max-w-4xl space-y-4">
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-3"><h1 className="text-xl font-semibold tracking-tight">Credentials</h1><a href="/vault/services" className="inline-flex min-h-11 flex-1 items-center justify-center rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground sm:flex-none">+ Add credential</a></div>
         {!runnerConfigured && (
           <div role="status" className="rounded-lg border border-border bg-muted/40 p-4 space-y-1">
             <p className="text-sm font-medium">Next step: connect your runner repository</p>
@@ -304,23 +362,45 @@ export const app = new Spiceflow()
         {rows.length === 0 ? (
           <p className="text-sm text-muted-foreground">Nothing registered yet. Add a credential here, or let a model on the runner request one.</p>
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow><TableHead>Name</TableHead><TableHead>Service</TableHead><TableHead>Status</TableHead><TableHead>Use</TableHead><TableHead>Expires</TableHead><TableHead>Last used</TableHead></TableRow>
-            </TableHeader>
-            <TableBody>
+          <>
+            <div className="hidden overflow-x-auto sm:block">
+              <Table>
+                <TableHeader>
+                  <TableRow><TableHead>Name</TableHead><TableHead>Service</TableHead><TableHead>Status</TableHead><TableHead>Use</TableHead><TableHead>Expires</TableHead><TableHead>Last used</TableHead></TableRow>
+                </TableHeader>
+                <TableBody>
+                  {rows.map((c) => (
+                    <TableRow key={c.id}>
+                      <TableCell><a className="font-mono underline" href={`/vault/credentials/${c.id}`}>{c.name}</a></TableCell>
+                      <TableCell>{c.service}</TableCell>
+                      <TableCell>{statusBadge(c, now)}</TableCell>
+                      <TableCell>{c.externallyManaged ? 'external' : c.delivery}</TableCell>
+                      <TableCell>{c.expiresAt ? <TimeAgo ts={c.expiresAt} /> : c.lifetime === 'permanent' ? 'never' : '—'}</TableCell>
+                      <TableCell>{c.lastUsedAt ? <TimeAgo ts={c.lastUsedAt} /> : '—'}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            <div className="grid gap-3 sm:hidden">
               {rows.map((c) => (
-                <TableRow key={c.id}>
-                  <TableCell><a className="font-mono underline" href={`/vault/credentials/${c.id}`}>{c.name}</a></TableCell>
-                  <TableCell>{c.service}</TableCell>
-                  <TableCell>{statusBadge(c, now)}</TableCell>
-                  <TableCell>{c.externallyManaged ? 'external' : c.delivery}</TableCell>
-                  <TableCell>{c.expiresAt ? <TimeAgo ts={c.expiresAt} /> : c.lifetime === 'permanent' ? 'never' : '—'}</TableCell>
-                  <TableCell>{c.lastUsedAt ? <TimeAgo ts={c.lastUsedAt} /> : '—'}</TableCell>
-                </TableRow>
+                <a key={c.id} href={`/vault/credentials/${c.id}`} className="block min-w-0 rounded-xl border border-border bg-card p-4 active:bg-muted/50">
+                  <div className="flex min-w-0 items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="break-all font-mono text-sm font-semibold">{c.name}</p>
+                      <p className="mt-1 text-sm text-muted-foreground">{c.service}</p>
+                    </div>
+                    {statusBadge(c, now)}
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-3 border-t border-border pt-3 text-sm">
+                    <div><p className="text-xs text-muted-foreground">Delivery</p><p>{c.externallyManaged ? 'External' : c.delivery}</p></div>
+                    <div><p className="text-xs text-muted-foreground">Expires</p><p>{c.expiresAt ? <TimeAgo ts={c.expiresAt} /> : c.lifetime === 'permanent' ? 'Never' : '—'}</p></div>
+                    <div className="col-span-2"><p className="text-xs text-muted-foreground">Last used</p><p>{c.lastUsedAt ? <TimeAgo ts={c.lastUsedAt} /> : 'Never'}</p></div>
+                  </div>
+                </a>
               ))}
-            </TableBody>
-          </Table>
+            </div>
+          </>
         )}
       </div>
     )
@@ -330,7 +410,7 @@ export const app = new Spiceflow()
   .page('/vault/services', async ({ request }) => {
     await requirePageSession(request)
     const { ServiceCatalog } = await import('./components/service-catalog.tsx')
-    return <div className="space-y-5"><div><h1 className="text-lg font-semibold tracking-tight">Add a credential</h1><p className="text-sm text-muted-foreground mt-1">Choose a provider to prefill its API host and authentication style, or configure a custom service.</p></div><ServiceCatalog /></div>
+    return <div className="mx-auto w-full min-w-0 max-w-4xl space-y-5"><div><h1 className="text-xl font-semibold tracking-tight">Add a credential</h1><p className="mt-1 text-sm text-muted-foreground">Choose a provider to prefill its API host and authentication style, or configure a custom service.</p></div><ServiceCatalog /></div>
   })
 
   .page('/vault/new', async ({ request }) => {
@@ -338,7 +418,7 @@ export const app = new Spiceflow()
     const serviceId = new URL(request.url).searchParams.get('service') ?? ''
     const preset = presetForService(serviceId)
     const { CredentialForm } = await import('./components/credential-form.tsx')
-    return <div className="space-y-5 max-w-2xl"><div><a href="/vault/services" className="text-sm underline">← Provider catalog</a><h1 className="text-lg font-semibold tracking-tight mt-2">{preset ? `Configure ${preset.label}` : 'Configure a custom service'}</h1><p className="text-sm text-muted-foreground mt-1">Review the provider settings, enter the secret, and explicitly create the credential. The secret is write-only.</p></div><CredentialForm mode="create" preset={preset ? { label: preset.label, docsUrl: preset.docsUrl } : null} defaults={{ delivery: 'proxy', allowedHosts: preset ? formatAllowedHosts(preset.hosts) : '', authHeader: preset?.authHeader ?? 'Authorization', authScheme: preset?.authScheme ?? 'Bearer', visible: true, lifetime: 'permanent' }} /></div>
+    return <div className="mx-auto w-full min-w-0 max-w-3xl space-y-5"><div><a href="/vault/services" className="inline-flex min-h-11 items-center text-sm underline underline-offset-4">← Provider catalog</a><h1 className="mt-2 text-xl font-semibold tracking-tight">{preset ? `Configure ${preset.label}` : 'Configure a custom service'}</h1><p className="mt-1 text-sm text-muted-foreground">Review the provider settings, enter the secret, and explicitly create the credential. The secret is write-only.</p></div><CredentialForm mode="create" preset={preset ? { label: preset.label, docsUrl: preset.docsUrl } : null} defaults={{ delivery: 'proxy', allowedHosts: preset ? formatAllowedHosts(preset.hosts) : '', authHeader: preset?.authHeader ?? 'Authorization', authScheme: preset?.authScheme ?? 'Bearer', visible: true, lifetime: 'permanent' }} /></div>
   })
 
   // ── One-time registration link ──────────────────────────────────
@@ -355,14 +435,14 @@ export const app = new Spiceflow()
     const { CredentialForm } = await import('./components/credential-form.tsx')
     const preset = presetForService(credential.service)
     return (
-      <div className="space-y-6 max-w-2xl">
+      <div className="mx-auto w-full min-w-0 max-w-3xl space-y-5 sm:space-y-6">
         <div>
-          <h1 className="text-lg font-semibold tracking-tight font-mono">{credential.name}</h1>
-          <p className="text-sm text-muted-foreground">{credential.service} — {credential.purpose}</p>
+          <h1 className="break-all text-base font-semibold tracking-tight font-mono sm:text-lg">{credential.name}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">{credential.service}</p>
           <p className="text-xs text-muted-foreground mt-1">Link expires in about {Math.max(1, Math.round((link.expiresAt - Date.now()) / 60_000))} min and works once.</p>
         </div>
         {credential.doc && <DocView doc={credential.doc} />}
-        <CredentialForm mode="register" token={params.token} preset={preset ? { label: preset.label } : null} defaults={{ delivery: 'proxy', allowedHosts: preset ? formatAllowedHosts(preset.hosts) : '', authHeader: preset?.authHeader ?? 'Authorization', authScheme: preset?.authScheme ?? 'Bearer', visible: true, lifetime: 'permanent' }} />
+        <CredentialForm mode="register" token={params.token} serviceName={credential.service} preset={preset ? { label: preset.label } : null} defaults={{ delivery: 'proxy', allowedHosts: preset ? formatAllowedHosts(preset.hosts) : '', authHeader: preset?.authHeader ?? 'Authorization', authScheme: preset?.authScheme ?? 'Bearer', visible: true, lifetime: 'permanent' }} />
       </div>
     )
   })
@@ -378,30 +458,33 @@ export const app = new Spiceflow()
     const { CredentialControls } = await import('./components/credential-actions.tsx')
     const { CredentialForm } = await import('./components/credential-form.tsx')
     return (
-      <div className="space-y-6 max-w-2xl">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2"><h1 className="text-lg font-semibold tracking-tight font-mono">{c.name}</h1>{statusBadge(c, now)}</div>
-          <p className="text-sm text-muted-foreground">{c.service} — {c.purpose}</p>
+      <div className="mx-auto w-full min-w-0 max-w-3xl space-y-5 sm:space-y-6">
+        <div className="space-y-2">
+          <div className="flex min-w-0 flex-wrap items-start gap-2"><h1 className="min-w-0 break-all font-mono text-base font-semibold tracking-tight sm:text-lg">{c.name}</h1>{statusBadge(c, now)}</div>
+          <p className="break-words text-sm text-muted-foreground">{c.service}</p>
         </div>
-        <dl className="text-sm grid gap-1 sm:grid-cols-[10rem_1fr]">
-          <dt className="text-muted-foreground">Delivery</dt><dd>{c.externallyManaged ? 'managed elsewhere (metadata only)' : c.delivery}</dd>
-          <dt className="text-muted-foreground">Allowed hosts</dt><dd className="font-mono">{c.allowedHosts.join(', ') || '—'}</dd>
-          <dt className="text-muted-foreground">Auth header</dt><dd className="font-mono">{c.authHeader}: {c.authScheme}</dd>
-          <dt className="text-muted-foreground">Lifetime</dt><dd>{c.lifetime}{c.expiresAt ? <> · expires <TimeAgo ts={c.expiresAt} /></> : null}</dd>
+        <dl className="grid min-w-0 grid-cols-[7.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 rounded-xl border border-border p-3 text-sm sm:grid-cols-[10rem_minmax(0,1fr)] sm:p-4">
+          <dt className="text-muted-foreground">Delivery</dt><dd className="break-words">{c.externallyManaged ? 'managed elsewhere (metadata only)' : c.delivery}</dd>
+          <dt className="text-muted-foreground">Allowed hosts</dt><dd className="break-all font-mono">{c.allowedHosts.join(', ') || '—'}</dd>
+          <dt className="text-muted-foreground">Auth header</dt><dd className="break-words font-mono">{c.authHeader}: {c.authScheme}</dd>
+          <dt className="text-muted-foreground">Lifetime</dt><dd className="break-words">{c.lifetime}{c.expiresAt ? <> · expires <TimeAgo ts={c.expiresAt} /></> : null}</dd>
           <dt className="text-muted-foreground">Value stored</dt><dd>{c.hasValue ? 'yes (write-only)' : 'no'}</dd>
         </dl>
-        <CredentialControls id={c.id} name={c.name} enabled={c.status === 'active'} visible={c.visible} canEnable={c.hasValue || c.externallyManaged} />
+        <CredentialValidationSummary value={c.validationDetails} />
+        <section className="rounded-xl border border-border p-4 sm:p-5">
+          <CredentialControls id={c.id} name={c.name} enabled={c.status === 'active'} visible={c.visible} canEnable={c.hasValue || c.externallyManaged} />
+        </section>
         {c.doc && <DocView doc={c.doc} />}
         {!c.externallyManaged && (
-          <div className="space-y-3">
-            <h2 className="text-sm font-semibold">Replace value or change rules</h2>
-            <CredentialForm mode="replace" id={c.id} defaults={{ delivery: c.delivery, allowedHosts: c.allowedHosts.join('\n'), authHeader: c.authHeader, authScheme: c.authScheme, visible: c.visible, lifetime: c.lifetime }} />
-          </div>
+          <section className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
+            <h2 className="text-base font-semibold">Replace value or change rules</h2>
+            <CredentialForm mode="replace" id={c.id} serviceName={c.service} defaults={{ delivery: c.delivery, allowedHosts: c.allowedHosts.join('\n'), authHeader: c.authHeader, authScheme: c.authScheme, visible: c.visible, lifetime: c.lifetime }} />
+          </section>
         )}
-        <div className="space-y-2">
+        <section className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
           <h2 className="text-sm font-semibold">Recent activity</h2>
           <AuditTable rows={log} />
-        </div>
+        </section>
       </div>
     )
   })
@@ -410,8 +493,8 @@ export const app = new Spiceflow()
     await requirePageSession(request)
     const rows = await listAudit(getDb(), { limit: 200 })
     return (
-      <div className="space-y-4">
-        <h1 className="text-lg font-semibold tracking-tight">Audit log</h1>
+      <div className="mx-auto w-full min-w-0 max-w-4xl space-y-4">
+        <h1 className="text-xl font-semibold tracking-tight">Audit log</h1>
         <p className="text-sm text-muted-foreground">Append-only. Results are what the vault observed; no secret values are ever recorded.</p>
         <AuditTable rows={rows} />
       </div>
@@ -427,15 +510,18 @@ export const app = new Spiceflow()
     const buildOwner = String((env as unknown as VaultEnv).OWNER_GITHUB_ID ?? '')
     const ownerDiffers = Boolean(buildOwner && pinnedOwner && buildOwner !== pinnedOwner)
     return (
-      <div className="space-y-8 max-w-2xl">
-        <h1 className="text-lg font-semibold tracking-tight">Settings</h1>
+      <div className="mx-auto w-full max-w-3xl space-y-5 sm:space-y-8">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">Settings</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Manage runner access and credential security.</p>
+        </div>
         {ownerDiffers && (
           <p role="alert" className="rounded-lg border border-border bg-muted/40 p-4 text-sm">
             The deployment now reports GitHub account ID {buildOwner}, but this vault stays bound to {pinnedOwner}, set when it was first deployed. The change is ignored. To bind a different account, delete the <code>owner_github_id</code> row from the <code>vault_setting</code> table (only possible before a sign-in app is registered) or deploy a fresh vault.
           </p>
         )}
-        <section className="space-y-2">
-          <h2 className="text-sm font-semibold">Runner repository</h2>
+        <section className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
+          <h2 className="text-base font-semibold">Runner repository</h2>
           <p className="text-sm text-muted-foreground">
             Only this repository's workflow, on this branch, can sign in as a runner. Pull-request runs are never accepted.
           </p>
@@ -445,13 +531,26 @@ export const app = new Spiceflow()
             <RunnerPolicyForm defaults={{ repository: policy?.repository ?? '', branch: policy?.branch ?? 'main', workflowFile: policy?.workflowFile ?? 'rdc-lab.yml', repositoryId: policy?.repositoryId ?? '' }} />
           )}
         </section>
-        <section className="space-y-2">
-          <h2 className="text-sm font-semibold">Runner sessions</h2>
+        <section className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
+          <h2 className="text-base font-semibold">Runner sessions</h2>
           <p className="text-sm text-muted-foreground">Sessions last 30 minutes. Revoking invalidates every session issued so far, for example after a runner reset.</p>
           <RevokeSessionsButton />
         </section>
-        <section className="space-y-2">
-          <h2 className="text-sm font-semibold">Entries managed elsewhere</h2>
+        <section id="advanced-credential-settings" className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
+          <div>
+            <h2 className="text-base font-semibold">Advanced settings</h2>
+            <p className="mt-1 text-sm text-muted-foreground">These settings are configured per credential, so one token cannot inherit another token's network access.</p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-lg bg-muted/40 p-3"><p className="text-sm font-medium">Network restrictions</p><p className="mt-1 text-sm text-muted-foreground">Exact allowed hostnames; the proxy refuses every other destination.</p></div>
+            <div className="rounded-lg bg-muted/40 p-3"><p className="text-sm font-medium">Authentication mapping</p><p className="mt-1 text-sm text-muted-foreground">Header name and Bearer, Token or Raw scheme for each provider.</p></div>
+            <div className="rounded-lg bg-muted/40 p-3"><p className="text-sm font-medium">Lifetime & visibility</p><p className="mt-1 text-sm text-muted-foreground">Expiry, permanent or temporary storage, and runner visibility.</p></div>
+            <div className="rounded-lg bg-muted/40 p-3"><p className="text-sm font-medium">Token inspection</p><p className="mt-1 text-sm text-muted-foreground">Provider identity and available permissions are recorded without storing the token in reports.</p></div>
+          </div>
+          <a href="/vault" className="inline-flex min-h-11 items-center rounded-lg border border-border px-3 py-2 text-sm font-medium underline underline-offset-4">Open credentials to edit advanced settings</a>
+        </section>
+        <section className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
+          <h2 className="text-base font-semibold">Entries managed elsewhere</h2>
           <p className="text-sm text-muted-foreground">Lists a credential (such as GITHUB_TOKEN) so runners know it exists. The vault stores no value for it and never proxies it.</p>
           <AddExternalForm />
         </section>
@@ -477,21 +576,43 @@ function lockedReason(e: VaultEnv): string {
 function AuditTable({ rows }: { rows: Awaited<ReturnType<typeof listAudit>> }) {
   if (rows.length === 0) return <p className="text-sm text-muted-foreground">No activity yet.</p>
   return (
-    <Table>
-      <TableHeader><TableRow><TableHead>When</TableHead><TableHead>Action</TableHead><TableHead>Credential</TableHead><TableHead>Result</TableHead><TableHead>Actor</TableHead><TableHead>Request detail</TableHead></TableRow></TableHeader>
-      <TableBody>
+    <>
+      <div className="hidden overflow-x-auto sm:block">
+        <Table>
+          <TableHeader><TableRow><TableHead>When</TableHead><TableHead>Action</TableHead><TableHead>Credential</TableHead><TableHead>Result</TableHead><TableHead>Actor</TableHead><TableHead>Request detail</TableHead></TableRow></TableHeader>
+          <TableBody>
+            {rows.map((r) => (
+              <TableRow key={r.id}>
+                <TableCell><TimeAgo ts={r.at} /></TableCell>
+                <TableCell>{r.action}</TableCell>
+                <TableCell className="font-mono">{r.credentialName || '—'}</TableCell>
+                <TableCell>{r.result || '—'}</TableCell>
+                <TableCell className="max-w-48 truncate" title={r.actor}>{r.actor}</TableCell>
+                <TableCell className="max-w-72 truncate" title={r.detail}>{r.detail || '—'}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+      <div className="grid gap-3 sm:hidden">
         {rows.map((r) => (
-          <TableRow key={r.id}>
-            <TableCell><TimeAgo ts={r.at} /></TableCell>
-            <TableCell>{r.action}</TableCell>
-            <TableCell className="font-mono">{r.credentialName || '—'}</TableCell>
-            <TableCell>{r.result || '—'}</TableCell>
-            <TableCell className="max-w-48 truncate" title={r.actor}>{r.actor}</TableCell>
-            <TableCell className="max-w-72 truncate" title={r.detail}>{r.detail || '—'}</TableCell>
-          </TableRow>
+          <article key={r.id} className="min-w-0 space-y-3 rounded-xl border border-border bg-card p-3">
+            <div className="flex min-w-0 items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="break-words text-sm font-semibold">{r.action}</p>
+                <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{r.credentialName || '—'}</p>
+              </div>
+              <span className="shrink-0 rounded-full border border-border px-2 py-1 text-xs">{r.result || '—'}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3 border-t border-border pt-3 text-xs">
+              <div><p className="text-muted-foreground">When</p><p className="mt-1"><TimeAgo ts={r.at} /></p></div>
+              <div className="min-w-0"><p className="text-muted-foreground">Actor</p><p className="mt-1 break-all">{r.actor}</p></div>
+            </div>
+            {r.detail ? <p className="break-words border-t border-border pt-3 text-xs text-muted-foreground">{r.detail}</p> : null}
+          </article>
         ))}
-      </TableBody>
-    </Table>
+      </div>
+    </>
   )
 }
 

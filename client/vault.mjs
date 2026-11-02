@@ -2,7 +2,7 @@
 // Runner client for the Runner Credential Vault. Zero dependencies (Node 18+).
 //
 //   vault list                                  credentials this runner may use (metadata only)
-//   vault request --name N --service S --purpose P --doc doc.json
+//   vault request --name N --service S --doc doc.json
 //                                               ask the owner to register a credential; prints a
 //                                               one-time link for the owner. Prints no secret.
 //   vault use NAME METHOD URL [--purpose P] [--header 'K: V']... [--data BODY | --data-file F]
@@ -155,10 +155,10 @@ async function main() {
   }
 
   if (command === 'request') {
-    for (const k of ['name', 'service', 'purpose', 'doc']) if (!flags[k]) die(`--${k} is required`)
+    for (const k of ['name', 'service', 'doc']) if (!flags[k]) die(`--${k} is required`)
     let doc
     try { doc = JSON.parse(fs.readFileSync(flags.doc, 'utf8')) } catch { die('--doc must be a JSON file') }
-    const { status, body } = await api(base, 'POST', '/api/runner/registrations', { name: flags.name, service: flags.service, purpose: flags.purpose, doc })
+    const { status, body } = await api(base, 'POST', '/api/runner/registrations', { name: flags.name, service: flags.service, doc })
     if (status !== 200) die(`registration refused (${body.error}${body.detail ? `: ${body.detail}` : ''})`)
     console.log(`Give this one-time link to the owner (expires ${new Date(body.expiresAt).toISOString()}):\n${body.link}`)
     return

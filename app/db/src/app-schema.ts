@@ -94,6 +94,7 @@ export const credential = sqliteCore.sqliteTable('credential', {
   validation: sqliteCore.text('validation', {
     enum: ['not_tested', 'valid', 'invalid', 'insufficient_permissions'],
   }).notNull().default('not_tested'),
+  validationDetails: sqliteCore.text('validation_details'),
   docJson: sqliteCore.text('doc_json').notNull().default('{}'),
   valueEncrypted: sqliteCore.text('value_encrypted'),
   valueIv: sqliteCore.text('value_iv'),

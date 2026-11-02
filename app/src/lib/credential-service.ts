@@ -14,6 +14,7 @@ import { parseCredentialDoc, readStoredDoc } from './credential-docs.ts'
 import { normalizeAllowedHosts, normalizeAuthStyle, readAllowedHosts, reservedName, validCredentialName, type AuthScheme } from './credential-input.ts'
 import { availability, publicReason } from './credential-policy.ts'
 import { createEnrollmentLink, type CreatedLink } from './enrollment.ts'
+import { defaultPurposeForService } from './presets.ts'
 
 type Db = ReturnType<typeof getDb>
 
@@ -59,7 +60,7 @@ export async function audit(db: Db, entry: {
 export type RegistrationRequest = {
   name: string
   service: string
-  purpose: string
+  purpose?: string
   doc: unknown
   requestedBy: string
   now: number
@@ -82,8 +83,7 @@ export async function requestRegistration(db: Db, req: RegistrationRequest): Pro
   if (existing && existing.status !== 'pending') return { ok: false, error: 'exists' }
 
   const service = req.service.trim().slice(0, 80)
-  const purpose = req.purpose.trim().slice(0, 500)
-  if (!service || !purpose) return { ok: false, error: 'invalid_doc', detail: 'service and purpose are required' }
+  const purpose = defaultPurposeForService(service)
 
   let credentialId = existing?.id
   if (credentialId) {
@@ -107,13 +107,13 @@ export async function requestRegistration(db: Db, req: RegistrationRequest): Pro
 export async function createCredential(
   db: Db,
   key: CryptoKey,
-  input: Omit<StoreInput, 'credentialId'> & { name: string; service: string; purpose: string },
+  input: Omit<StoreInput, 'credentialId'> & { name: string; service: string; purpose?: string },
 ): Promise<Result<{ id: string; name: string }>> {
   if (!validCredentialName(input.name)) return { ok: false, error: 'invalid_name' }
   if (reservedName(input.name)) return { ok: false, error: 'reserved_name' }
   const service = input.service.trim().slice(0, 80)
-  const purpose = input.purpose.trim().slice(0, 500)
-  if (!service || !purpose) return { ok: false, error: 'invalid_doc', detail: 'service and purpose are required' }
+  const purpose = defaultPurposeForService(service)
+  if (!service) return { ok: false, error: 'invalid_doc', detail: 'service is required' }
   const validated = validateStoreInput(input)
   if (!validated.ok) return validated
   const [existing] = await db.select({ id: schema.credential.id })
@@ -127,7 +127,7 @@ export async function createCredential(
     visible: input.visible, lifetime: input.lifetime, delivery: input.delivery,
     allowedHosts: JSON.stringify(validated.value.hosts),
     authHeader: validated.value.style.header, authScheme: validated.value.style.scheme,
-    externallyManaged: false, validation: 'not_tested', docJson: '{}',
+    externallyManaged: false, validation: input.validation ?? 'not_tested', validationDetails: input.validationDetails ?? null, docJson: '{}',
     valueEncrypted: sealed.encrypted, valueIv: sealed.iv, keyVersion: KEY_VERSION,
     expiresAt: validated.value.expiresAt, createdAt: input.now, updatedAt: input.now,
   })
@@ -150,6 +150,8 @@ export type StoreInput = {
   authHeader?: string
   authScheme?: AuthScheme
   now: number
+  validation?: 'not_tested' | 'valid' | 'invalid' | 'insufficient_permissions'
+  validationDetails?: string | null
 }
 
 export type ValidatedStoreInput = {
@@ -205,7 +207,8 @@ export async function storeCredentialValue(db: Db, key: CryptoKey, input: StoreI
     delivery: input.delivery,
     allowedHosts: JSON.stringify(hosts),
     expiresAt,
-    validation: 'not_tested',
+    validation: input.validation ?? 'not_tested',
+    validationDetails: input.validationDetails ?? null,
     updatedAt: input.now,
   }).where(orm.eq(schema.credential.id, row.id))
   await audit(db, { action: 'value_stored', actor: 'owner', credentialId: row.id, credentialName: row.name, result: 'ok', detail: input.lifetime + '/proxy', now: input.now })
@@ -242,7 +245,7 @@ export async function listCredentialsForOwner(db: Db) {
 }
 
 export async function getCredentialForOwner(db: Db, id: string) {
-  const [row] = await db.select({ ...METADATA_COLUMNS, docJson: schema.credential.docJson })
+  const [row] = await db.select({ ...METADATA_COLUMNS, docJson: schema.credential.docJson, validationDetails: schema.credential.validationDetails })
     .from(schema.credential).where(orm.eq(schema.credential.id, id)).limit(1)
   if (!row) return null
   return { ...row, hasValue: Boolean(row.hasValue), allowedHosts: readAllowedHosts(row.allowedHosts), doc: readStoredDoc(row.docJson) }
@@ -300,14 +303,14 @@ export async function deleteCredential(db: Db, id: string, now: number): Promise
 }
 
 /** Register a metadata-only entry for access that is managed elsewhere (e.g. GitHub). */
-export async function registerExternallyManaged(db: Db, input: { name: string; service: string; purpose: string; now: number }): Promise<Result<{ id: string }>> {
+export async function registerExternallyManaged(db: Db, input: { name: string; service: string; purpose?: string; now: number }): Promise<Result<{ id: string }>> {
   if (!validCredentialName(input.name)) return { ok: false, error: 'invalid_name' }
   if (reservedName(input.name)) return { ok: false, error: 'reserved_name' }
   const [existing] = await db.select({ id: schema.credential.id }).from(schema.credential).where(orm.eq(schema.credential.name, input.name)).limit(1)
   if (existing) return { ok: false, error: 'exists' }
   const id = crypto.randomUUID()
   await db.insert(schema.credential).values({
-    id, name: input.name, service: input.service.slice(0, 80), purpose: input.purpose.slice(0, 500),
+    id, name: input.name, service: input.service.slice(0, 80), purpose: defaultPurposeForService(input.service),
     status: 'active', visible: true, lifetime: 'permanent', delivery: 'proxy', externallyManaged: true,
     createdAt: input.now, updatedAt: input.now,
   })

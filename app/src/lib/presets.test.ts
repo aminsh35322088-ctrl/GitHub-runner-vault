@@ -37,4 +37,11 @@ describe('service presets', () => {
       expect(normalizeAuthStyle(p.authHeader, p.authScheme).ok, service).toBe(true)
     }
   })
+
+  test('uses a service-derived purpose instead of requiring an owner-entered purpose', async () => {
+    const { defaultPurposeForService } = await import('./presets.ts')
+    expect(defaultPurposeForService('Cloudflare')).toBe('Manage zones, DNS, Workers and account resources.')
+    expect(defaultPurposeForService('GitHub')).toBe('Manage repositories, issues, pull requests and workflows.')
+    expect(defaultPurposeForService('Custom API')).toBe('Use the Custom API credential through the vault proxy.')
+  })
 })
