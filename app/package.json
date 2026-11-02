@@ -11,11 +11,11 @@
   "scripts": {
     "dev": "vite dev",
     "build": "node scripts/embed-schema.mjs --check && vite build",
-    "test": "node scripts/embed-schema.mjs --check && vitest run",
+    "test": "node scripts/embed-schema.mjs --check && node --test scripts/deploy.check.mjs && vitest run",
     "typecheck": "tsc --noEmit",
     "types": "wrangler types --env-file .dev.vars.example",
     "embed-schema": "node scripts/embed-schema.mjs",
-    "deploy": "wrangler deploy",
+    "deploy": "node scripts/deploy.mjs",
     "validate": "pnpm -r typecheck && pnpm test && pnpm build"
   },
   "dependencies": {
@@ -35,13 +35,6 @@
     "tailwindcss": "^4.3.3",
     "ulid": "3.0.2",
     "zod": "4.6.5"
-  },
-  "cloudflare": {
-    "bindings": {
-      "SETUP_CODE": {
-        "description": "Choose a private phrase of at least 12 characters. It unlocks first-time owner setup once."
-      }
-    }
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.47.0",

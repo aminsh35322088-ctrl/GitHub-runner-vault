@@ -292,9 +292,11 @@ describe('proxy requests', () => {
   test('safe headers pass through; header injection is refused', async () => {
     const seen: Seen[] = []
     const fetchFn = stubFetch(() => new Response('ok'), seen)
-    await runProxy({ credential, value: SECRET, method: 'POST', url: 'https://api.cloudflare.com/x', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: '{}' }, fetchFn)
+    await runProxy({ credential, value: SECRET, method: 'POST', url: 'https://api.cloudflare.com/x', headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'anthropic-version': '2026-10-21', 'x-pinecone-api-version': '2025-10' }, body: '{}' }, fetchFn)
     const headers = new Headers(seen[0]!.init.headers)
     expect(headers.get('content-type')).toBe('application/json')
+    expect(headers.get('anthropic-version')).toBe('2026-10-21')
+    expect(headers.get('x-pinecone-api-version')).toBe('2025-10')
     expect(await runProxy({ credential, value: SECRET, method: 'GET', url: 'https://api.cloudflare.com/x', headers: { accept: 'a\r\nX-Evil: 1' } }, fetchFn)).toMatchObject({ ok: false, error: 'bad_header' })
   })
 

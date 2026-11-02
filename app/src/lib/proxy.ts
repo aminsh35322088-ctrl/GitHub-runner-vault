@@ -19,7 +19,11 @@ export const UPSTREAM_TIMEOUT_MS = 20_000
 export const MAX_URL_LENGTH = 2000
 
 const METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'])
-const REQUEST_HEADERS = new Set(['accept', 'accept-language', 'content-type', 'if-match', 'if-none-match', 'x-github-api-version', 'x-api-version'])
+const REQUEST_HEADERS = new Set([
+  'accept', 'accept-language', 'content-type', 'if-match', 'if-none-match',
+  'x-github-api-version', 'x-api-version', 'anthropic-version', 'anthropic-workspace-id',
+  'x-pinecone-api-version',
+])
 const RESPONSE_HEADERS = new Set(['content-type', 'etag', 'link', 'retry-after', 'location', 'last-modified', 'cache-control', 'x-github-request-id', 'cf-ray'])
 
 export type ProxyCredential = { allowedHosts: string[]; authHeader: string; authScheme: AuthScheme }

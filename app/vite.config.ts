@@ -6,6 +6,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { spiceflowPlugin } from 'spiceflow/vite'
 import { defineConfig } from 'vite'
+import { injectDeployOwner } from './scripts/inject-deploy-owner.ts'
 
 const port = parseInt(process.env.PORT || '5188', 10)
 
@@ -25,7 +26,10 @@ function testOutboundService(request: Request): Response {
   )
 }
 
-export default defineConfig(async () => {
+export default defineConfig(async ({ command }) => {
+  // Resolve the owner on every production build, whether it runs through
+  // Workers Builds, a dashboard-connected Git repository, or local Wrangler CLI.
+  const deploymentOwner = command === 'build' ? await injectDeployOwner() : null
   return {
     server: { port, strictPort: true },
     clearScreen: false,
@@ -38,7 +42,6 @@ export default defineConfig(async () => {
             wrangler: { configPath: './wrangler.test.jsonc' },
             miniflare: {
               bindings: {
-                SETUP_CODE: 'correct horse battery staple',
               },
               outboundService: testOutboundService,
             },
@@ -56,6 +59,12 @@ export default defineConfig(async () => {
       // setter priority. See https://github.com/cloudflare/workers-sdk/issues/13869
       !process.env.VITEST
         ? cloudflare({
+            ...(deploymentOwner ? { config: { vars: {
+              ...(deploymentOwner.id ? { OWNER_GITHUB_ID: deploymentOwner.id } : {}),
+              ...(deploymentOwner.login ? { DEPLOY_OWNER_LOGIN: deploymentOwner.login } : {}),
+              ...(deploymentOwner.repo ? { DEPLOY_OWNER_REPO: deploymentOwner.repo } : {}),
+              ...(deploymentOwner.error ? { DEPLOY_OWNER_ERROR: deploymentOwner.error } : {}),
+            } } } : {}),
             viteEnvironment: {
               name: 'rsc',
               childEnvironments: ['ssr'],
@@ -68,6 +77,19 @@ export default defineConfig(async () => {
     },
     test: {
       setupFiles: ['./src/test-setup.ts'],
+      // Better Auth uses jose for GitHub OAuth/JWT handling. Bundle both through
+      // Vite's SSR optimizer so the Workers test runtime does not resolve jose's
+      // package-internal ESM imports through the pool's module fallback.
+      // See Cloudflare's Workers Vitest module-resolution guidance:
+      // https://developers.cloudflare.com/workers/testing/vitest-integration/known-issues/#module-resolution
+      deps: {
+        optimizer: {
+          ssr: {
+            enabled: true,
+            include: ['better-auth'],
+          },
+        },
+      },
     },
   }
 })

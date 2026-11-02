@@ -6,9 +6,10 @@
 //    it with HKDF under separate labels. Explicit BETTER_AUTH_SECRET +
 //    ENCRYPTION_KEY secrets (older deployments) keep working unchanged.
 //  - GitHub sign-in: created through GitHub's app-manifest flow from /setup. The
-//    client secret is stored encrypted; the app's creator becomes the owner.
-//  - Setup is gated by SETUP_CODE, chosen by the deployer, because a fresh
-//    *.workers.dev URL is discoverable before its owner first opens it.
+//    client secret is stored encrypted; its creator must match the immutable owner
+//    ID derived by the Workers Builds repository bootstrap.
+//  - /setup stays locked until that deployment identity exists; visitors cannot
+//    claim ownership by arriving first.
 
 import * as orm from 'drizzle-orm'
 import { schema } from 'db'
@@ -22,16 +23,11 @@ const MASTER_KEY = 'master_key'
 const GITHUB_CLIENT_ID = 'github_client_id'
 const GITHUB_CLIENT_SECRET = 'github_client_secret'
 const OWNER_ID = 'owner_github_id'
-const SETUP_STATE = 'setup_state'
+const OWNER_LOGIN = 'owner_github_login'
 // The secret is bound to this label (see credential-crypto.ts) so it cannot be
 // swapped with another encrypted row.
 const SECRET_AAD_ID = 'setting-github-client-secret'
 
-export const SETUP_COOKIE = 'vault_setup'
-export const SETUP_SESSION_MS = 30 * 60_000
-export const SETUP_MAX_FAILURES = 10
-const SETUP_FAILURE_WINDOW_MS = 60 * 60_000
-export const MIN_SETUP_CODE_LENGTH = 12
 
 const enc = new TextEncoder()
 
@@ -148,22 +144,67 @@ export async function loadGithubOAuth(db: Db, e: VaultEnv, keys: VaultKeys): Pro
 }
 
 export async function loadOwnerId(db: Db, e: VaultEnv): Promise<string | null> {
-  return normalizeOwnerId(e.OWNER_GITHUB_ID) ?? normalizeOwnerId(await getSetting(db, OWNER_ID))
+  // The build-derived owner ID is the bootstrap identity. Pin it in D1 once so
+  // later repository transfers or build metadata changes cannot transfer a vault.
+  const stored = normalizeOwnerId(await getSetting(db, OWNER_ID))
+  if (stored) return stored
+  const expected = normalizeOwnerId(e.OWNER_GITHUB_ID)
+  if (!expected) return null
+  await db.insert(schema.vaultSetting)
+    .values({ key: OWNER_ID, value: expected, updatedAt: Date.now() })
+    .onConflictDoNothing()
+  return normalizeOwnerId(await getSetting(db, OWNER_ID))
 }
 
-export async function saveGithubApp(db: Db, keys: VaultKeys, app: { clientId: string; clientSecret: string; ownerId: string }): Promise<void> {
+export async function saveGithubApp(db: Db, keys: VaultKeys, app: { clientId: string; clientSecret: string; ownerId: string; ownerLogin?: string }, expectedOwnerId: unknown): Promise<void> {
+  const expected = normalizeOwnerId(expectedOwnerId)
+  if (!expected) throw new Error('deployment owner is not provisioned')
   if (!normalizeOwnerId(app.ownerId)) throw new Error('invalid owner id')
+  if (app.ownerId !== expected) throw new Error('GitHub account does not match deployment owner')
+
+  // Owner identity is pinned from the deployment repository before /setup is
+  // enabled. Keep the claim guard for direct calls and concurrent first requests.
+  const storedOwner = normalizeOwnerId(await getSetting(db, OWNER_ID))
+  if (storedOwner && storedOwner !== expected) throw new Error('This vault is bound to a different deployment owner')
+  if (!storedOwner) {
+    await db.insert(schema.vaultSetting)
+      .values({ key: OWNER_ID, value: expected, updatedAt: Date.now() })
+      .onConflictDoNothing()
+    if (normalizeOwnerId(await getSetting(db, OWNER_ID)) !== expected) {
+      throw new Error('This vault is bound to a different deployment owner')
+    }
+  }
+
+  // Claim the GitHub App slot and encrypted secret in one D1 batch. The
+  // pre-check allows recovery if the same app ID was written by an earlier
+  // interrupted attempt, while the unique key makes concurrent different apps
+  // race safely: only the winning ID and its secret can be stored.
+  const existingClientId = await getSetting(db, GITHUB_CLIENT_ID)
+  const existingSecret = await getSetting(db, GITHUB_CLIENT_SECRET)
+  if (existingClientId && existingClientId !== app.clientId) {
+    throw new Error('This vault already has a sign-in app')
+  }
+  if (existingSecret) throw new Error('This vault already has a sign-in app')
+
   const sealed = await encryptCredentialValue(keys.encryptionKey, SECRET_AAD_ID, 1, app.clientSecret)
   const now = Date.now()
-  // One batch: either the app and its owner are both recorded, or neither is.
-  const upsert = (key: string, value: string) => db.insert(schema.vaultSetting)
-    .values({ key, value, updatedAt: now })
-    .onConflictDoUpdate({ target: schema.vaultSetting.key, set: { value, updatedAt: now } })
   await db.batch([
-    upsert(GITHUB_CLIENT_ID, app.clientId),
-    upsert(GITHUB_CLIENT_SECRET, JSON.stringify({ e: sealed.encrypted, i: sealed.iv })),
-    upsert(OWNER_ID, app.ownerId),
+    db.insert(schema.vaultSetting)
+      .values({ key: GITHUB_CLIENT_ID, value: app.clientId, updatedAt: now })
+      .onConflictDoNothing(),
+    db.insert(schema.vaultSetting)
+      .values({ key: GITHUB_CLIENT_SECRET, value: JSON.stringify({ e: sealed.encrypted, i: sealed.iv }), updatedAt: now })
+      .onConflictDoNothing(),
   ])
+
+  if (await getSetting(db, GITHUB_CLIENT_ID) !== app.clientId || !await getSetting(db, GITHUB_CLIENT_SECRET)) {
+    throw new Error('This vault already has a sign-in app')
+  }
+  if (app.ownerLogin && /^[A-Za-z0-9-]{1,39}$/.test(app.ownerLogin)) {
+    await db.insert(schema.vaultSetting)
+      .values({ key: OWNER_LOGIN, value: app.ownerLogin, updatedAt: now })
+      .onConflictDoUpdate({ target: schema.vaultSetting.key, set: { value: app.ownerLogin, updatedAt: now } })
+  }
 }
 
 /** True once sign-in and an owner exist, whether from Worker secrets or from setup. */
@@ -171,72 +212,16 @@ export async function isConfigured(db: Db, e: VaultEnv, keys: VaultKeys): Promis
   return (await loadGithubOAuth(db, e, keys)) !== null && (await loadOwnerId(db, e)) !== null
 }
 
-// ── setup gate ────────────────────────────────────────────────────
+// ── setup state ───────────────────────────────────────────────────
+//
+// Workers Builds derives and injects the expected numeric GitHub owner ID before
+// /setup is enabled. The manifest callback must return that exact creator ID. The
+// flow is also bound to one browser: /setup hands out a random state in an HttpOnly
+// cookie and GitHub must return the same value. The atomic database claim is a
+// second guard; it is not used to choose the owner.
 
-export type SetupCodeStatus = 'ok' | 'missing' | 'too_short'
-
-export function setupCodeStatus(e: VaultEnv): SetupCodeStatus {
-  const code = nonEmpty(e.SETUP_CODE)
-  if (!code) return 'missing'
-  return code.length >= MIN_SETUP_CODE_LENGTH ? 'ok' : 'too_short'
-}
-
-async function sha256(value: string): Promise<Uint8Array<ArrayBuffer>> {
-  return new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(value)))
-}
-
-/** Constant-time comparison of the typed code against SETUP_CODE. */
-export async function setupCodeMatches(provided: unknown, e: VaultEnv): Promise<boolean> {
-  if (setupCodeStatus(e) !== 'ok' || typeof provided !== 'string') return false
-  const [a, b] = await Promise.all([sha256(provided.trim()), sha256(nonEmpty(e.SETUP_CODE)!)])
-  let diff = 0
-  for (let i = 0; i < a.length; i++) diff |= a[i]! ^ b[i]!
-  return diff === 0
-}
-
-/**
- * Atomically consume a setup-code attempt for this source IP and time window.
- * The IP is HMACed with the vault auth secret; only the digest is stored in D1.
- * A single UPSERT/RETURNING statement prevents concurrent requests bypassing the limit.
- */
-export async function consumeSetupAttempt(db: Db, authSecret: string, now: number, sourceIp: string | null): Promise<boolean> {
-  const identity = sourceIp?.trim() || 'unknown'
-  const digest = new Uint8Array(await crypto.subtle.sign('HMAC', await hmacKey(authSecret), enc.encode(identity)))
-  const suffix = Array.from(digest.subarray(0, 16), (b) => b.toString(16).padStart(2, '0')).join('')
-  // Remove expired per-IP buckets so address rotation cannot grow settings without bound.
-  await db.delete(schema.vaultSetting).where(orm.and(
-    orm.sql`substr(${schema.vaultSetting.key}, 1, 15) = 'setup_attempts_'`,
-    orm.lt(schema.vaultSetting.updatedAt, now - SETUP_FAILURE_WINDOW_MS),
-  ))
-  const key = `setup_attempts_${suffix}`
-  const storedValue = schema.vaultSetting.value
-  const separator = orm.sql`instr(${storedValue}, ':')`
-  const nextValue = orm.sql<string>`CASE
-    WHEN ${separator} = 0
-      OR CAST(substr(${storedValue}, ${separator} + 1) AS INTEGER) <= ${now - SETUP_FAILURE_WINDOW_MS}
-    THEN ${`1:${now}`}
-    ELSE (CAST(substr(${storedValue}, 1, ${separator} - 1) AS INTEGER) + 1)
-      || ':' || substr(${storedValue}, ${separator} + 1)
-    END`
-  const [row] = await db.insert(schema.vaultSetting)
-    .values({ key, value: `1:${now}`, updatedAt: now })
-    .onConflictDoUpdate({ target: schema.vaultSetting.key, set: { value: nextValue, updatedAt: now } })
-    .returning({ value: storedValue })
-  const [count, since] = (row?.value ?? '').split(':').map(Number)
-  return Number.isSafeInteger(count) && count! >= 1 && count! <= SETUP_MAX_FAILURES
-    && Number.isFinite(since) && now - since! <= SETUP_FAILURE_WINDOW_MS
-}
-
-async function hmacKey(secret: string): Promise<CryptoKey> {
-  return crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])
-}
-
-/** Value for the setup cookie: proof that this browser entered the setup code. */
-export async function issueSetupCookie(authSecret: string, now: number): Promise<{ value: string; maxAgeSeconds: number }> {
-  const exp = now + SETUP_SESSION_MS
-  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', await hmacKey(authSecret), enc.encode(`setup:${exp}`)))
-  return { value: `${exp}.${toB64(sig)}`, maxAgeSeconds: SETUP_SESSION_MS / 1000 }
-}
+export const SETUP_STATE_COOKIE = 'vault_setup_state'
+export const SETUP_STATE_MAX_AGE_SECONDS = 30 * 60
 
 export function readCookie(header: string | null, name: string): string | null {
   if (!header) return null
@@ -247,36 +232,23 @@ export function readCookie(header: string | null, name: string): string | null {
   return null
 }
 
-export async function setupCookieValid(authSecret: string, cookieHeader: string | null, now: number): Promise<boolean> {
-  const raw = readCookie(cookieHeader, SETUP_COOKIE)
-  if (!raw) return false
-  const [expText, sigText] = raw.split('.')
-  const exp = Number(expText)
-  if (!Number.isFinite(exp) || exp <= now || exp > now + SETUP_SESSION_MS || !sigText) return false
-  try {
-    return await crypto.subtle.verify('HMAC', await hmacKey(authSecret), fromB64(decodeURIComponent(sigText)), enc.encode(`setup:${exp}`))
-  } catch {
-    return false
-  }
+export function newSetupState(): string {
+  return toB64(crypto.getRandomValues(new Uint8Array(24))).replace(/[+/=]/g, (c) => ({ '+': '-', '/': '_', '=': '' })[c]!)
 }
 
-/** Single-use anti-CSRF state for the manifest round trip to github.com. */
-export async function newSetupState(db: Db, now: number): Promise<string> {
-  const state = toB64(crypto.getRandomValues(new Uint8Array(24))).replace(/[+/=]/g, (c) => ({ '+': '-', '/': '_', '=': '' })[c]!)
-  await putSetting(db, SETUP_STATE, `${state}:${now + SETUP_SESSION_MS}`, now)
-  return state
-}
-
-export async function consumeSetupState(db: Db, provided: unknown, now: number): Promise<boolean> {
-  const raw = await getSetting(db, SETUP_STATE)
-  if (!raw || typeof provided !== 'string') return false
-  await deleteSetting(db, SETUP_STATE)
-  const [state, exp] = raw.split(':')
-  if (!state || Number(exp) <= now) return false
-  const [a, b] = await Promise.all([sha256(provided), sha256(state)])
+/** True when the state GitHub returned equals the one this browser was given. */
+export function setupStateMatches(cookieHeader: string | null, returned: unknown): boolean {
+  const cookie = readCookie(cookieHeader, SETUP_STATE_COOKIE)
+  if (!cookie || typeof returned !== 'string' || cookie.length < 16 || cookie.length !== returned.length) return false
   let diff = 0
-  for (let i = 0; i < a.length; i++) diff |= a[i]! ^ b[i]!
+  for (let i = 0; i < cookie.length; i++) diff |= cookie.charCodeAt(i) ^ returned.charCodeAt(i)
   return diff === 0
+}
+
+/** Public GitHub login of the owner, shown so a vault claimed by someone else is noticed. */
+export async function loadOwnerLogin(db: Db): Promise<string | null> {
+  const login = await getSetting(db, OWNER_LOGIN)
+  return login && /^[A-Za-z0-9-]{1,39}$/.test(login) ? login : null
 }
 
 // ── GitHub app manifest ───────────────────────────────────────────
@@ -297,7 +269,7 @@ export function buildManifest(origin: string, suffix: string) {
   }
 }
 
-export interface ConvertedApp { clientId: string; clientSecret: string; ownerId: string }
+export interface ConvertedApp { clientId: string; clientSecret: string; ownerId: string; ownerLogin?: string }
 
 /** Validate GitHub's manifest-conversion response; keeps only what sign-in needs. */
 export function parseConversion(body: unknown): ConvertedApp | null {
@@ -308,7 +280,8 @@ export function parseConversion(body: unknown): ConvertedApp | null {
   const clientSecret = nonEmpty(b.client_secret)
   const ownerId = normalizeOwnerId(typeof owner?.id === 'number' ? String(owner.id) : owner?.id)
   if (!clientId || !clientSecret || !ownerId || owner?.type !== 'User') return null
-  return { clientId, clientSecret, ownerId }
+  const ownerLogin = typeof owner?.login === 'string' && /^[A-Za-z0-9-]{1,39}$/.test(owner.login) ? owner.login : undefined
+  return { clientId, clientSecret, ownerId, ownerLogin }
 }
 
 export async function convertManifest(code: string, fetchFn: typeof fetch = fetch): Promise<ConvertedApp | null> {

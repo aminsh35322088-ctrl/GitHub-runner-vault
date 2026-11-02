@@ -3,9 +3,9 @@ import { env } from 'cloudflare:workers'
 import { getDb, schema } from 'db'
 import * as orm from 'drizzle-orm'
 import {
-  buildManifest, consumeSetupState, convertManifest, issueSetupCookie, keysFromMaster, loadGithubOAuth, loadOwnerId,
-  loadVaultKeys, newSetupState, parseConversion, consumeSetupAttempt, resetVaultKeyCache, saveGithubApp, setupCodeMatches,
-  setupCodeStatus, setupCookieValid, SETUP_COOKIE, SETUP_MAX_FAILURES, SETUP_SESSION_MS, putSetting,
+  buildManifest, convertManifest, keysFromMaster, loadGithubOAuth, loadOwnerId, loadOwnerLogin,
+  loadVaultKeys, newSetupState, parseConversion, resetVaultKeyCache, saveGithubApp, setupStateMatches,
+  SETUP_STATE_COOKIE, putSetting,
 } from './vault-config.ts'
 import { ensureSchema, resetSchemaCheck } from './schema.ts'
 import { SCHEMA_MIGRATIONS } from './schema-sql.generated.ts'
@@ -66,105 +66,100 @@ describe('key derivation', () => {
 describe('GitHub app and owner storage', () => {
   test('stores the client secret encrypted and reads it back', async () => {
     const keys = await loadVaultKeys(db, {})
-    await saveGithubApp(db, keys, { clientId: 'Iv1.abc', clientSecret: 'super-secret-client-value', ownerId: '318252513' })
+    await saveGithubApp(db, keys, { clientId: 'Iv1.abc', clientSecret: 'super-secret-client-value', ownerId: '318252513' }, '318252513')
     const raw = JSON.stringify(await db.select().from(schema.vaultSetting))
     expect(raw).not.toContain('super-secret-client-value')
     expect(await loadGithubOAuth(db, {}, keys)).toEqual({ clientId: 'Iv1.abc', clientSecret: 'super-secret-client-value' })
     expect(await loadOwnerId(db, {})).toBe('318252513')
   })
 
+  test('deployment owner binding rejects missing and mismatched identities', async () => {
+    const keys = await loadVaultKeys(db, {})
+    const app = { clientId: 'Iv1.owner', clientSecret: 'secret', ownerId: '111' }
+    await expect(saveGithubApp(db, keys, app, null)).rejects.toThrow(/not provisioned/)
+    await expect(saveGithubApp(db, keys, app, '222')).rejects.toThrow(/does not match deployment owner/)
+    expect(await loadOwnerId(db, {})).toBeNull()
+    expect(await loadGithubOAuth(db, {}, keys)).toBeNull()
+  })
+
   test('a ciphertext copied under another label does not decrypt', async () => {
     const keys = await loadVaultKeys(db, {})
-    await saveGithubApp(db, keys, { clientId: 'id', clientSecret: 'secret-value', ownerId: '1' })
+    await saveGithubApp(db, keys, { clientId: 'id', clientSecret: 'secret-value', ownerId: '1' }, '1')
     await putSetting(db, 'github_client_secret', '{"e":"AAAA","i":"AAAA"}')
     expect(await loadGithubOAuth(db, {}, keys)).toBeNull()
   })
 
   test('refuses an invalid owner id and returns nothing before setup', async () => {
     const keys = await loadVaultKeys(db, {})
-    await expect(saveGithubApp(db, keys, { clientId: 'a', clientSecret: 'b', ownerId: 'octocat' })).rejects.toThrow()
+    await expect(saveGithubApp(db, keys, { clientId: 'a', clientSecret: 'b', ownerId: 'octocat' }, '5')).rejects.toThrow()
     expect(await loadGithubOAuth(db, {}, keys)).toBeNull()
     expect(await loadOwnerId(db, {})).toBeNull()
   })
 
-  test('Worker variables override stored values', async () => {
+  test('the first build-derived owner is pinned in D1 and cannot be changed by later builds', async () => {
+    expect(await loadOwnerId(db, { OWNER_GITHUB_ID: '111' })).toBe('111')
+    expect(await loadOwnerId(db, { OWNER_GITHUB_ID: '222' })).toBe('111')
+    const row = await db.select().from(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'owner_github_id'))
+    expect(row[0]?.value).toBe('111')
+  })
+
+  test('stored owner identity takes precedence over later build variables', async () => {
     const keys = await loadVaultKeys(db, {})
-    await saveGithubApp(db, keys, { clientId: 'stored', clientSecret: 'stored-secret', ownerId: '5' })
-    expect(await loadOwnerId(db, { OWNER_GITHUB_ID: '9' })).toBe('9')
+    await saveGithubApp(db, keys, { clientId: 'stored', clientSecret: 'stored-secret', ownerId: '5' }, '5')
+    expect(await loadOwnerId(db, { OWNER_GITHUB_ID: '9' })).toBe('5')
     expect(await loadGithubOAuth(db, { GITHUB_CLIENT_ID: 'e', GITHUB_CLIENT_SECRET: 'f' }, keys)).toEqual({ clientId: 'e', clientSecret: 'f' })
   })
 })
 
-describe('setup gate', () => {
-  test('setup code must be present and long enough', () => {
-    expect(setupCodeStatus({})).toBe('missing')
-    expect(setupCodeStatus({ SETUP_CODE: 'short' })).toBe('too_short')
-    expect(setupCodeStatus({ SETUP_CODE: 'long enough phrase' })).toBe('ok')
+describe('setup state', () => {
+  test('state is random and only matches the same value returned by GitHub', () => {
+    const state = newSetupState()
+    expect(state).toMatch(/^[A-Za-z0-9_-]{30,}$/)
+    expect(newSetupState()).not.toBe(state)
+    const cookie = `other=1; ${SETUP_STATE_COOKIE}=${state}`
+    expect(setupStateMatches(cookie, state)).toBe(true)
+    expect(setupStateMatches(cookie, state.slice(0, -1) + (state.endsWith('a') ? 'b' : 'a'))).toBe(false)
+    expect(setupStateMatches(cookie, `${state}x`)).toBe(false)
+    expect(setupStateMatches(cookie, null)).toBe(false)
+    expect(setupStateMatches(null, state)).toBe(false)
+    expect(setupStateMatches(`${SETUP_STATE_COOKIE}=short`, 'short')).toBe(false)
   })
 
-  test('only the exact code matches; a missing or short configured code never matches', async () => {
-    const e = { SETUP_CODE: 'long enough phrase' }
-    expect(await setupCodeMatches('long enough phrase', e)).toBe(true)
-    expect(await setupCodeMatches('long enough phrasE', e)).toBe(false)
-    expect(await setupCodeMatches('', e)).toBe(false)
-    expect(await setupCodeMatches(undefined, e)).toBe(false)
-    expect(await setupCodeMatches('', {})).toBe(false)
-    expect(await setupCodeMatches('short', { SETUP_CODE: 'short' })).toBe(false)
+  test('an interrupted setup can resume with the same GitHub App ID', async () => {
+    const keys = await loadVaultKeys(db, {})
+    await db.insert(schema.vaultSetting).values({ key: 'owner_github_id', value: '55', updatedAt: Date.now() })
+    await db.insert(schema.vaultSetting).values({ key: 'github_client_id', value: 'Iv1.recovery', updatedAt: Date.now() })
+
+    await saveGithubApp(db, keys, {
+      clientId: 'Iv1.recovery',
+      clientSecret: 'recovered-secret',
+      ownerId: '55',
+      ownerLogin: 'recovered-owner',
+    }, '55')
+
+    expect(await loadGithubOAuth(db, {}, keys)).toEqual({
+      clientId: 'Iv1.recovery',
+      clientSecret: 'recovered-secret',
+    })
+    expect(await loadOwnerLogin(db)).toBe('recovered-owner')
   })
 
-  test('setup attempts are isolated per source IP and expire after one hour', async () => {
-    const now = Date.now()
-    const sourceIp = '192.0.2.10'
-    for (let i = 0; i < SETUP_MAX_FAILURES; i++) {
-      expect(await consumeSetupAttempt(db, 'a'.repeat(40), now, sourceIp)).toBe(true)
-    }
-    expect(await consumeSetupAttempt(db, 'a'.repeat(40), now, sourceIp)).toBe(false)
-    expect(await consumeSetupAttempt(db, 'a'.repeat(40), now, '192.0.2.11')).toBe(true)
-    expect(await consumeSetupAttempt(db, 'a'.repeat(40), now + 61 * 60_000, sourceIp)).toBe(true)
-    expect(JSON.stringify(await db.select().from(schema.vaultSetting))).not.toContain(sourceIp)
+  test('the first GitHub sign-in app claim wins and a second one is refused without overwriting', async () => {
+    const keys = await loadVaultKeys(db, {})
+    await saveGithubApp(db, keys, { clientId: 'first', clientSecret: 'first-secret', ownerId: '111', ownerLogin: 'alice' }, '111')
+    await expect(saveGithubApp(db, keys, { clientId: 'second', clientSecret: 'second-secret', ownerId: '111', ownerLogin: 'mallory' }, '111'))
+      .rejects.toThrow(/already has a sign-in app/)
+    expect(await loadOwnerId(db, {})).toBe('111')
+    expect(await loadOwnerLogin(db)).toBe('alice')
+    expect(await loadGithubOAuth(db, {}, keys)).toEqual({ clientId: 'first', clientSecret: 'first-secret' })
   })
 
-  test('expired per-IP buckets are cleaned up', async () => {
-    const now = Date.now()
-    await consumeSetupAttempt(db, 'a'.repeat(40), now, '192.0.2.40')
-    await consumeSetupAttempt(db, 'a'.repeat(40), now + 60 * 60_000 + 1, '192.0.2.41')
-    const buckets = (await db.select().from(schema.vaultSetting))
-      .filter((row) => row.key.startsWith('setup_attempts_'))
-    expect(buckets).toHaveLength(1)
-  })
-
-  test('concurrent setup attempts are counted atomically', async () => {
-    const now = Date.now()
-    const results = await Promise.all(Array.from({ length: 20 }, () =>
-      consumeSetupAttempt(db, 'a'.repeat(40), now, '198.51.100.20')))
-    expect(results.filter(Boolean)).toHaveLength(SETUP_MAX_FAILURES)
-    expect(results.filter((value) => !value)).toHaveLength(20 - SETUP_MAX_FAILURES)
-  })
-
-  test('setup cookie: valid, expired, tampered, wrong secret', async () => {
-    const secret = 'a'.repeat(40)
-    const now = Date.now()
-    const { value } = await issueSetupCookie(secret, now)
-    const header = `${SETUP_COOKIE}=${value}`
-    expect(await setupCookieValid(secret, header, now + 1000)).toBe(true)
-    expect(await setupCookieValid(secret, header, now + SETUP_SESSION_MS + 1)).toBe(false)
-    expect(await setupCookieValid('b'.repeat(40), header, now + 1000)).toBe(false)
-    const [exp, sig] = value.split('.')
-    expect(await setupCookieValid(secret, `${SETUP_COOKIE}=${Number(exp) + 60000}.${sig}`, now)).toBe(false)
-    expect(await setupCookieValid(secret, null, now)).toBe(false)
-    expect(await setupCookieValid(secret, `${SETUP_COOKIE}=garbage`, now)).toBe(false)
-  })
-
-  test('setup state is single-use and expires', async () => {
-    const now = Date.now()
-    const state = await newSetupState(db, now)
-    expect(await consumeSetupState(db, 'wrong', now)).toBe(false)
-    expect(await consumeSetupState(db, state, now)).toBe(false) // the wrong guess already burned it
-    const second = await newSetupState(db, now)
-    expect(await consumeSetupState(db, second, now)).toBe(true)
-    expect(await consumeSetupState(db, second, now)).toBe(false)
-    const third = await newSetupState(db, now)
-    expect(await consumeSetupState(db, third, now + SETUP_SESSION_MS + 1)).toBe(false)
+  test('owner login is only kept when it is a valid GitHub login', async () => {
+    const keys = await loadVaultKeys(db, {})
+    await saveGithubApp(db, keys, { clientId: 'a', clientSecret: 'b', ownerId: '5', ownerLogin: '<script>' }, '5')
+    expect(await loadOwnerLogin(db)).toBeNull()
+    await putSetting(db, 'owner_github_login', 'bad login!')
+    expect(await loadOwnerLogin(db)).toBeNull()
   })
 })
 
@@ -178,10 +173,10 @@ describe('GitHub app manifest', () => {
     expect(m.default_permissions).toEqual({})
   })
 
-  const good = { client_id: 'Iv1.x', client_secret: 'cs', owner: { id: 318252513, type: 'User' }, pem: 'PRIVATE', webhook_secret: 'w' }
+  const good = { client_id: 'Iv1.x', client_secret: 'cs', owner: { id: 318252513, login: 'octocat', type: 'User' }, pem: 'PRIVATE', webhook_secret: 'w' }
 
   test('conversion keeps only sign-in fields', () => {
-    expect(parseConversion(good)).toEqual({ clientId: 'Iv1.x', clientSecret: 'cs', ownerId: '318252513' })
+    expect(parseConversion(good)).toEqual({ clientId: 'Iv1.x', clientSecret: 'cs', ownerId: '318252513', ownerLogin: 'octocat' })
   })
 
   test.each([

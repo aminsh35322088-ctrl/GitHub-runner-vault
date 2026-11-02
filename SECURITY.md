@@ -10,9 +10,18 @@
   response redaction, rate limits, 30-minute sessions, owner-side revoke, append-only audit.
 - Runner identity is GitHub OIDC (RS256 only) restricted by repository id, ref and event.
   It authenticates the workflow run, not an individual process.
-- Owner login is a private GitHub App created through `/setup`; it is restricted to one numeric account id (the
-  app's creator) and sessions are cookie-only. `/setup` needs the deployer's `SETUP_CODE`, locks after 10 wrong
-  tries per hour, and closes permanently once an owner exists.
+- Production Vite builds resolve a numeric personal GitHub owner ID in this order: explicit
+  `RUNNER_VAULT_OWNER_GITHUB_ID`; the checked-out GitHub `origin` owner via matching public profile metadata;
+  GitHub Actions' immutable repository-owner ID when no usable Git origin exists; authenticated GitHub CLI when
+  building from a source archive. The ID is injected as Worker runtime `OWNER_GITHUB_ID`, which is public identity
+  metadata, not a credential. A manual Dashboard upload must set the same runtime variable and bind its D1 database
+  as `DB`. A dashboard Git connection must point at the intended personal fork; connecting the upstream project
+  binds the upstream repository owner unless an explicit build owner ID is configured.
+- On first use, the Worker atomically pins the expected ID in D1, so later repository transfers or build metadata
+  changes cannot silently transfer ownership. `/setup` remains locked without a valid deployment owner. The private
+  GitHub App created through `/setup` must have the exact same numeric creator ID; the callback rejects mismatches
+  and organization-owned Apps before storing credentials. A one-time state cookie binds the callback to the
+  initiating browser. There is no first-visitor/first-finisher ownership path.
 - Models propose names and setup notes; the **owner** decides hosts, auth header, lifetime
   and visibility. Notes are treated as hostile text (strict schema, no HTML, visible link hosts).
 - `inject` delivery is stored as a setting but **not implemented yet**: the runner API refuses to

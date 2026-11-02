@@ -8,6 +8,9 @@ declare namespace Cloudflare {
     VAULT_MASTER_KEY?: string
     ENCRYPTION_KEY?: string
     OWNER_GITHUB_ID?: string
+    DEPLOY_OWNER_LOGIN?: string
+    DEPLOY_OWNER_REPO?: string
+    DEPLOY_OWNER_ERROR?: string
     GITHUB_CLIENT_ID?: string
     GITHUB_CLIENT_SECRET?: string
     PUBLIC_ORIGIN?: string
