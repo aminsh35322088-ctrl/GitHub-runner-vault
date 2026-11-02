@@ -1,5 +1,6 @@
 // Owner form for storing and validating a credential.
-// The token is write-only: validation summaries contain metadata only.
+// The owner only controls the secret, lifetime and visibility. Network and auth
+// policy are derived from a reviewed provider preset or a verified Service Adapter.
 
 'use client'
 
@@ -15,10 +16,6 @@ import {
 import type { CredentialValidationReport } from '../lib/credential-validation.ts'
 
 export type FormDefaults = {
-  delivery: 'proxy'
-  allowedHosts: string
-  authHeader: string
-  authScheme: 'Bearer' | 'Token' | 'Raw'
   visible: boolean
   lifetime: 'permanent' | 'temporary'
 }
@@ -36,44 +33,69 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 function ValidationResult({ report }: { report: CredentialValidationReport }) {
   const tone = report.status === 'valid'
     ? 'border-success/30 bg-success/5'
-    : report.status === 'invalid'
+    : report.status === 'invalid' || report.status === 'expired'
       ? 'border-destructive/30 bg-destructive/5'
-      : 'border-border bg-muted/30'
+      : report.status === 'insufficient_permissions'
+        ? 'border-warning/30 bg-warning/5'
+        : 'border-border bg-muted/30'
   const title = report.status === 'valid'
-    ? 'توکن تأیید شد'
+    ? 'Token verified'
     : report.status === 'invalid'
-      ? 'توکن معتبر نیست'
-      : report.status === 'unsupported'
-        ? 'بررسی خودکار در دسترس نیست'
-        : 'اعتبارسنجی کامل نشد'
+      ? 'Token rejected by provider'
+      : report.status === 'insufficient_permissions'
+        ? 'Token lacks access to the verification endpoint'
+        : report.status === 'unsupported'
+          ? 'Automatic verification is not available'
+          : report.status === 'expired'
+            ? 'Token expired'
+            : 'Verification could not be completed'
+  const visiblePermissions = report.permissions.slice(0, 8)
+  const remaining = Math.max(0, report.permissions.length - visiblePermissions.length)
   return (
     <section role="status" aria-live="polite" className={`space-y-3 rounded-xl border p-3 sm:p-4 ${tone}`}>
-      <div className="space-y-1">
-        <p className="text-sm font-semibold">{title}</p>
-        <p className="text-sm text-muted-foreground">{report.message}</p>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0 space-y-1">
+          <p className="text-sm font-semibold">{title}</p>
+          <p className="text-sm text-muted-foreground">{report.message}</p>
+        </div>
+        <span className="shrink-0 rounded-full border border-border bg-background/80 px-2.5 py-1 text-xs font-medium">{report.status}</span>
       </div>
-      {(report.identity || report.tokenType) && (
+      {(report.identity || report.tokenType || report.permissions.length > 0) && (
         <div className="flex flex-wrap gap-2 text-xs">
           {report.identity && <span className="rounded-full border border-border px-2.5 py-1">{report.identity}</span>}
           {report.tokenType && <span className="rounded-full border border-border px-2.5 py-1">{report.tokenType}</span>}
-          {report.permissionsComplete && <span className="rounded-full border border-border px-2.5 py-1">Permission list complete</span>}
+          {report.permissionsComplete && <span className="rounded-full border border-border px-2.5 py-1">Complete permission list</span>}
+          {report.permissions.length > 0 && <span className="rounded-full border border-border px-2.5 py-1">{report.permissions.length} permissions detected</span>}
         </div>
       )}
-      {report.permissions.length > 0 && (
-        <div className="space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Access detected</p>
-          <ul className="grid gap-2 sm:grid-cols-2">
-            {report.permissions.map((permission, index) => (
-              <li key={`${permission.name}-${index}`} className="min-w-0 rounded-lg border border-border/70 bg-background/70 px-3 py-2">
-                <span className="block break-words text-sm font-medium">{permission.name}</span>
-                <span className="block break-words text-xs text-muted-foreground">
-                  {permission.access}{permission.scope ? ` · ${permission.scope}` : ''}
-                </span>
-                {permission.resources?.length ? <span className="mt-1 block break-all text-xs text-muted-foreground">{permission.resources.join(', ')}</span> : null}
-              </li>
-            ))}
-          </ul>
-        </div>
+      {visiblePermissions.length > 0 && (
+        <ul className="grid gap-2 sm:grid-cols-2">
+          {visiblePermissions.map((permission, index) => (
+            <li key={`${permission.name}-${index}`} className="min-w-0 rounded-lg border border-border/70 bg-background/70 px-3 py-2">
+              <span className="block break-words text-sm font-medium">{permission.name}</span>
+              <span className="block break-words text-xs text-muted-foreground">
+                {permission.access}{permission.scope ? ` · ${permission.scope}` : ''}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {remaining > 0 && (
+        <details className="rounded-lg border border-border bg-background/70">
+          <summary className="cursor-pointer px-3 py-2.5 text-sm font-medium">
+            Show all permissions ({report.permissions.length})
+          </summary>
+          <div className="max-h-64 overflow-y-auto border-t border-border p-2">
+            <ul className="grid gap-1.5 sm:grid-cols-2">
+              {report.permissions.slice(8).map((permission, index) => (
+                <li key={`${permission.name}-${index + 8}`} className="min-w-0 rounded-md border border-border/70 px-3 py-2">
+                  <span className="block break-words text-sm font-medium">{permission.name}</span>
+                  <span className="block break-words text-xs text-muted-foreground">{permission.access}{permission.scope ? ` · ${permission.scope}` : ''}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </details>
       )}
       <p className="text-xs text-muted-foreground">Token content is never shown or included in this report.</p>
     </section>
@@ -83,29 +105,29 @@ function ValidationResult({ report }: { report: CredentialValidationReport }) {
 function safeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : ''
   const messages: Record<string, string> = {
-    invalid_name: 'نام Credential قابل‌استفاده نیست؛ یک نام حداقل دوحرفی انتخاب کن.',
-    reserved_name: 'این نام برای متغیر سیستمی رزرو شده است.',
-    exists: 'این نام قبلاً ثبت شده است. نام دیگری انتخاب کن.',
-    invalid_hosts: 'یکی از Hostها معتبر نیست. فقط hostname دقیق وارد کن؛ بدون پروتکل، پورت یا wildcard.',
-    hosts_required: 'حداقل یک Host مجاز لازم است.',
-    invalid_auth_style: 'نام Auth header یا روش ارسال توکن معتبر نیست.',
-    invalid_expiry: 'زمان انقضا معتبر نیست.',
-    invalid_value: 'مقدار توکن خالی یا دارای قالب نامعتبر است.',
-    'شناسه Account Cloudflare باید دقیقاً ۳۲ کاراکتر هگزادسیمال باشد.': 'شناسه حساب Cloudflare را دقیقاً با ۳۲ کاراکتر هگزادسیمال وارد کن.',
+    invalid_name: 'Credential name is not valid.',
+    reserved_name: 'This name is reserved for the runtime.',
+    exists: 'A credential with this name already exists.',
+    invalid_hosts: 'The provider adapter contains an invalid host.',
+    hosts_required: 'No verified API host is available for this service.',
+    invalid_auth_style: 'The provider authentication policy is invalid.',
+    invalid_expiry: 'Choose a valid token lifetime.',
+    invalid_value: 'The token is empty or has an invalid format.',
+    internal_error: 'Vault storage failed. Check the database or Worker security log.',
+    unauthorized: 'Your sign-in session expired. Sign in again.',
+    invalid_form: 'Review the highlighted form fields.',
+    service_adapter_required: 'This custom service needs a verified Service Adapter. Ask the runner model to create a new one-time credential request with official API documentation.',
   }
   const code = message.split(':', 1)[0] ?? ''
   if (messages[code]) return messages[code]
-  if (code === 'internal_error') return 'ذخیره در Vault انجام نشد. اتصال دیتابیس یا گزارش امنیتی Worker را بررسی می‌کنیم.'
-  if (code === 'unauthorized') return 'نشست ورود منقضی شده است؛ دوباره با GitHub وارد شو.'
-  if (code === 'invalid_form') return 'اطلاعات فرم معتبر نیست؛ فیلدهای مشخص‌شده را بررسی کن.'
-  if (message.startsWith('This link is invalid')) return 'این لینک نامعتبر، منقضی یا قبلاً استفاده شده است.'
-  if (message.startsWith('This registration is no longer available')) return 'این درخواست ثبت دیگر فعال نیست. از رانر یک لینک جدید بساز.'
+  if (message.startsWith('This link is invalid')) return 'This registration link is invalid, expired or already used.'
+  if (message.startsWith('This registration is no longer available')) return 'This credential is no longer accepting a value. Request a new link from the runner.'
   if (message && message.length <= 360 && !/SQLITE|D1_ERROR|stack|node_modules|\/home\//i.test(message)) return message
-  return 'ذخیره انجام نشد. اطلاعات فرم و اتصال دیتابیس را بررسی کن؛ مقدار توکن نمایش داده نمی‌شود.'
+  return 'Could not save the credential. Check the form and try again; the token value is never displayed.'
 }
 
 export function CredentialForm({
-  mode, token, id, defaults, preset = null, serviceName,
+  mode, token, id, defaults, preset = null, serviceName, credentialId, apiBaseUrl,
 }: {
   mode: 'create' | 'register' | 'replace'
   token?: string
@@ -113,13 +135,12 @@ export function CredentialForm({
   defaults: FormDefaults
   preset?: { label: string; docsUrl?: string } | null
   serviceName?: string
+  credentialId?: string
+  apiBaseUrl?: string
 }) {
   const [lifetime, setLifetime] = useState(defaults.lifetime)
   const [service, setService] = useState(preset?.label ?? serviceName ?? '')
-  const [cloudflareAccountId, setCloudflareAccountId] = useState('')
   const [secretValue, setSecretValue] = useState('')
-  const isCloudflare = service.trim().toLowerCase().replace(/[^a-z0-9]/g, '') === 'cloudflare'
-  const isCloudflareAccountToken = isCloudflare && secretValue.trim().toLowerCase().startsWith('cfat_')
   const [validation, setValidation] = useState<CredentialValidationReport | null>(null)
   const [lastChecked, setLastChecked] = useState('')
   const [validating, setValidating] = useState(false)
@@ -127,25 +148,20 @@ export function CredentialForm({
   const [errorMessage, setErrorMessage] = useState('')
   const [saving, setSaving] = useState(false)
 
-  async function checkToken(value = secretValue, accountId = cloudflareAccountId) {
+  async function checkToken(value = secretValue) {
     const candidate = value.trim()
     if (!candidate || !service.trim() || candidate === lastChecked) return
-    if (service.trim().toLowerCase().replace(/[^a-z0-9]/g, '') === 'cloudflare' && accountId && !/^[a-f0-9]{32}$/i.test(accountId)) {
-      setValidationError('شناسه حساب Cloudflare را دقیقاً با ۳۲ کاراکتر هگزادسیمال وارد کن.')
-      return
-    }
     setValidating(true)
     setValidationError('')
     setValidation(null)
     try {
-      const result = await validateCredentialTokenAction(service, candidate, accountId || undefined)
+      const result = await validateCredentialTokenAction(service, candidate, credentialId)
       if (!result.ok) {
         setValidationError(safeErrorMessage(new Error(result.error)))
         return
       }
-      const report = result.value
-      setValidation(report)
-      if (report.status !== 'unavailable') setLastChecked(candidate)
+      setValidation(result.value)
+      if (result.value.status !== 'unavailable') setLastChecked(candidate)
     } catch (error) {
       setValidationError(safeErrorMessage(error))
     } finally {
@@ -173,13 +189,8 @@ export function CredentialForm({
             const form: StoreForm = {
               value: String(formData.get('value') ?? ''),
               lifetime,
-              expiresInHours: lifetime === 'temporary' ? Number(hours || 24) : hours ? Number(hours) : null,
+              expiresInHours: hours ? Number(hours) : null,
               visible: formData.get('visible') === 'on',
-              delivery: 'proxy',
-              allowedHosts: String(formData.get('hosts') ?? ''),
-              authHeader: String(formData.get('authHeader') ?? 'Authorization'),
-              authScheme: String(formData.get('authScheme') ?? 'Bearer') as StoreForm['authScheme'],
-              cloudflareAccountId: String(formData.get('cloudflareAccountId') ?? ''),
             }
             if (mode === 'create') {
               const created = await createCredentialAction({
@@ -216,13 +227,12 @@ export function CredentialForm({
       >
         {mode === 'create' && (
           <div className="grid min-w-0 gap-4 sm:grid-cols-2">
-            <Field label="Credential name" hint="Spaces and lowercase letters are converted to a safe environment-variable name.">
+            <Field label="Credential name">
               <Input name="name" required maxLength={120} defaultValue={preset?.label ? `${preset.label} API token` : ''} placeholder="e.g. PRODUCTION_CLOUDFLARE" className="w-full font-mono" />
             </Field>
             <Field label="Service / provider">
               <Input name="service" required maxLength={80} value={service} onChange={(event) => {
                 setService(event.target.value)
-                setCloudflareAccountId('')
                 setValidation(null)
                 setLastChecked('')
               }} placeholder="e.g. My API" className="w-full" />
@@ -230,7 +240,18 @@ export function CredentialForm({
           </div>
         )}
 
-        <Field label="API token" hint="Only sent to the provider for verification, then encrypted by the vault. The token is write-only.">
+        {apiBaseUrl && (
+          <section className="rounded-xl border border-border bg-muted/25 p-3.5 sm:p-4">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <span className="grid size-7 place-items-center rounded-lg bg-success/10 text-success">✓</span>
+              Verified API destination
+              <span className="ml-auto rounded-full border border-border bg-background px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Read only</span>
+            </div>
+            <p className="mt-2 break-all font-mono text-xs text-foreground sm:text-sm">{apiBaseUrl}</p>
+            <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">The vault sends this credential only to this provider API origin. Host and authentication rules are controlled by the reviewed service adapter, not by this form.</p>
+          </section>
+        )}
+        <Field label="Secret token" hint="Sent only to the provider for verification, then encrypted by the vault. It is write-only.">
           <Input
             name="value" type="password" required autoComplete="new-password" spellCheck={false}
             value={secretValue} onChange={(event) => {
@@ -244,85 +265,41 @@ export function CredentialForm({
             inputMode="text"
           />
         </Field>
-        {isCloudflareAccountToken && (
-          <Field label="Cloudflare Account ID" hint="This is an Account API Token (cfat_). Enter the 32-character ID of the account that owns it; it is required for verification.">
-            <Input name="cloudflareAccountId" value={cloudflareAccountId} onChange={(event) => {
-              setCloudflareAccountId(event.target.value)
-              setValidation(null)
-              setLastChecked('')
-            }} placeholder="32-character Account ID" maxLength={32} pattern="[a-fA-F0-9]{32}" title="Enter exactly 32 hexadecimal characters." autoCapitalize="none" spellCheck={false} className="w-full font-mono" />
+        <div className="grid min-w-0 gap-4 sm:grid-cols-2">
+          <Field label="Token lifetime">
+            <NativeSelect className="w-full" value={lifetime} onChange={(event) => setLifetime(event.target.value as 'permanent' | 'temporary')}>
+              <option value="permanent">Permanent (until revoked)</option>
+              <option value="temporary">Temporary (maximum 24 hours)</option>
+            </NativeSelect>
           </Field>
-        )}
+          <Field label={lifetime === 'temporary' ? 'Expires in (hours)' : 'Optional expiry (hours)'}>
+            <Input name="hours" type="number" step="any" min="0.1" max={lifetime === 'temporary' ? 24 : 24 * 365 * 3}
+              required={lifetime === 'temporary'} className="w-full" placeholder={lifetime === 'temporary' ? '24' : 'No expiry'} />
+          </Field>
+        </div>
+        <label className="flex min-h-11 cursor-pointer items-start gap-3 rounded-xl border border-border p-3">
+          <input type="checkbox" name="visible" defaultChecked={defaults.visible} className="mt-1 size-5 shrink-0 rounded border-border accent-primary" />
+          <span className="text-sm">
+            <span className="font-medium">Visible to runners</span>
+            <span className="mt-0.5 block text-muted-foreground">Hidden credentials remain stored but cannot be listed or used by runners.</span>
+          </span>
+        </label>
+        <p className="text-xs text-muted-foreground">API host, authentication header and verification method are derived automatically from the provider's reviewed Service Adapter. No manual network or scope settings are required.</p>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <Button type="button" variant="outline" disabled={!secretValue.trim() || !service.trim() || validating} onClick={() => void checkToken(secretValue)}>
-            {validating ? 'Checking token…' : 'Verify token & inspect permissions'}
+            {validating ? 'Checking token…' : 'Test access & inspect permissions'}
           </Button>
           {validation?.status === 'valid' && <span className="text-sm text-success">Verified</span>}
           {validationError && <span className="text-sm text-destructive" role="alert">{validationError}</span>}
         </div>
         {validation && <ValidationResult report={validation} />}
 
-        <details open className="overflow-hidden rounded-xl border border-border bg-card">
-          <summary className="cursor-pointer list-none px-4 py-3.5 text-base font-semibold marker:content-none">
-            <span className="flex items-center justify-between gap-3">
-              <span>Advanced settings</span>
-              <span className="text-xs font-normal text-muted-foreground">Network, authentication & expiry</span>
-            </span>
-          </summary>
-          <div className="space-y-5 border-t border-border p-4">
-            {isCloudflare && !isCloudflareAccountToken && (
-              <Field label="Cloudflare Account ID (optional)" hint="For legacy Account API tokens when Cloudflare cannot list your accounts. New cfat_ tokens show this field above the verification button.">
-                <Input name="cloudflareAccountId" value={cloudflareAccountId} onChange={(event) => {
-                  setCloudflareAccountId(event.target.value)
-                  setValidation(null)
-                  setLastChecked('')
-                }} placeholder="32-character Account ID" maxLength={32} pattern="[a-fA-F0-9]{32}" title="Enter exactly 32 hexadecimal characters." autoCapitalize="none" spellCheck={false} className="w-full font-mono" />
-              </Field>
-            )}
-            <div className="grid min-w-0 gap-4 sm:grid-cols-2">
-              <Field label="Allowed hosts" hint="Exact hostnames only. The proxy cannot call hosts outside this list.">
-                <textarea name="hosts" rows={3} defaultValue={defaults.allowedHosts} required spellCheck={false}
-                  className="min-h-28 w-full rounded-lg border border-input bg-background px-3 py-3 font-mono text-base focus:outline-none focus:ring-2 focus:ring-ring" />
-              </Field>
-              <div className="space-y-4">
-                <Field label="Auth header">
-                  <Input name="authHeader" defaultValue={defaults.authHeader} className="w-full font-mono" />
-                </Field>
-                <Field label="Auth scheme">
-                  <NativeSelect className="w-full" name="authScheme" defaultValue={defaults.authScheme}>
-                    <option value="Bearer">Bearer</option>
-                    <option value="Token">Token</option>
-                    <option value="Raw">Raw (value only)</option>
-                  </NativeSelect>
-                </Field>
-              </div>
-            </div>
-            <div className="grid min-w-0 gap-4 sm:grid-cols-2">
-              <Field label="Lifetime">
-                <NativeSelect className="w-full" value={lifetime} onChange={(event) => setLifetime(event.target.value as 'permanent' | 'temporary')}>
-                  <option value="permanent">Permanent</option>
-                  <option value="temporary">Temporary (max 24 h)</option>
-                </NativeSelect>
-              </Field>
-              <Field label={lifetime === 'temporary' ? 'Expires in (hours, max 24)' : 'Expires in (hours, optional)'}>
-                <Input name="hours" type="number" step="any" min="0.1" max={lifetime === 'temporary' ? 24 : undefined} required={lifetime === 'temporary'} className="w-full" />
-              </Field>
-            </div>
-            <label className="flex min-h-11 cursor-pointer items-start gap-3">
-              <input type="checkbox" name="visible" defaultChecked={defaults.visible} className="mt-1 size-5 shrink-0 rounded border-border accent-primary" />
-              <span className="text-sm">
-                <span className="font-medium">Visible to runners</span>
-                <span className="mt-0.5 block text-muted-foreground">Hidden credentials stay in the vault but cannot be listed or used.</span>
-              </span>
-            </label>
-            {preset?.docsUrl && <p className="text-sm text-muted-foreground">Provider reference: <a className="underline" href={preset.docsUrl} target="_blank" rel="noopener noreferrer nofollow">official API documentation</a>.</p>}
-          </div>
-        </details>
-
         {errorMessage && <p role="alert" aria-live="polite" className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{errorMessage}</p>}
-        <Button type="submit" disabled={saving || validating} className="min-h-12 w-full sm:w-auto">
-          {saving ? 'Saving…' : mode === 'create' ? 'Verify and save credential' : mode === 'register' ? 'Verify, save and activate' : 'Verify and replace token'}
-        </Button>
+        <div className="sticky bottom-0 -mx-3 border-t border-border bg-background/95 px-3 py-3 backdrop-blur sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:p-0">
+          <Button type="submit" disabled={saving || validating} className="min-h-12 w-full">
+            {saving ? 'Saving…' : mode === 'create' ? 'Verify and save credential' : mode === 'register' ? 'Verify, save and activate' : 'Verify and replace token'}
+          </Button>
+        </div>
       </form>
     </ErrorBoundary>
   )

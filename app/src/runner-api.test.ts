@@ -12,6 +12,7 @@ describe('runner HTTP surface', () => {
   test.each([
     ['POST', '/api/runner/session', undefined],
     ['GET', '/api/runner/registry', undefined],
+    ['GET', '/api/runner/integrations', undefined],
     ['POST', '/api/runner/registrations', { name: 'X' }],
     ['POST', '/api/runner/use', { name: 'X', method: 'GET', url: 'https://example.com' }],
   ])('%s %s fails closed (503, no-store) when the runner policy is not configured', async (method, path, body) => {

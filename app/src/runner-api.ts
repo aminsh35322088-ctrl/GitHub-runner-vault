@@ -9,8 +9,9 @@ import { loadVaultKeys, type VaultEnv } from './lib/vault-config.ts'
 import { cachedJwksSource } from './lib/oidc.ts'
 import { loadRunnerPolicy } from './lib/runner-policy.ts'
 import { deriveSessionKey } from './lib/runner-session.ts'
-import { createSession, registry, requestCredential, useCredential, type RunnerDeps } from './lib/runner-core.ts'
+import { createSession, registry, integrations, requestCredential, useCredential, type RunnerDeps } from './lib/runner-core.ts'
 import { getRequestOrigin } from './db.ts'
+import { loadVaultPreferences } from './lib/vault-observability.ts'
 
 const jwks = cachedJwksSource()
 
@@ -28,6 +29,7 @@ async function buildDeps(request: Request): Promise<RunnerDeps> {
     origin,
     fetchFn: fetch,
     now: Date.now(),
+    proxyTimeoutMs: (await loadVaultPreferences(db)).proxyTimeoutMs,
   }
 }
 
@@ -82,6 +84,14 @@ export const runnerApp = new Spiceflow()
     },
   })
   .route({
+    method: 'GET',
+    path: '/api/runner/integrations',
+    detail: { tags: ['Runner'], summary: 'List verified CLI integration adapters for credentials available to this runner' },
+    async handler({ request }) {
+      return run(request, (deps) => integrations(deps, request.headers.get('authorization')))
+    },
+  })
+  .route({
     method: 'POST',
     path: '/api/runner/registrations',
     detail: { tags: ['Runner'], summary: 'Ask the owner to register a credential; returns a one-time owner link' },
@@ -103,7 +113,7 @@ export const runnerApp = new Spiceflow()
       const body = await parseRunnerBody(request)
       if (!body) return invalidRequest()
       return run(request, (deps) => useCredential(deps, request.headers.get('authorization'), {
-        name: body.name, method: body.method, url: body.url, headers: body.headers, body: body.body, purpose: body.purpose,
+        name: body.name, method: body.method, url: body.url, headers: body.headers, body: body.body, purpose: body.purpose, consumer: body.consumer,
       }))
     },
   })

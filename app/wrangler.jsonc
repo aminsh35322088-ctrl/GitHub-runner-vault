@@ -19,5 +19,8 @@
     { "binding": "DB", "database_name": "runner-vault-db",
       "database_id": "392ce52e-e166-4db7-8106-b87dd14af345"}
   ],
-  "vars": {}
+  "vars": {},
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  }
 }

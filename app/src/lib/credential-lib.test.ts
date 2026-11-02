@@ -175,6 +175,61 @@ describe('credential documentation', () => {
     expect(parsed.ok).toBe(true)
   })
 
+  test('accepts a service adapter whose API hostname is owned by the official documentation host', () => {
+    const parsed = parseCredentialDoc({
+      ...goodDoc,
+      official_documentation_links: [{ title: 'Provider docs', url: 'https://northflank.com/docs/v1/api/use-the-api' }],
+      service_adapter: {
+        api_base_url: 'https://api.northflank.com/v1',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        validation: { method: 'GET', path: '/projects' },
+        cli_tools: [{
+          id: 'northflank', label: 'Northflank CLI', binary: 'nf',
+          integration: 'base-url-env', variable: 'NF_API_BASE_URL',
+          setup_hint: 'Use the local credential proxy.',
+        }],
+      },
+    })
+    expect(parsed.ok).toBe(true)
+  })
+
+  test('does not treat unrelated public-suffix tenants as the same provider domain', () => {
+    const parsed = parseCredentialDoc({
+      ...goodDoc,
+      official_documentation_links: [{ title: 'Docs', url: 'https://docs.evil.co.uk/api' }],
+      service_adapter: {
+        api_base_url: 'https://api.victim.co.uk',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        validation: { method: 'GET', path: '/me' },
+        cli_tools: [],
+      },
+    })
+    expect(parsed.ok).toBe(false)
+  })
+
+  test('requires a verifiable success marker and forbids it on HEAD checks', () => {
+    const base = {
+      ...goodDoc,
+      service_adapter: {
+        api_base_url: 'https://slack.com',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        validation: { method: 'GET', path: '/api/auth.test', success_pointer: '/ok' },
+        cli_tools: [],
+      },
+    }
+    expect(parseCredentialDoc(base).ok).toBe(false)
+    expect(parseCredentialDoc({
+      ...base,
+      service_adapter: {
+        ...base.service_adapter,
+        validation: { method: 'HEAD', path: '/api/auth.test', success_pointer: '/ok', success_value: true },
+      },
+    }).ok).toBe(false)
+  })
+
   test.each([
     'http://docs.railway.com/x',
     'javascript:alert(1)',

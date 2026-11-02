@@ -15,6 +15,7 @@ import { normalizeAllowedHosts, normalizeAuthStyle, readAllowedHosts, reservedNa
 import { availability, publicReason } from './credential-policy.ts'
 import { createEnrollmentLink, type CreatedLink } from './enrollment.ts'
 import { defaultPurposeForService } from './presets.ts'
+import { adapterHost, serviceAdapterFor, serviceAdapterFromDocument } from './service-adapter.ts'
 
 type Db = ReturnType<typeof getDb>
 
@@ -127,7 +128,9 @@ export async function createCredential(
     visible: input.visible, lifetime: input.lifetime, delivery: input.delivery,
     allowedHosts: JSON.stringify(validated.value.hosts),
     authHeader: validated.value.style.header, authScheme: validated.value.style.scheme,
-    externallyManaged: false, validation: input.validation ?? 'not_tested', validationDetails: input.validationDetails ?? null, docJson: '{}',
+    externallyManaged: false, validation: input.validation ?? 'not_tested', validationDetails: input.validationDetails ?? null,
+    validationStatus: input.validationStatus ?? input.validation ?? 'not_tested', lastValidatedAt: input.validationStatus ? input.now : null,
+    nextValidationAt: input.now + Math.max(1, Math.min(24, Math.trunc(input.validationIntervalHours ?? 6))) * 3600_000, docJson: '{}',
     valueEncrypted: sealed.encrypted, valueIv: sealed.iv, keyVersion: KEY_VERSION,
     expiresAt: validated.value.expiresAt, createdAt: input.now, updatedAt: input.now,
   })
@@ -152,6 +155,8 @@ export type StoreInput = {
   now: number
   validation?: 'not_tested' | 'valid' | 'invalid' | 'insufficient_permissions'
   validationDetails?: string | null
+  validationStatus?: string
+  validationIntervalHours?: number
 }
 
 export type ValidatedStoreInput = {
@@ -209,6 +214,9 @@ export async function storeCredentialValue(db: Db, key: CryptoKey, input: StoreI
     expiresAt,
     validation: input.validation ?? 'not_tested',
     validationDetails: input.validationDetails ?? null,
+    validationStatus: input.validationStatus ?? input.validation ?? 'not_tested',
+    lastValidatedAt: input.validationStatus ? input.now : null,
+    nextValidationAt: input.now + Math.max(1, Math.min(24, Math.trunc(input.validationIntervalHours ?? 6))) * 3600_000,
     updatedAt: input.now,
   }).where(orm.eq(schema.credential.id, row.id))
   await audit(db, { action: 'value_stored', actor: 'owner', credentialId: row.id, credentialName: row.name, result: 'ok', detail: input.lifetime + '/proxy', now: input.now })
@@ -232,6 +240,9 @@ const METADATA_COLUMNS = {
   authScheme: schema.credential.authScheme,
   externallyManaged: schema.credential.externallyManaged,
   validation: schema.credential.validation,
+  validationStatus: schema.credential.validationStatus,
+  lastValidatedAt: schema.credential.lastValidatedAt,
+  nextValidationAt: schema.credential.nextValidationAt,
   expiresAt: schema.credential.expiresAt,
   lastUsedAt: schema.credential.lastUsedAt,
   createdAt: schema.credential.createdAt,
@@ -330,7 +341,13 @@ export type ValueResult =
  * effect on the very next request. The caller must never return `value` to a runner
  * in `proxy` mode.
  */
-export async function readCredentialValue(db: Db, key: CryptoKey, name: string, now: number): Promise<ValueResult> {
+export async function readCredentialValue(
+  db: Db,
+  key: CryptoKey,
+  name: string,
+  now: number,
+  options: { validation?: boolean } = {},
+): Promise<ValueResult> {
   const [row] = await db.select({
     id: schema.credential.id, name: schema.credential.name, status: schema.credential.status, visible: schema.credential.visible,
     expiresAt: schema.credential.expiresAt, externallyManaged: schema.credential.externallyManaged,
@@ -340,7 +357,9 @@ export async function readCredentialValue(db: Db, key: CryptoKey, name: string, 
   }).from(schema.credential).where(orm.eq(schema.credential.name, name)).limit(1)
   if (!row) return { ok: false, reason: 'unavailable' }
   const state = availability({
-    status: row.status, visible: row.visible, expiresAt: row.expiresAt,
+    status: options.validation ? 'active' : row.status,
+    visible: options.validation ? true : row.visible,
+    expiresAt: options.validation ? null : row.expiresAt,
     externallyManaged: row.externallyManaged, hasValue: row.valueEncrypted !== null,
   }, now)
   if (!state.available) return { ok: false, reason: publicReason(state.reason) }

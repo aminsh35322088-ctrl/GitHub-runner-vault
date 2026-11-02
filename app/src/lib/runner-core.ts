@@ -8,6 +8,7 @@ import { verifyGithubOidc, type JwksSource, type OidcPolicy } from './oidc.ts'
 import { issueRunnerSession, verifyRunnerSession, getRunnerRevokedBefore, type RunnerSession } from './runner-session.ts'
 import { runProxy, type ProxyError } from './proxy.ts'
 import { BOOTSTRAP_WORKFLOW_FILE, DEFAULT_EVENTS, pinRunnerPolicy } from './runner-policy.ts'
+import { listRunnerIntegrationMetadata, recordCredentialUsage } from './vault-observability.ts'
 
 type Db = ReturnType<typeof getDb>
 
@@ -24,6 +25,7 @@ export type RunnerDeps = {
   origin: string
   fetchFn: typeof fetch
   now: number
+  proxyTimeoutMs?: number
 }
 
 export type CoreResult<T> = { status: number; body: T }
@@ -101,6 +103,13 @@ export async function registry(deps: RunnerDeps, authorization: string | null) {
   return { status: 200, body: { credentials: await listRegistryForRunner(deps.db, deps.now) } }
 }
 
+/** A separate, opt-in capability endpoint for local CLI adapters. */
+export async function integrations(deps: RunnerDeps, authorization: string | null) {
+  const auth = await authenticate(deps, authorization)
+  if (!auth.ok) return auth.res
+  return { status: 200, body: { integrations: await listRunnerIntegrationMetadata(deps.db, deps.now) } }
+}
+
 // ── POST /api/runner/registrations ────────────────────────────────
 
 export async function requestCredential(
@@ -133,7 +142,7 @@ export async function requestCredential(
 
 // ── POST /api/runner/use ──────────────────────────────────────────
 
-export type UseInput = { name: unknown; method: unknown; url: unknown; headers?: unknown; body?: unknown; purpose?: unknown }
+export type UseInput = { name: unknown; method: unknown; url: unknown; headers?: unknown; body?: unknown; purpose?: unknown; consumer?: unknown }
 
 const PROXY_STATUS: Record<ProxyError, number> = {
   bad_method: 400, bad_url: 400, host_not_allowed: 403, bad_header: 400, body_too_large: 413,
@@ -173,19 +182,32 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
     return fail(400, 'not_a_proxy_credential')
   }
 
+  const startedAt = Date.now()
+  const consumer = typeof input.consumer === 'string' && /^cli:[a-z0-9._-]{1,40}$/i.test(input.consumer)
+    ? input.consumer.toLowerCase() : 'runner'
   const result = await runProxy({
     credential: read.credential, value: read.value, method: input.method, url: input.url, headers, body: input.body as string | undefined,
-  }, deps.fetchFn)
+  }, deps.fetchFn, deps.proxyTimeoutMs)
 
   if (!result.ok) {
-    await audit(deps.db, { ...common, credentialId: read.credential.id, action: 'proxy_use', result: result.error, detail: result.detail })
+    // Observability is deliberately best-effort: a D1 telemetry failure must not
+    // replace the upstream error or cause callers to replay a non-idempotent action.
+    await Promise.allSettled([
+      recordCredentialUsage(deps.db, { credentialId: read.credential.id, consumer, success: false, latencyMs: Date.now() - startedAt, now: deps.now }),
+      audit(deps.db, { ...common, credentialId: read.credential.id, action: 'proxy_use', result: result.error, detail: result.detail }),
+    ])
     return fail(PROXY_STATUS[result.error], result.error)
   }
-  await db_touch(deps, read.credential.id)
-  await audit(deps.db, {
-    ...common, credentialId: read.credential.id, action: 'proxy_use', result: 'ok',
-    detail: `${result.method} ${result.host}${result.path} -> ${result.status}${result.redactions ? ` (${result.redactions} redacted)` : ''}`,
-  })
+  // These independent metadata writes run concurrently and cannot make a
+  // successful external API operation appear to have failed at the Vault layer.
+  await Promise.allSettled([
+    recordCredentialUsage(deps.db, { credentialId: read.credential.id, consumer, success: result.status < 400, latencyMs: Date.now() - startedAt, now: deps.now }),
+    db_touch(deps, read.credential.id),
+    audit(deps.db, {
+      ...common, credentialId: read.credential.id, action: 'proxy_use', result: 'ok',
+      detail: `${result.method} ${result.host}${result.path} -> ${result.status}${result.redactions ? ` (${result.redactions} redacted)` : ''}`,
+    }),
+  ])
   return {
     status: 200,
     body: { status: result.status, headers: result.headers, body: result.body, truncated: result.truncated, redacted: result.redactions > 0 },

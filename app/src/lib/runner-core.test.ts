@@ -5,7 +5,7 @@ import { importEncryptionKey } from './credential-crypto.ts'
 import { deleteCredential, requestRegistration, storeCredentialValue, setEnabled, setVisibility } from './credential-service.ts'
 import { GITHUB_OIDC_ISSUER, type OidcPolicy } from './oidc.ts'
 import { deriveSessionKey, issueRunnerSession, revokeRunnerSessions } from './runner-session.ts'
-import { bearer, createSession, registry, requestCredential, useCredential, USE_LIMIT_PER_MINUTE, type RunnerDeps } from './runner-core.ts'
+import { bearer, createSession, registry, integrations, requestCredential, useCredential, USE_LIMIT_PER_MINUTE, type RunnerDeps } from './runner-core.ts'
 
 const KEY_B64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
 const SECRET = 'cfut_END_TO_END_SECRET_0123456789'
@@ -65,6 +65,7 @@ describe('authentication', () => {
   test('every runner operation needs a valid session', async () => {
     const d = await deps()
     expect((await registry(d, null)).status).toBe(401)
+    expect((await integrations(d, null)).status).toBe(401)
     expect((await registry(d, 'Bearer rs1.not.valid.at.all')).status).toBe(401)
     expect((await useCredential(d, null, { name: 'X', ...call })).status).toBe(401)
     expect((await requestCredential(d, null, { name: 'X', service: 'y', purpose: 'z', doc })).status).toBe(401)

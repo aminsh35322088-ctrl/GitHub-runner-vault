@@ -95,6 +95,9 @@ export const credential = sqliteCore.sqliteTable('credential', {
     enum: ['not_tested', 'valid', 'invalid', 'insufficient_permissions'],
   }).notNull().default('not_tested'),
   validationDetails: sqliteCore.text('validation_details'),
+  validationStatus: sqliteCore.text('validation_status').notNull().default('not_tested'),
+  lastValidatedAt: epochMs('last_validated_at'),
+  nextValidationAt: epochMs('next_validation_at'),
   docJson: sqliteCore.text('doc_json').notNull().default('{}'),
   valueEncrypted: sqliteCore.text('value_encrypted'),
   valueIv: sqliteCore.text('value_iv'),
@@ -105,6 +108,7 @@ export const credential = sqliteCore.sqliteTable('credential', {
   updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
 }, (table) => [
   sqliteCore.index('credential_status_idx').on(table.status),
+  sqliteCore.index('credential_validation_due_idx').on(table.status, table.nextValidationAt),
 ])
 
 export const enrollmentLink = sqliteCore.sqliteTable('enrollment_link', {
@@ -144,6 +148,38 @@ export const vaultSetting = sqliteCore.sqliteTable('vault_setting', {
   value: sqliteCore.text('value').notNull(),
   updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
 })
+
+export const vaultNotification = sqliteCore.sqliteTable('vault_notification', {
+  id: sqliteCore.text('id').primaryKey().notNull(),
+  dedupeKey: sqliteCore.text('dedupe_key').notNull().unique(),
+  kind: sqliteCore.text('kind').notNull(),
+  severity: sqliteCore.text('severity', { enum: ['info', 'warning', 'critical'] }).notNull(),
+  title: sqliteCore.text('title').notNull(),
+  message: sqliteCore.text('message').notNull(),
+  credentialId: sqliteCore.text('credential_id').references(() => credential.id, { onDelete: 'set null' }),
+  credentialName: sqliteCore.text('credential_name').notNull().default(''),
+  createdAt: epochMs('created_at').notNull(),
+  readAt: epochMs('read_at'),
+}, (table) => [
+  sqliteCore.index('vault_notification_created_idx').on(table.createdAt),
+  sqliteCore.index('vault_notification_unread_idx').on(table.readAt, table.createdAt),
+])
+
+export const credentialUsageHourly = sqliteCore.sqliteTable('credential_usage_hourly', {
+  id: sqliteCore.text('id').primaryKey().notNull(),
+  credentialId: sqliteCore.text('credential_id').notNull().references(() => credential.id, { onDelete: 'cascade' }),
+  windowStart: epochMs('window_start').notNull(),
+  consumer: sqliteCore.text('consumer').notNull().default('runner'),
+  requestCount: sqliteCore.integer('request_count').notNull().default(0),
+  successCount: sqliteCore.integer('success_count').notNull().default(0),
+  errorCount: sqliteCore.integer('error_count').notNull().default(0),
+  latencyTotalMs: sqliteCore.integer('latency_total_ms').notNull().default(0),
+  latencyMaxMs: sqliteCore.integer('latency_max_ms').notNull().default(0),
+}, (table) => [
+  sqliteCore.uniqueIndex('credential_usage_hourly_unique_idx').on(table.credentialId, table.windowStart, table.consumer),
+  sqliteCore.index('credential_usage_window_idx').on(table.windowStart),
+  sqliteCore.index('credential_usage_credential_idx').on(table.credentialId, table.windowStart),
+])
 
 export const relations = defineRelations(
   { user, session, account, verification },

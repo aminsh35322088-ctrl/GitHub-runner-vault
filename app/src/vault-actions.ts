@@ -17,9 +17,11 @@ import { consumeEnrollmentLink, peekEnrollmentLink, releaseEnrollmentLink } from
 import { revokeRunnerSessions } from './lib/runner-session.ts'
 import { DEFAULT_EVENTS, resolveRepositoryId, saveRunnerPolicy } from './lib/runner-policy.ts'
 import { normalizeCredentialName } from './lib/credential-input.ts'
-import { defaultPurposeForService } from './lib/presets.ts'
+import { defaultPurposeForService, presetForService } from './lib/presets.ts'
+import { adapterHost, serviceAdapterFor, serviceAdapterFromDocument } from './lib/service-adapter.ts'
 import { validateProviderToken, type CredentialValidationReport } from './lib/credential-validation.ts'
 import { publicCredentialActionError } from './lib/public-action-error.ts'
+import { loadVaultPreferences, markAllNotificationsRead, markNotificationRead, saveVaultPreferences, type VaultPreferences } from './lib/vault-observability.ts'
 
 type CredentialActionResult<T> = { ok: true; value: T } | { ok: false; error: string }
 
@@ -50,11 +52,6 @@ const storeSchema = z.object({
   /** hours from now; required for temporary, optional for permanent */
   expiresInHours: z.number().positive().max(24 * 365 * 3).nullable(),
   visible: z.boolean(),
-  delivery: z.enum(['proxy']),
-  allowedHosts: z.string().max(2000),
-  authHeader: z.string().max(60),
-  authScheme: z.enum(['Bearer', 'Token', 'Raw']),
-  cloudflareAccountId: z.string().trim().regex(/^[a-f0-9]{32}$/i, 'شناسه Account Cloudflare باید دقیقاً ۳۲ کاراکتر هگزادسیمال باشد.').or(z.literal('')).optional(),
 })
 export type StoreForm = z.input<typeof storeSchema>
 
@@ -64,18 +61,43 @@ const createCredentialSchema = z.object({
   form: storeSchema,
 })
 
-function toStoreInput(form: z.output<typeof storeSchema>, now: number, validation?: CredentialValidationReport) {
+type CredentialPolicy = {
+  allowedHosts: string[]
+  authHeader: string
+  authScheme: 'Bearer' | 'Token' | 'Raw'
+}
+
+function credentialPolicy(service: string, document?: unknown): CredentialPolicy {
+  const adapter = serviceAdapterFromDocument(document) ?? serviceAdapterFor(service)
+  const preset = presetForService(service)
+  const host = adapter ? adapterHost(adapter) : preset?.hosts[0] ?? null
+  if (!adapter && !preset) {
+    throw new Error('این سرویس Adapter امن و مستند ندارد؛ از Runner یک لینک ثبت جدید با Service Adapter بساز.')
+  }
+  if (!host) throw new Error('آدرس API سرویس قابل‌تأیید نیست؛ Credential ذخیره نشد.')
+  return {
+    allowedHosts: [host],
+    authHeader: adapter?.authHeader ?? preset?.authHeader ?? 'Authorization',
+    authScheme: adapter?.authScheme ?? preset?.authScheme ?? 'Bearer',
+  }
+}
+
+function toStoreInput(form: z.output<typeof storeSchema>, now: number, policy: CredentialPolicy, validation?: CredentialValidationReport, validationIntervalHours = 6) {
   return {
     value: form.value,
     lifetime: form.lifetime,
     expiresAt: form.expiresInHours === null ? null : now + Math.round(form.expiresInHours * 3600_000),
     visible: form.visible,
-    delivery: form.delivery,
-    allowedHosts: form.allowedHosts.split(/[\s,]+/).filter(Boolean),
-    authHeader: form.authHeader || 'Authorization',
-    authScheme: form.authScheme,
-    validation: validation?.status === 'valid' ? 'valid' as const : 'not_tested' as const,
+    delivery: 'proxy' as const,
+    allowedHosts: policy.allowedHosts,
+    authHeader: policy.authHeader,
+    authScheme: policy.authScheme,
+    validation: validation?.status === 'valid' ? 'valid' as const
+      : validation?.status === 'invalid' ? 'invalid' as const
+        : validation?.status === 'insufficient_permissions' ? 'insufficient_permissions' as const : 'not_tested' as const,
+    validationStatus: validation?.status ?? 'not_tested',
     validationDetails: validation ? JSON.stringify(validation).slice(0, 32_000) : null,
+    validationIntervalHours,
     now,
   }
 }
@@ -85,20 +107,27 @@ async function key() {
 }
 
 /** Validate a provider token on demand; the submitted value is never returned. */
-export async function validateCredentialTokenAction(service: string, value: string, cloudflareAccountId?: string) {
+export async function validateCredentialTokenAction(service: string, value: string, credentialId?: string) {
   return captureCredentialAction(async () => {
     await requireOwner()
     const parsed = z.object({
       service: z.string().trim().min(1).max(80),
       value: z.string().min(1).max(10_000),
-      cloudflareAccountId: z.string().trim().regex(/^[a-f0-9]{32}$/i, 'شناسه Account Cloudflare باید دقیقاً ۳۲ کاراکتر هگزادسیمال باشد.').optional(),
-    }).parse({ service, value, cloudflareAccountId: cloudflareAccountId || undefined })
-    return validateProviderToken(parsed.service, parsed.value, fetch, Date.now(), parsed.cloudflareAccountId)
+      credentialId: idSchema.optional(),
+    }).parse({ service, value, credentialId })
+    const existing = parsed.credentialId ? await getCredentialForOwner(getDb(), parsed.credentialId) : null
+    if (parsed.credentialId && !existing) throw new Error('Credential not found')
+    const document = existing?.doc
+    const adapter = serviceAdapterFromDocument(document) ?? serviceAdapterFor(parsed.service)
+    const policy = credentialPolicy(parsed.service, document)
+    return validateProviderToken(parsed.service, parsed.value, fetch, Date.now(), undefined, adapter, policy.allowedHosts)
   })
 }
 
 function ensureSaveable(validation: CredentialValidationReport) {
-  if (validation.status === 'invalid' || validation.status === 'unavailable') {
+  // A failed network call is not proof that the token is invalid. The owner may
+  // still store it under the adapter's exact HTTPS host policy and review its state.
+  if (validation.status === 'invalid' || validation.status === 'expired') {
     throw new Error(validation.message)
   }
 }
@@ -109,12 +138,16 @@ export async function createCredentialAction(input: { name: string; service: str
     await requireOwner()
     const parsed = createCredentialSchema.parse(input)
     const name = normalizeCredentialName(parsed.name)
-    const validation = await validateProviderToken(parsed.service, parsed.form.value, fetch, Date.now(), parsed.form.cloudflareAccountId || undefined)
+    const policy = credentialPolicy(parsed.service)
+    const adapter = serviceAdapterFor(parsed.service)
+    const validation = await validateProviderToken(parsed.service, parsed.form.value, fetch, Date.now(), undefined, adapter, policy.allowedHosts)
     ensureSaveable(validation)
     const now = Date.now()
-    const result = await createCredential(getDb(), await key(), {
+    const db = getDb()
+    const preferences = await loadVaultPreferences(db)
+    const result = await createCredential(db, await key(), {
       name, service: parsed.service, purpose: defaultPurposeForService(parsed.service),
-      ...toStoreInput(parsed.form, now, validation),
+      ...toStoreInput(parsed.form, now, policy, validation, preferences.validationIntervalHours),
     })
     if (!result.ok) fail(result)
     return { id: result.value.id, name: result.value.name }
@@ -136,9 +169,15 @@ export async function submitRegistrationAction(token: string, form: StoreForm) {
     if (!credential || credential.status !== 'pending' || credential.externallyManaged) {
       throw new Error('This registration is no longer available')
     }
-    const tokenReport = await validateProviderToken(credential.service, parsed.value, fetch, Date.now(), parsed.cloudflareAccountId || undefined)
+    const policy = credentialPolicy(credential.service, credential.doc)
+    const adapter = serviceAdapterFromDocument(credential.doc) ?? serviceAdapterFor(credential.service)
+    const tokenReport = await validateProviderToken(credential.service, parsed.value, fetch, Date.now(), undefined, adapter, policy.allowedHosts)
     ensureSaveable(tokenReport)
-    const storeInput = { credentialId: info.credentialId, ...toStoreInput(parsed, now, tokenReport) }
+    const preferences = await loadVaultPreferences(db)
+    const storeInput = {
+      credentialId: info.credentialId,
+      ...toStoreInput(parsed, now, policy, tokenReport, preferences.validationIntervalHours),
+    }
     const validation = validateStoreInput(storeInput)
     if (!validation.ok) fail(validation)
     const encryptionKey = await key()
@@ -169,10 +208,14 @@ export async function replaceCredentialAction(id: string, form: StoreForm) {
     const db = getDb()
     const credential = await getCredentialForOwner(db, idSchema.parse(id))
     if (!credential || credential.externallyManaged) throw new Error('Credential not found or is externally managed')
-    const tokenReport = await validateProviderToken(credential.service, parsed.value, fetch, Date.now(), parsed.cloudflareAccountId || undefined)
+    const policy = credentialPolicy(credential.service, credential.doc)
+    const adapter = serviceAdapterFromDocument(credential.doc) ?? serviceAdapterFor(credential.service)
+    const tokenReport = await validateProviderToken(credential.service, parsed.value, fetch, Date.now(), undefined, adapter, policy.allowedHosts)
     ensureSaveable(tokenReport)
+    const preferences = await loadVaultPreferences(db)
     const result = await storeCredentialValue(db, await key(), {
-      credentialId: credential.id, ...toStoreInput(parsed, Date.now(), tokenReport),
+      credentialId: credential.id,
+      ...toStoreInput(parsed, Date.now(), policy, tokenReport, preferences.validationIntervalHours),
     })
     if (!result.ok) fail(result)
     return { name: result.value.name }
@@ -213,6 +256,34 @@ export async function addExternalAction(input: { name: string; service: string }
 export async function revokeRunnerSessionsAction() {
   await requireOwner()
   await revokeRunnerSessions(getDb(), Date.now())
+  return { ok: true as const }
+}
+
+const vaultPreferencesSchema = z.object({
+  validationIntervalHours: z.number().int().min(1).max(24),
+  analyticsRetentionDays: z.number().int().min(7).max(365),
+  notificationRetentionDays: z.number().int().min(7).max(365),
+  defaultVisible: z.boolean(),
+  defaultLifetime: z.enum(['permanent', 'temporary']),
+  proxyTimeoutMs: z.number().int().min(5_000).max(30_000),
+})
+
+export async function saveVaultPreferencesAction(input: VaultPreferences) {
+  await requireOwner()
+  const preferences = vaultPreferencesSchema.parse(input)
+  await saveVaultPreferences(getDb(), preferences, Date.now())
+  return { ok: true as const }
+}
+
+export async function markNotificationReadAction(id: string) {
+  await requireOwner()
+  await markNotificationRead(getDb(), idSchema.parse(id))
+  return { ok: true as const }
+}
+
+export async function markAllNotificationsReadAction() {
+  await requireOwner()
+  await markAllNotificationsRead(getDb())
   return { ok: true as const }
 }
 

@@ -28,5 +28,20 @@ export const SCHEMA_MIGRATIONS: SchemaMigration[] = [
     "statements": [
       "ALTER TABLE credential ADD COLUMN validation_details text"
     ]
+  },
+  {
+    "id": "0003_lifecycle_notifications_analytics",
+    "statements": [
+      "ALTER TABLE credential ADD COLUMN validation_status text NOT NULL DEFAULT 'not_tested'",
+      "ALTER TABLE credential ADD COLUMN last_validated_at integer",
+      "ALTER TABLE credential ADD COLUMN next_validation_at integer",
+      "CREATE INDEX credential_validation_due_idx ON credential (status, next_validation_at)",
+      "CREATE TABLE vault_notification (\n  id text PRIMARY KEY,\n  dedupe_key text NOT NULL UNIQUE,\n  kind text NOT NULL,\n  severity text NOT NULL CHECK (severity IN ('info', 'warning', 'critical')),\n  title text NOT NULL CHECK (length(title) <= 160),\n  message text NOT NULL CHECK (length(message) <= 600),\n  credential_id text,\n  credential_name text NOT NULL DEFAULT '',\n  created_at integer NOT NULL,\n  read_at integer,\n  CONSTRAINT fk_vault_notification_credential_id_credential_id_fk\n    FOREIGN KEY (credential_id) REFERENCES credential(id) ON DELETE SET NULL\n)",
+      "CREATE INDEX vault_notification_created_idx ON vault_notification (created_at)",
+      "CREATE INDEX vault_notification_unread_idx ON vault_notification (read_at, created_at)",
+      "CREATE TABLE credential_usage_hourly (\n  id text PRIMARY KEY,\n  credential_id text NOT NULL,\n  window_start integer NOT NULL,\n  consumer text NOT NULL DEFAULT 'runner',\n  request_count integer NOT NULL DEFAULT 0,\n  success_count integer NOT NULL DEFAULT 0,\n  error_count integer NOT NULL DEFAULT 0,\n  latency_total_ms integer NOT NULL DEFAULT 0,\n  latency_max_ms integer NOT NULL DEFAULT 0,\n  UNIQUE (credential_id, window_start, consumer),\n  CONSTRAINT fk_usage_credential FOREIGN KEY (credential_id) REFERENCES credential(id) ON DELETE CASCADE\n)",
+      "CREATE INDEX credential_usage_window_idx ON credential_usage_hourly (window_start)",
+      "CREATE INDEX credential_usage_credential_idx ON credential_usage_hourly (credential_id, window_start)"
+    ]
   }
 ]

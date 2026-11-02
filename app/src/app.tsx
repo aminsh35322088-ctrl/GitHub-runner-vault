@@ -12,7 +12,8 @@ import { Head } from 'spiceflow/react'
 import { getDb, getAuth, getSession, getRequestOrigin, requirePageSession } from './db.ts'
 import { ensureSchema } from './lib/schema.ts'
 import { loadRunnerPolicyInput } from './lib/runner-policy.ts'
-import { formatAllowedHosts, presetForService } from './lib/presets.ts'
+import { presetForService } from './lib/presets.ts'
+import { serviceAdapterFor, serviceAdapterFromDocument } from './lib/service-adapter.ts'
 import {
   SETUP_STATE_COOKIE, SETUP_STATE_MAX_AGE_SECONDS, buildManifest, convertManifest, isConfigured, loadOwnerId, loadOwnerLogin, loadVaultKeys,
   newSetupState, saveGithubApp, setupStateMatches, type VaultEnv,
@@ -27,6 +28,9 @@ import { availability } from './lib/credential-policy.ts'
 import { getCredentialForOwner, listAudit, listCredentialsForOwner } from './lib/credential-service.ts'
 import { peekEnrollmentLink } from './lib/enrollment.ts'
 import { linkHost, readStoredDoc, type CredentialDoc } from './lib/credential-docs.ts'
+import { Bell, KeyRound, LayoutDashboard, Plus, ChartNoAxesCombined, ShieldCheck, Settings as SettingsIcon, ClipboardList, Workflow, LogOut, Activity, Clock3, CheckCircle2, AlertTriangle, XCircle, ChevronRight } from 'lucide-react'
+import { getUsageAnalytics, listCredentialIntegrationMetadata, listNotifications, loadVaultPreferences, runScheduledCredentialValidation, unreadNotificationCount } from './lib/vault-observability.ts'
+import { SectionCard } from './components/ui/section-card.tsx'
 
 const themeScript = `(function(){var d=document.documentElement;var m=document.cookie.match(/(?:^|;\\s*)color-theme=(light|dark)(?:;|$)/);var t=m?m[1]:null;if(!t)t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(t==='dark')d.classList.add('dark');else d.classList.remove('dark')})()`
 
@@ -37,8 +41,18 @@ function safeRedirectPath(value: string | null): string {
   return '/vault'
 }
 
-function Shell({ request, children, signedIn }: { request: Request; children: React.ReactNode; signedIn?: boolean }) {
+async function Shell({ request, children, signedIn }: { request: Request; children: React.ReactNode; signedIn?: boolean }) {
   const dark = /(?:^|;\s*)color-theme=dark(?:;|$)/.test(request.headers.get('cookie') ?? '')
+  const current = new URL(request.url).pathname
+  const unread = signedIn ? await unreadNotificationCount(getDb()) : 0
+  const navItems = [
+    { href: '/vault', label: 'Overview', icon: LayoutDashboard },
+    { href: '/vault/services', label: 'Add', icon: Plus },
+    { href: '/vault/validation', label: 'Health', icon: ShieldCheck },
+    { href: '/vault/analytics', label: 'Analytics', icon: ChartNoAxesCombined },
+    { href: '/vault/settings', label: 'Settings', icon: SettingsIcon },
+  ]
+  const isActive = (href: string) => href === '/vault' ? current === href : current === href || current.startsWith(href + '/')
   return (
     <html lang="en" className={cn('h-dvh', dark ? 'dark' : undefined)} suppressHydrationWarning>
       <Head>
@@ -49,38 +63,60 @@ function Shell({ request, children, signedIn }: { request: Request; children: Re
       </Head>
       <body className="flex h-dvh flex-col bg-background font-sans antialiased">
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
-        <nav className="z-20 shrink-0 border-b border-border bg-background">
-          <div className="mx-auto flex h-14 max-w-(--content-max-width) items-center justify-between px-3 sm:border-x sm:px-6">
-            <a href="/vault" className="font-semibold tracking-tight">Runner Credential Vault</a>
+        <header className="sticky top-0 z-30 shrink-0 border-b border-border/80 bg-background/90 backdrop-blur-xl">
+          <div className="mx-auto flex h-[4.25rem] max-w-(--content-max-width) items-center justify-between gap-4 px-3 sm:px-6">
+            <a href="/vault" className="group flex min-w-0 items-center gap-3">
+              <span className="grid size-10 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-700 text-white shadow-lg shadow-emerald-900/15 transition-transform group-hover:rotate-[-4deg]">
+                <KeyRound className="size-5" aria-hidden />
+              </span>
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-bold tracking-tight sm:text-base">Runner Vault</span>
+                <span className="hidden text-[11px] font-medium tracking-[0.12em] text-muted-foreground sm:block">CREDENTIAL CONTROL PLANE</span>
+              </span>
+            </a>
             {signedIn && (
               <>
-                <div className="hidden items-center gap-5 text-sm text-muted-foreground sm:flex">
-                  <a href="/vault" className="hover:text-foreground">Credentials</a>
-                  <a href="/vault/services" className="hover:text-foreground">Add credential</a>
-                  <a href="/vault/audit" className="hover:text-foreground">Audit</a>
-                  <a href="/vault/settings" className="hover:text-foreground">Settings</a>
-                  <a href="/logout" className="hover:text-foreground">Sign out</a>
+                <nav aria-label="Primary navigation" className="hidden items-center gap-1 lg:flex">
+                  {navItems.map((item) => {
+                    const Icon = item.icon
+                    const active = isActive(item.href)
+                    return <a key={item.href} href={item.href} aria-current={active ? 'page' : undefined} className={cn('inline-flex min-h-10 items-center gap-2 rounded-xl px-3 text-sm font-medium transition-colors', active ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground')}>
+                      <Icon className="size-4" aria-hidden />{item.label}
+                    </a>
+                  })}
+                  <a href="/vault/audit" className={cn('inline-flex min-h-10 items-center gap-2 rounded-xl px-3 text-sm font-medium transition-colors', isActive('/vault/audit') ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground')}>
+                    <ClipboardList className="size-4" aria-hidden />Audit
+                  </a>
+                </nav>
+                <div className="flex shrink-0 items-center gap-2">
+                  <a href="/vault/notifications" aria-label={unread ? `Notifications, ${unread} unread` : 'Notifications'} className={cn('relative grid size-10 place-items-center rounded-xl border border-border bg-card transition-colors hover:bg-muted', isActive('/vault/notifications') && 'border-primary/40 bg-primary/5 text-primary')}>
+                    <Bell className="size-[18px]" aria-hidden />
+                    {unread > 0 && <span className="absolute -right-1 -top-1 grid min-h-5 min-w-5 place-items-center rounded-full bg-destructive px-1 text-[10px] font-bold leading-none text-white">{unread > 99 ? '99+' : unread}</span>}
+                  </a>
+                  <a href="/vault/settings" aria-label="Settings" className="hidden size-10 place-items-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:grid lg:hidden">
+                    <SettingsIcon className="size-[18px]" aria-hidden />
+                  </a>
+                  <a href="/logout" aria-label="Sign out" className="grid size-10 place-items-center rounded-xl border border-border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+                    <LogOut className="size-[18px]" aria-hidden />
+                  </a>
                 </div>
-                <a href="/logout" className="rounded-lg border border-border px-3 py-2 text-sm sm:hidden">Sign out</a>
               </>
             )}
           </div>
-        </nav>
+        </header>
         <div className="min-h-0 grow overflow-y-auto">
-          <main className="mx-auto min-h-full max-w-(--content-max-width) px-3 pb-24 pt-4 sm:border-x sm:px-6 sm:pb-8 sm:pt-6">{children}</main>
+          <main className="mx-auto min-h-full max-w-(--content-max-width) px-3 pb-28 pt-5 sm:border-x sm:px-6 sm:pb-10 sm:pt-7">{children}</main>
         </div>
         {signedIn && (
-          <nav aria-label="Mobile navigation" className="fixed inset-x-0 bottom-0 z-30 border-t border-border bg-background/95 pb-[env(safe-area-inset-bottom)] shadow-[0_-6px_24px_-16px_rgba(0,0,0,.35)] backdrop-blur sm:hidden">
-            <div className="mx-auto grid max-w-md grid-cols-4 gap-1 px-2 pt-2">
-              {[
-                { href: '/vault', label: 'Credentials' },
-                { href: '/vault/services', label: 'Add' },
-                { href: '/vault/audit', label: 'Audit' },
-                { href: '/vault/settings', label: 'Settings' },
-              ].map((item) => {
-                const current = new URL(request.url).pathname
-                const active = item.href === '/vault' ? current === '/vault' : current === item.href || current.startsWith(item.href + '/')
-                return <a key={item.href} href={item.href} aria-current={active ? 'page' : undefined} className={cn('flex min-h-11 items-center justify-center rounded-lg px-1 text-center text-xs font-medium', active ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted')}>{item.label}</a>
+          <nav aria-label="Mobile navigation" className="fixed inset-x-0 bottom-0 z-30 border-t border-border/80 bg-background/90 pb-[env(safe-area-inset-bottom)] shadow-[0_-8px_28px_-18px_rgba(0,0,0,.45)] backdrop-blur-xl lg:hidden">
+            <div className="mx-auto grid max-w-xl grid-cols-5 gap-1 px-2 pt-2">
+              {navItems.map((item) => {
+                const Icon = item.icon
+                const active = isActive(item.href)
+                return <a key={item.href} href={item.href} aria-current={active ? 'page' : undefined} className={cn('flex min-h-14 flex-col items-center justify-center gap-1 rounded-xl px-1 text-[10px] font-semibold transition-colors', active ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted')}>
+                  <Icon className={cn('size-[19px]', active && 'stroke-[2.4]')} aria-hidden />
+                  <span>{item.label}</span>
+                </a>
               })}
             </div>
           </nav>
@@ -115,15 +151,31 @@ function CredentialValidationSummary({ value }: { value: string | null }) {
         {report.permissionsComplete && <span className="rounded-full border border-border px-2.5 py-1">Complete permission list</span>}
       </div>
       {report.permissions?.length ? (
-        <ul className="grid gap-2 sm:grid-cols-2">
-          {report.permissions.map((item, index) => (
-            <li key={index} className="min-w-0 rounded-lg border border-border px-3 py-2">
-              <p className="break-words text-sm font-medium">{item.name ?? 'Permission'}</p>
-              <p className="break-words text-xs text-muted-foreground">{item.access ?? 'unknown'}{item.scope ? ` · ${item.scope}` : ''}</p>
-              {item.resources?.length ? <p className="mt-1 break-all text-xs text-muted-foreground">{item.resources.join(', ')}</p> : null}
-            </li>
-          ))}
-        </ul>
+        <div className="space-y-2">
+          <p className="text-xs font-medium text-muted-foreground">{report.permissions.length} permissions detected · showing the first 8</p>
+          <ul className="grid gap-2 sm:grid-cols-2">
+            {report.permissions.slice(0, 8).map((item, index) => (
+              <li key={index} className="min-w-0 rounded-lg border border-border px-3 py-2">
+                <p className="break-words text-sm font-medium">{item.name ?? 'Permission'}</p>
+                <p className="break-words text-xs text-muted-foreground">{item.access ?? 'unknown'}{item.scope ? ` · ${item.scope}` : ''}</p>
+              </li>
+            ))}
+          </ul>
+          {report.permissions.length > 8 && (
+            <details className="rounded-lg border border-border">
+              <summary className="cursor-pointer px-3 py-2.5 text-sm font-medium">Show all {report.permissions.length} permissions</summary>
+              <ul className="grid max-h-64 gap-2 overflow-y-auto border-t border-border p-2 sm:grid-cols-2">
+                {report.permissions.slice(8).map((item, index) => (
+                  <li key={index + 8} className="min-w-0 rounded-lg border border-border px-3 py-2">
+                    <p className="break-words text-sm font-medium">{item.name ?? 'Permission'}</p>
+                    <p className="break-words text-xs text-muted-foreground">{item.access ?? 'unknown'}{item.scope ? ` · ${item.scope}` : ''}</p>
+                    {item.resources?.length ? <p className="mt-1 break-all text-xs text-muted-foreground">{item.resources.slice(0, 8).join(', ')}</p> : null}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
       ) : null}
     </section>
   )
@@ -171,6 +223,15 @@ function DocView({ doc }: { doc: CredentialDoc }) {
       {doc.unnecessary_permissions.length > 0 && <div><h3 className="text-xs font-medium uppercase text-muted-foreground mb-1">Do not grant</h3><List items={doc.unnecessary_permissions} /></div>}
       {doc.security_notes.length > 0 && <div><h3 className="text-xs font-medium uppercase text-muted-foreground mb-1">Security notes</h3><List items={doc.security_notes} /></div>}
       {doc.expiration_guidance.length > 0 && <div><h3 className="text-xs font-medium uppercase text-muted-foreground mb-1">Expiration</h3><List items={doc.expiration_guidance} /></div>}
+      {doc.service_adapter && (
+        <section className="rounded-xl border border-border bg-muted/25 p-3.5">
+          <div className="flex items-center gap-2 text-sm font-semibold"><ShieldCheck className="size-4 text-success"/> Verified service adapter</div>
+          <p className="mt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">API destination · Read only</p>
+          <p className="mt-1 break-all font-mono text-xs sm:text-sm">{doc.service_adapter.api_base_url}</p>
+          <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">The vault derives the exact allowed host and authentication header from this reviewed adapter. The token is never shown to the model.</p>
+          {doc.service_adapter.cli_tools.length > 0 && <div className="mt-3 flex flex-wrap gap-2">{doc.service_adapter.cli_tools.map((tool) => <span key={tool.id} className="rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs"><span className="font-semibold">{tool.label}</span><span className="ml-2 font-mono text-muted-foreground">{tool.binary}</span></span>)}</div>}
+        </section>
+      )}
       {doc.official_documentation_links.length > 0 && <div><h3 className="text-xs font-medium uppercase text-muted-foreground mb-1">Documentation</h3><Links links={doc.official_documentation_links} /></div>}
       <p className="text-xs text-muted-foreground">This text came from a model, not from the vault. Check it against the provider's own page before creating a token.</p>
     </div>
@@ -349,9 +410,34 @@ export const app = new Spiceflow()
     const runnerPolicy = await loadRunnerPolicyInput(getDb())
     const runnerConfigured = runnerPolicy !== null || Boolean((env as unknown as VaultEnv).RUNNER_REPOSITORY)
     const runnerOwnerReady = Boolean(await loadOwnerId(getDb(), vaultEnv()))
+    const validCount = rows.filter((row) => row.validationStatus === 'valid').length
+    const invalidCount = rows.filter((row) => row.validationStatus === 'invalid' || row.validationStatus === 'expired').length
+    const pendingCount = rows.filter((row) => !row.lastValidatedAt || row.validationStatus === 'unavailable' || row.validationStatus === 'unsupported').length
+    const preferences = await loadVaultPreferences(getDb())
     return (
-      <div className="mx-auto w-full min-w-0 max-w-4xl space-y-4">
-        <div className="flex min-w-0 flex-wrap items-center justify-between gap-3"><h1 className="text-xl font-semibold tracking-tight">Credentials</h1><a href="/vault/services" className="inline-flex min-h-11 flex-1 items-center justify-center rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground sm:flex-none">+ Add credential</a></div>
+      <div className="mx-auto w-full min-w-0 max-w-5xl space-y-6">
+        <section className="relative isolate overflow-hidden rounded-[1.75rem] bg-gradient-to-br from-slate-950 via-emerald-950 to-teal-900 px-5 py-6 text-white shadow-xl shadow-emerald-950/10 sm:px-7 sm:py-8">
+          <div className="pointer-events-none absolute -right-12 -top-20 -z-10 size-72 rounded-full bg-emerald-400/15 blur-3xl"/>
+          <div className="pointer-events-none absolute -bottom-24 left-1/3 -z-10 size-60 rounded-full bg-cyan-400/10 blur-3xl"/>
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="max-w-2xl"><p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-200">Credential control plane</p><h1 className="mt-2 text-2xl font-bold tracking-tight sm:text-3xl">Your secrets, under control.</h1><p className="mt-2 max-w-xl text-sm leading-relaxed text-slate-200/80">One secure access layer for runners, integrations and every API credential your infrastructure depends on.</p></div>
+            <a href="/vault/services" className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-white px-4 text-sm font-semibold text-slate-950 shadow-lg transition-transform hover:-translate-y-0.5"><Plus className="size-4"/> Add credential</a>
+          </div>
+          <div className="mt-7 flex flex-wrap items-center gap-3 text-xs text-slate-200/80">
+            <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1.5"><span className={cn('size-1.5 rounded-full', runnerOwnerReady ? 'bg-emerald-300' : 'bg-amber-300')}/>{runnerOwnerReady ? 'Owner identity verified' : 'Runner identity pending'}</span>
+            <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1.5">Scheduled checks · every {preferences.validationIntervalHours}h</span>
+            <a href="/vault/integrations" className="inline-flex items-center gap-1 underline underline-offset-4">View integrations <ChevronRight className="size-3"/></a>
+          </div>
+        </section>
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          {[
+            { label: 'Total credentials', value: rows.length, icon: KeyRound, tone: 'bg-slate-500/10 text-slate-600 dark:text-slate-300' },
+            { label: 'Verified', value: validCount, icon: CheckCircle2, tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' },
+            { label: 'Need attention', value: invalidCount, icon: AlertTriangle, tone: 'bg-rose-500/10 text-rose-700 dark:text-rose-300' },
+            { label: 'Not yet confirmed', value: pendingCount, icon: Clock3, tone: 'bg-amber-500/10 text-amber-700 dark:text-amber-300' },
+          ].map((metric) => { const Icon = metric.icon; return <div key={metric.label} className="rounded-2xl border border-border bg-card p-4 shadow-sm"><span className={cn('grid size-9 place-items-center rounded-xl', metric.tone)}><Icon className="size-[18px]"/></span><p className="mt-4 text-2xl font-bold tabular-nums tracking-tight">{metric.value}</p><p className="mt-1 text-xs text-muted-foreground">{metric.label}</p></div> })}
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2"><div><h2 className="text-lg font-semibold tracking-tight">Credential registry</h2><p className="mt-1 text-sm text-muted-foreground">Encrypted values stay write-only. Runners receive access through the proxy.</p></div><div className="flex gap-2"><a href="/vault/validation" className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-border bg-card px-3 text-sm font-medium hover:bg-muted"><ShieldCheck className="size-4"/> Health</a><a href="/vault/analytics" className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-border bg-card px-3 text-sm font-medium hover:bg-muted"><ChartNoAxesCombined className="size-4"/> Analytics</a></div></div>
         {!runnerConfigured && runnerOwnerReady && (
           <div role="status" className="rounded-lg border border-border bg-muted/40 p-4 space-y-1">
             <p className="text-sm font-medium">Automatic runner connection is ready</p>
@@ -425,8 +511,10 @@ export const app = new Spiceflow()
     await requirePageSession(request)
     const serviceId = new URL(request.url).searchParams.get('service') ?? ''
     const preset = presetForService(serviceId)
+    const preferences = await loadVaultPreferences(getDb())
     const { CredentialForm } = await import('./components/credential-form.tsx')
-    return <div className="mx-auto w-full min-w-0 max-w-3xl space-y-5"><div><a href="/vault/services" className="inline-flex min-h-11 items-center text-sm underline underline-offset-4">← Provider catalog</a><h1 className="mt-2 text-xl font-semibold tracking-tight">{preset ? `Configure ${preset.label}` : 'Configure a custom service'}</h1><p className="mt-1 text-sm text-muted-foreground">Review the provider settings, enter the secret, and explicitly create the credential. The secret is write-only.</p></div><CredentialForm mode="create" preset={preset ? { label: preset.label, docsUrl: preset.docsUrl } : null} defaults={{ delivery: 'proxy', allowedHosts: preset ? formatAllowedHosts(preset.hosts) : '', authHeader: preset?.authHeader ?? 'Authorization', authScheme: preset?.authScheme ?? 'Bearer', visible: true, lifetime: 'permanent' }} /></div>
+    if (!preset) return <div className="mx-auto w-full max-w-2xl"><SectionCard title="Custom service registration" description="Custom providers are registered from the Runner using their official API documentation. The request includes a verified Service Adapter, so network and authentication rules can be derived safely."><p className="text-sm text-muted-foreground">Ask the model on your Runner to request a one-time credential link for this service. You will be able to add the secret here without entering hosts, scopes or authentication settings.</p><a href="/vault" className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-primary px-4 text-sm font-medium text-primary-foreground">Back to overview <ChevronRight className="size-4"/></a></SectionCard></div>
+    return <div className="mx-auto w-full min-w-0 max-w-3xl space-y-5"><div><a href="/vault/services" className="inline-flex min-h-11 items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ChevronRight className="size-4 rotate-180"/> Provider catalog</a><h1 className="mt-2 text-2xl font-bold tracking-tight">{`Add ${preset.label} credential`}</h1><p className="mt-1 text-sm text-muted-foreground">Enter the token. Vault derives the verified API host, authentication style and validation behavior.</p></div><CredentialForm mode="create" preset={{ label: preset.label, docsUrl: preset.docsUrl }} apiBaseUrl={serviceAdapterFor(serviceId)?.apiBaseUrl} defaults={{ visible: preferences.defaultVisible, lifetime: preferences.defaultLifetime }} /></div>
   })
 
   // ── One-time registration link ──────────────────────────────────
@@ -442,6 +530,7 @@ export const app = new Spiceflow()
     }
     const { CredentialForm } = await import('./components/credential-form.tsx')
     const preset = presetForService(credential.service)
+    const preferences = await loadVaultPreferences(db)
     return (
       <div className="mx-auto w-full min-w-0 max-w-3xl space-y-5 sm:space-y-6">
         <div>
@@ -450,7 +539,7 @@ export const app = new Spiceflow()
           <p className="text-xs text-muted-foreground mt-1">Link expires in about {Math.max(1, Math.round((link.expiresAt - Date.now()) / 60_000))} min and works once.</p>
         </div>
         {credential.doc && <DocView doc={credential.doc} />}
-        <CredentialForm mode="register" token={params.token} serviceName={credential.service} preset={preset ? { label: preset.label } : null} defaults={{ delivery: 'proxy', allowedHosts: preset ? formatAllowedHosts(preset.hosts) : '', authHeader: preset?.authHeader ?? 'Authorization', authScheme: preset?.authScheme ?? 'Bearer', visible: true, lifetime: 'permanent' }} />
+        <CredentialForm mode="register" token={params.token} credentialId={credential.id} serviceName={credential.service} preset={preset ? { label: preset.label } : null} apiBaseUrl={serviceAdapterFromDocument(credential.doc)?.apiBaseUrl ?? serviceAdapterFor(credential.service)?.apiBaseUrl} defaults={{ visible: preferences.defaultVisible, lifetime: preferences.defaultLifetime }} />
       </div>
     )
   })
@@ -486,7 +575,7 @@ export const app = new Spiceflow()
         {!c.externallyManaged && (
           <section className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
             <h2 className="text-base font-semibold">Replace value or change rules</h2>
-            <CredentialForm mode="replace" id={c.id} serviceName={c.service} defaults={{ delivery: c.delivery, allowedHosts: c.allowedHosts.join('\n'), authHeader: c.authHeader, authScheme: c.authScheme, visible: c.visible, lifetime: c.lifetime }} />
+            <CredentialForm mode="replace" id={c.id} credentialId={c.id} serviceName={c.service} apiBaseUrl={serviceAdapterFromDocument(c.doc)?.apiBaseUrl ?? serviceAdapterFor(c.service)?.apiBaseUrl} defaults={{ visible: c.visible, lifetime: c.lifetime }} />
           </section>
         )}
         <section className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
@@ -495,6 +584,93 @@ export const app = new Spiceflow()
         </section>
       </div>
     )
+  })
+
+  .page('/vault/notifications', async ({ request }) => {
+    await requirePageSession(request)
+    const db = getDb()
+    const [rows, unread] = await Promise.all([listNotifications(db, 100), unreadNotificationCount(db)])
+    const { MarkAllNotificationsRead, MarkNotificationRead } = await import('./components/notification-actions.tsx')
+    const severityIcon = (severity: string) => severity === 'critical'
+      ? <XCircle className="size-5 text-destructive" />
+      : severity === 'warning' ? <AlertTriangle className="size-5 text-warning" />
+        : <CheckCircle2 className="size-5 text-success" />
+    return <div className="mx-auto w-full max-w-4xl space-y-6">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Activity center</p><h1 className="mt-1 text-2xl font-bold tracking-tight">Notifications</h1><p className="mt-1 text-sm text-muted-foreground">{unread} unread · only visible inside this Vault</p></div>
+        {unread > 0 ? <MarkAllNotificationsRead /> : null}
+      </div>
+      {rows.length === 0 ? <SectionCard title="All quiet" description="Credential validation and security events will appear here."><div className="grid min-h-40 place-items-center text-center"><div><Bell className="mx-auto size-8 text-muted-foreground" /><p className="mt-3 text-sm font-medium">No notifications yet</p><p className="mt-1 text-xs text-muted-foreground">You are all caught up.</p></div></div></SectionCard> :
+        <div className="space-y-3">{rows.map((item) => <article key={item.id} className={cn('flex min-w-0 items-start gap-3 rounded-2xl border p-4 transition-colors', item.readAt ? 'border-border bg-card' : 'border-primary/25 bg-primary/[0.035] shadow-sm')}>
+          <span className="mt-0.5 grid size-10 shrink-0 place-items-center rounded-xl bg-muted">{severityIcon(item.severity)}</span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2"><h2 className="break-words text-sm font-semibold">{item.title}</h2>{!item.readAt ? <Badge variant="secondary">New</Badge> : null}</div>
+            <p className="mt-1 break-words text-sm text-muted-foreground">{item.message}</p>
+            <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+              <time dateTime={new Date(item.createdAt).toISOString()}>{new Date(item.createdAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' })} UTC</time>
+              {item.credentialId ? <a className="font-mono underline underline-offset-2" href={`/vault/credentials/${item.credentialId}`}>{item.credentialName || 'Open credential'}</a> : null}
+            </div>
+          </div>
+          <div className="shrink-0"><MarkNotificationRead id={item.id} read={Boolean(item.readAt)} /></div>
+        </article>)}</div>}
+    </div>
+  })
+
+  .page('/vault/validation', async ({ request }) => {
+    await requirePageSession(request)
+    const rows = await listCredentialsForOwner(getDb())
+    const statuses = ['valid', 'invalid', 'expired', 'unavailable', 'insufficient_permissions', 'unsupported', 'not_tested']
+    const counts = Object.fromEntries(statuses.map((status) => [status, rows.filter((row) => row.validationStatus === status).length]))
+    const labels: Record<string, string> = { valid: 'Valid', invalid: 'Invalid', expired: 'Expired', unavailable: 'Unreachable', insufficient_permissions: 'Insufficient access', unsupported: 'Unsupported', not_tested: 'Not tested' }
+    const badge = (status: string) => <Badge variant={status === 'valid' ? 'secondary' : status === 'invalid' || status === 'expired' ? 'destructive' : 'outline'}>{labels[status] ?? status}</Badge>
+    return <div className="mx-auto w-full max-w-5xl space-y-6">
+      <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Credential health</p><h1 className="mt-1 text-2xl font-bold tracking-tight">Validation</h1><p className="mt-1 text-sm text-muted-foreground">Scheduled checks run every 15 minutes and process only credentials whose configured validation interval is due.</p></div>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">{statuses.map((status) => <div key={status} className="rounded-2xl border border-border bg-card p-3 shadow-sm"><p className="text-2xl font-bold tabular-nums">{counts[status]}</p><p className="mt-1 text-xs text-muted-foreground">{labels[status]}</p></div>)}</div>
+      <SectionCard title="Credential checks" description="A timeout or rate limit never turns a token into Invalid.">
+        {rows.length === 0 ? <p className="text-sm text-muted-foreground">No credentials have been registered yet.</p> : <div className="divide-y divide-border">{rows.map((row) => {
+          const status = row.validationStatus || 'not_tested'
+          return <a key={row.id} href={`/vault/credentials/${row.id}`} className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0 hover:bg-muted/30">
+            <span className="min-w-0 flex-1"><span className="block break-all font-mono text-sm font-semibold">{row.name}</span><span className="mt-1 block text-xs text-muted-foreground">{row.service}</span></span>
+            <span className="flex items-center gap-3"><span className="hidden text-right text-xs text-muted-foreground sm:block">{row.lastValidatedAt ? <>Last checked<br/><TimeAgo ts={row.lastValidatedAt}/></> : 'Never checked'}</span>{badge(status)}<ChevronRight className="size-4 text-muted-foreground"/></span>
+          </a>
+        })}</div>}
+      </SectionCard>
+    </div>
+  })
+
+  .page('/vault/analytics', async ({ request }) => {
+    await requirePageSession(request)
+    const analytics = await getUsageAnalytics(getDb())
+    const maxHourly = Math.max(1, ...analytics.series.map((row) => row.requests))
+    const successRate = analytics.totals.requests ? Math.round(analytics.totals.successes / analytics.totals.requests * 100) : 0
+    const number = new Intl.NumberFormat('en-GB')
+    return <div className="mx-auto w-full max-w-5xl space-y-6">
+      <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Runtime insights</p><h1 className="mt-1 text-2xl font-bold tracking-tight">Usage analytics</h1><p className="mt-1 text-sm text-muted-foreground">Aggregated proxy activity over the last 30 days. Request headers, bodies and token values are never recorded.</p></div>
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        {[
+          { label: 'Requests', value: number.format(analytics.totals.requests), icon: Activity },
+          { label: 'Success rate', value: `${successRate}%`, icon: CheckCircle2 },
+          { label: 'Average latency', value: analytics.totals.requests ? `${analytics.totals.averageLatencyMs} ms` : '—', icon: Clock3 },
+          { label: 'Failed requests', value: number.format(analytics.totals.errors), icon: AlertTriangle },
+        ].map((metric) => { const Icon = metric.icon; return <div key={metric.label} className="rounded-2xl border border-border bg-card p-4 shadow-sm"><span className="grid size-9 place-items-center rounded-xl bg-primary/10 text-primary"><Icon className="size-4"/></span><p className="mt-4 text-2xl font-bold tabular-nums">{metric.value}</p><p className="mt-1 text-xs text-muted-foreground">{metric.label}</p></div>})}
+      </div>
+      <SectionCard title="Request volume" description="Hourly usage during the last 24 hours">
+        {analytics.series.length === 0 ? <div className="grid min-h-36 place-items-center text-center"><div><ChartNoAxesCombined className="mx-auto size-8 text-muted-foreground"/><p className="mt-2 text-sm font-medium">No usage recorded yet</p><p className="mt-1 text-xs text-muted-foreground">The chart fills as the Runner and supported CLI tools make requests.</p></div></div> :
+          <div className="space-y-2">{analytics.series.map((row) => <div key={row.windowStart} className="grid grid-cols-[4.5rem_minmax(0,1fr)_3rem] items-center gap-3 text-xs"><span className="text-muted-foreground">{new Date(row.windowStart).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })}</span><div className="h-2.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(2, row.requests / maxHourly * 100)}%` }} /></div><span className="text-right tabular-nums text-muted-foreground">{row.requests}</span></div>)}</div>}
+      </SectionCard>
+      <SectionCard title="Top credentials" description="Ranked by proxy request count over the last 30 days">
+        {analytics.credentials.length === 0 ? <p className="text-sm text-muted-foreground">No credential usage to report.</p> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Credential</TableHead><TableHead>Service</TableHead><TableHead>Requests</TableHead><TableHead>Errors</TableHead><TableHead>Avg. latency</TableHead></TableRow></TableHeader><TableBody>{analytics.credentials.map((row) => <TableRow key={row.credentialId}><TableCell><a href={`/vault/credentials/${row.credentialId}`} className="font-mono text-xs underline">{row.credentialName}</a></TableCell><TableCell>{row.service}</TableCell><TableCell className="tabular-nums">{number.format(row.requests)}</TableCell><TableCell className="tabular-nums">{number.format(row.errors)}</TableCell><TableCell className="tabular-nums">{row.averageLatencyMs} ms</TableCell></TableRow>)}</TableBody></Table></div>}
+      </SectionCard>
+    </div>
+  })
+
+  .page('/vault/integrations', async ({ request }) => {
+    await requirePageSession(request)
+    const rows = await listCredentialIntegrationMetadata(getDb())
+    return <div className="mx-auto w-full max-w-4xl space-y-6">
+      <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Tool connectivity</p><h1 className="mt-1 text-2xl font-bold tracking-tight">Integrations</h1><p className="mt-1 text-sm text-muted-foreground">See which command-line tools can consume each credential through the Vault proxy. Raw tokens are never passed to CLI arguments or environment variables.</p></div>
+      {rows.length === 0 ? <SectionCard title="No integrations yet" description="Add a credential or register one from your Runner."/> : <div className="grid gap-3 lg:grid-cols-2">{rows.map((row) => <article key={row.id} className="min-w-0 rounded-2xl border border-border bg-card p-4 shadow-sm"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="break-all font-mono text-sm font-semibold">{row.name}</p><p className="mt-1 text-sm text-muted-foreground">{row.service}</p></div><Badge variant={row.status === 'active' ? 'secondary' : 'outline'}>{row.status}</Badge></div><div className="mt-3 rounded-xl bg-muted/60 p-3"><p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">API host</p><p className="mt-1 break-all font-mono text-xs">{row.host ?? 'Not detected'}</p></div><div className="mt-3 space-y-2">{row.tools.length ? row.tools.map((tool) => <div key={tool.id} className="rounded-xl border border-border p-3"><div className="flex items-center gap-2"><Workflow className="size-4 text-primary"/><p className="text-sm font-semibold">{tool.label}</p><code className="ml-auto rounded-md bg-muted px-2 py-1 text-xs">{tool.binary}</code></div><p className="mt-2 text-xs leading-relaxed text-muted-foreground">{tool.setupHint}</p></div>) : <p className="text-xs text-muted-foreground">No CLI consumer has been verified for this service yet. It remains available through the Runner proxy API.</p>}</div></article>)}</div>}
+    </div>
   })
 
   .page('/vault/audit', async ({ request }) => {
@@ -512,69 +688,28 @@ export const app = new Spiceflow()
   .page('/vault/settings', async ({ request }) => {
     await requirePageSession(request)
     const { RevokeSessionsButton, AddExternalForm } = await import('./components/credential-actions.tsx')
-    const policy = await loadRunnerPolicyInput(getDb())
+    const { VaultSettingsForm } = await import('./components/vault-settings-form.tsx')
+    const db = getDb()
+    const preferences = await loadVaultPreferences(db)
+    const policy = await loadRunnerPolicyInput(db)
     const fixedByEnv = Boolean((env as unknown as VaultEnv).RUNNER_REPOSITORY)
-    const pinnedOwner = await loadOwnerId(getDb(), vaultEnv())
+    const pinnedOwner = await loadOwnerId(db, vaultEnv())
     const buildOwner = String((env as unknown as VaultEnv).OWNER_GITHUB_ID ?? '')
     const ownerDiffers = Boolean(buildOwner && pinnedOwner && buildOwner !== pinnedOwner)
     return (
-      <div className="mx-auto w-full max-w-3xl space-y-5 sm:space-y-8">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight">Settings</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Manage runner access and credential security.</p>
-        </div>
-        {ownerDiffers && (
-          <p role="alert" className="rounded-lg border border-border bg-muted/40 p-4 text-sm">
-            The deployment now reports GitHub account ID {buildOwner}, but this vault stays bound to {pinnedOwner}, set when it was first deployed. The change is ignored. To bind a different account, delete the <code>owner_github_id</code> row from the <code>vault_setting</code> table (only possible before a sign-in app is registered) or deploy a fresh vault.
-          </p>
-        )}
-        <section className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
-          <h2 className="text-base font-semibold">Automatic runner connection</h2>
-          <p className="text-sm text-muted-foreground">
-            No repository name, numeric ID or shared secret needs to be entered here. The first valid GitHub Actions OIDC
-            request from the vault owner’s main branch rdc-lab.yml workflow atomically pins its
-            repository ID and owner ID in this vault.
-          </p>
-          {fixedByEnv ? (
-            <p className="text-sm text-muted-foreground">This deployment uses an explicit RUNNER_* trust policy.</p>
-          ) : policy ? (
-            <dl className="grid grid-cols-[7.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 rounded-lg bg-muted/40 p-3 text-sm">
-              <dt className="text-muted-foreground">Repository</dt><dd className="break-all font-mono">{policy.repository}</dd>
-              <dt className="text-muted-foreground">Repository ID</dt><dd className="font-mono">{policy.repositoryId}</dd>
-              <dt className="text-muted-foreground">Owner ID</dt><dd className="font-mono">{policy.repositoryOwnerId ?? 'legacy policy'}</dd>
-              <dt className="text-muted-foreground">Branch</dt><dd className="font-mono">{policy.branch}</dd>
-              <dt className="text-muted-foreground">Workflow</dt><dd className="break-all font-mono">{policy.workflowFile}</dd>
-            </dl>
-          ) : (
-            <p className="rounded-lg bg-muted/40 p-3 text-sm text-muted-foreground">
-              Waiting for the first valid owner-owned run. Bootstrap accepts only workflow_dispatch, schedule and push
-              on main; pull-request events are rejected.
-            </p>
-          )}
-        </section>
-        <section className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
-          <h2 className="text-base font-semibold">Runner sessions</h2>
-          <p className="text-sm text-muted-foreground">Sessions last 30 minutes. Revoking invalidates every session issued so far, for example after a runner reset.</p>
+      <div className="mx-auto w-full max-w-4xl space-y-6">
+        <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Vault preferences</p><h1 className="mt-1 text-2xl font-bold tracking-tight">Settings</h1><p className="mt-1 text-sm text-muted-foreground">Control validation, runtime behavior, notifications and retention. Provider security rules remain automatic.</p></div>
+        {ownerDiffers && <p role="alert" className="rounded-xl border border-warning/30 bg-warning/5 p-4 text-sm">The deployment reports GitHub account ID {buildOwner}, but this vault remains bound to {pinnedOwner}. That change is ignored.</p>}
+        <VaultSettingsForm initial={preferences} />
+        <SectionCard title="Runner connection" description="OIDC trust is pinned to the first valid workflow from the owner’s main branch." icon={<Workflow className="size-5"/>}>
+          {fixedByEnv ? <p className="text-sm text-muted-foreground">This deployment uses an explicit RUNNER_* trust policy.</p> : policy ? <dl className="grid grid-cols-[7.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-sm"><dt className="text-muted-foreground">Repository</dt><dd className="break-all font-mono">{policy.repository}</dd><dt className="text-muted-foreground">Repository ID</dt><dd className="font-mono">{policy.repositoryId}</dd><dt className="text-muted-foreground">Owner ID</dt><dd className="font-mono">{policy.repositoryOwnerId ?? 'legacy policy'}</dd><dt className="text-muted-foreground">Branch</dt><dd className="font-mono">{policy.branch}</dd><dt className="text-muted-foreground">Workflow</dt><dd className="break-all font-mono">{policy.workflowFile}</dd></dl> : <p className="rounded-xl bg-muted/50 p-3 text-sm text-muted-foreground">Waiting for the first valid owner-owned workflow run. Pull-request events are rejected.</p>}
+        </SectionCard>
+        <SectionCard title="Runner sessions" description="Sessions last 30 minutes. Revoking invalidates every session issued so far." icon={<ShieldCheck className="size-5"/>}>
           <RevokeSessionsButton />
-        </section>
-        <section id="advanced-credential-settings" className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
-          <div>
-            <h2 className="text-base font-semibold">Advanced settings</h2>
-            <p className="mt-1 text-sm text-muted-foreground">These settings are configured per credential, so one token cannot inherit another token's network access.</p>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="rounded-lg bg-muted/40 p-3"><p className="text-sm font-medium">Network restrictions</p><p className="mt-1 text-sm text-muted-foreground">Exact allowed hostnames; the proxy refuses every other destination.</p></div>
-            <div className="rounded-lg bg-muted/40 p-3"><p className="text-sm font-medium">Authentication mapping</p><p className="mt-1 text-sm text-muted-foreground">Header name and Bearer, Token or Raw scheme for each provider.</p></div>
-            <div className="rounded-lg bg-muted/40 p-3"><p className="text-sm font-medium">Lifetime & visibility</p><p className="mt-1 text-sm text-muted-foreground">Expiry, permanent or temporary storage, and runner visibility.</p></div>
-            <div className="rounded-lg bg-muted/40 p-3"><p className="text-sm font-medium">Token inspection</p><p className="mt-1 text-sm text-muted-foreground">Provider identity and available permissions are recorded without storing the token in reports.</p></div>
-          </div>
-          <a href="/vault" className="inline-flex min-h-11 items-center rounded-lg border border-border px-3 py-2 text-sm font-medium underline underline-offset-4">Open credentials to edit advanced settings</a>
-        </section>
-        <section className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
-          <h2 className="text-base font-semibold">Entries managed elsewhere</h2>
-          <p className="text-sm text-muted-foreground">Lists a credential (such as GITHUB_TOKEN) so runners know it exists. The vault stores no value for it and never proxies it.</p>
+        </SectionCard>
+        <SectionCard title="Entries managed elsewhere" description="Metadata-only entries such as GITHUB_TOKEN. Vault stores no value and never proxies these credentials." icon={<KeyRound className="size-5"/>}>
           <AddExternalForm />
-        </section>
+        </SectionCard>
       </div>
     )
   })
@@ -640,8 +775,14 @@ function AuditTable({ rows }: { rows: Awaited<ReturnType<typeof listAudit>> }) {
 export type App = typeof app
 
 export default {
-  fetch: (request: Request) => {
-    return app.handle(request)
+  fetch: (request: Request) => app.handle(request),
+  scheduled: (_controller, _environment, context) => {
+    context.waitUntil((async () => {
+      await ensureSchema(env.DB)
+      const db = getDb()
+      const keys = await loadVaultKeys(db, vaultEnv())
+      await runScheduledCredentialValidation(db, keys.encryptionKey)
+    })())
   },
 } satisfies ExportedHandler<Env>
 

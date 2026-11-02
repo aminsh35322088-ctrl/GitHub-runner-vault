@@ -8,6 +8,7 @@ import {
   storeCredentialValue, MAX_TEMPORARY_MS,
 } from './credential-service.ts'
 import { consumeEnrollmentLink, peekEnrollmentLink } from './enrollment.ts'
+import { listNotifications, listRunnerIntegrationMetadata, runScheduledCredentialValidation } from './vault-observability.ts'
 
 const KEY_B64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
 const SECRET = 'cfut_SUPERSECRETVALUE_123456789'
@@ -275,6 +276,30 @@ describe('runner registry visibility rules', () => {
     expect(Object.keys(entry!).sort()).toEqual(['delivery', 'expiresAt', 'externallyManaged', 'lifetime', 'name', 'purpose', 'service', 'validation'])
   })
 
+  test('CLI adapter metadata is isolated to its own endpoint and only active visible credentials', async () => {
+    const { db, now, name, id } = await activeCredential()
+    await db.update(schema.credential).set({
+      service: 'Northflank',
+      allowedHosts: JSON.stringify(['api.northflank.com']),
+    }).where(orm.eq(schema.credential.id, id))
+    const listed = await listRunnerIntegrationMetadata(db, now)
+    const entry = listed.find((item) => item.name === name)
+    expect(entry).toMatchObject({
+      name,
+      service: 'Northflank',
+      adapter: {
+        apiBaseUrl: 'https://api.northflank.com/v1',
+        cliTools: [{ id: 'northflank', variable: 'NF_API_BASE_URL' }],
+      },
+    })
+    expect(JSON.stringify(listed)).not.toContain(SECRET)
+    await setVisibility(db, id, false, now)
+    expect((await listRunnerIntegrationMetadata(db, now)).some((item) => item.name === name)).toBe(false)
+    await setVisibility(db, id, true, now)
+    await setEnabled(db, id, false, now)
+    expect((await listRunnerIntegrationMetadata(db, now)).some((item) => item.name === name)).toBe(false)
+  })
+
   test('permanent and temporary credentials both appear when active and visible', async () => {
     const { db, now } = await setup()
     const permanent = await activeCredential()
@@ -346,5 +371,75 @@ describe('reading a value for use', () => {
     const req = await requestRegistration(db, { name: uniqueName(), service: 's', purpose: 'p', doc, requestedBy: 'r', now })
     if (!req.ok) throw new Error('unexpected')
     expect(await setEnabled(db, req.value.credentialId, true, now)).toMatchObject({ ok: false })
+  })
+
+  test('scheduled validation updates credential health and emits a deduplicated notification', async () => {
+    const { db, key, now } = await setup()
+    const name = uniqueName('ADAPTER')
+    const adapterDoc = {
+      ...doc,
+      official_documentation_links: [{ title: 'Example API', url: 'https://example.com/docs' }],
+      service_adapter: {
+        api_base_url: 'https://api.example.com/v1',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        validation: {
+          method: 'GET',
+          path: '/me',
+          identity_pointer: '/user',
+          permissions_pointer: '/permissions',
+        },
+        cli_tools: [],
+      },
+    }
+    const request = await requestRegistration(db, {
+      name, service: 'Example Service', doc: adapterDoc, requestedBy: 'runner:test', now,
+    })
+    if (!request.ok) throw new Error(request.error)
+    const stored = await storeCredentialValue(db, key, {
+      credentialId: request.value.credentialId,
+      value: SECRET,
+      lifetime: 'permanent',
+      expiresAt: null,
+      visible: true,
+      delivery: 'proxy',
+      allowedHosts: ['api.example.com'],
+      validationIntervalHours: 1,
+      now,
+    })
+    expect(stored.ok).toBe(true)
+    await db.update(schema.credential).set({ nextValidationAt: now - 1 })
+      .where(orm.eq(schema.credential.id, request.value.credentialId))
+
+    const goodFetch = async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe('https://api.example.com/v1/me')
+      expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${SECRET}`)
+      return Response.json({ user: 'automation-user', permissions: ['read:projects'] })
+    }
+    await runScheduledCredentialValidation(db, key, now, goodFetch as typeof fetch, 12)
+    let credential = await getCredentialForOwner(db, request.value.credentialId)
+    expect(credential).toMatchObject({ validationStatus: 'valid', validation: 'valid', lastValidatedAt: now })
+    expect(credential?.validationDetails).not.toContain(SECRET)
+    expect(JSON.parse(credential!.validationDetails!)).toMatchObject({
+      status: 'valid',
+      identity: 'automation-user',
+      permissions: [{ name: 'read:projects', access: 'granted' }],
+    })
+
+    await db.update(schema.credential).set({ nextValidationAt: now - 1 })
+      .where(orm.eq(schema.credential.id, request.value.credentialId))
+    const badFetch = async () => new Response('', { status: 401 })
+    await runScheduledCredentialValidation(db, key, now + 1, badFetch as typeof fetch, 12)
+    credential = await getCredentialForOwner(db, request.value.credentialId)
+    expect(credential).toMatchObject({ validationStatus: 'invalid', validation: 'invalid' })
+    const notifications = await listNotifications(db, 200)
+    expect(notifications.filter((item) => item.credentialId === request.value.credentialId && item.kind === 'validation_invalid')).toHaveLength(1)
+    expect(JSON.stringify(notifications)).not.toContain(SECRET)
+
+    await db.update(schema.credential).set({ nextValidationAt: now + 2 })
+      .where(orm.eq(schema.credential.id, request.value.credentialId))
+    await db.delete(schema.credential).where(orm.eq(schema.credential.id, request.value.credentialId))
+    const retained = await listNotifications(db, 200)
+    expect(retained.find((item) => item.kind === 'validation_invalid' && item.credentialName === name)?.credentialId).toBeNull()
   })
 })
