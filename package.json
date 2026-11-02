@@ -8,7 +8,7 @@
     "test": "pnpm --filter runner-vault-app test && node --test client/vault.test.mjs",
     "build": "pnpm --filter runner-vault-app build",
     "validate": "pnpm typecheck && pnpm test && pnpm build",
-    "deploy": "pnpm build && pnpm --filter runner-vault-app exec wrangler deploy"
+    "deploy": "pnpm --filter runner-vault-app deploy"
   },
   "packageManager": "pnpm@12.16.1"
 }

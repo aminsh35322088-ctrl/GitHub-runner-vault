@@ -13,8 +13,8 @@
   "observability": {
     "enabled": true
   },
-  // Created automatically on deploy (Deploy to Cloudflare button or `wrangler deploy`).
-  // The Worker creates its own tables on first request; no migration step.
+  // Deploy Button provisions D1 automatically; scripts/deploy.mjs resolves or creates it
+  // for Git-connected builds and Wrangler CLI deployments before `wrangler deploy`.
   "d1_databases": [
     { "binding": "DB", "database_name": "runner-vault-db" }
   ],

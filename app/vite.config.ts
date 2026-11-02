@@ -26,10 +26,10 @@ function testOutboundService(request: Request): Response {
   )
 }
 
-export default defineConfig(async () => {
-  // Workers Builds detects the package.json build script. Resolve the owner
-  // before creating cloudflare() so its generated runtime config includes the ID.
-  const deploymentOwnerId = await injectDeployOwner()
+export default defineConfig(async ({ command }) => {
+  // Resolve the owner on every production build, whether it runs through
+  // Workers Builds, a dashboard-connected Git repository, or local Wrangler CLI.
+  const deploymentOwnerId = command === 'build' ? await injectDeployOwner() : null
   return {
     server: { port, strictPort: true },
     clearScreen: false,

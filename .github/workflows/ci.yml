@@ -33,14 +33,14 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Verify Workers Builds owner derivation from Git origin
+      - name: Verify production build owner derivation from Git origin
         shell: bash
         run: |
           set -euo pipefail
           cd app
           build_log="$(mktemp)"
           trap 'rm -f "$build_log"' EXIT
-          WORKERS_CI=1 pnpm build 2>&1 | tee "$build_log"
+          pnpm build 2>&1 | tee "$build_log"
           owner_id="$(sed -nE 's/.*\[deploy-owner\] bound GitHub account ID ([1-9][0-9]*) from .*/\1/p' "$build_log" | tail -n1)"
           test -n "$owner_id"
           OWNER_ID="$owner_id" node --input-type=module <<'NODE'
