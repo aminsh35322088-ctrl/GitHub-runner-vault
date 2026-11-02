@@ -203,7 +203,7 @@ export const app = new Spiceflow()
     const keys = await loadVaultKeys(db, e)
     const expectedOwnerId = await loadOwnerId(db, e)
     if (!expectedOwnerId) {
-      return <Message title="Waiting for deployment verification" text="This vault stays locked until Workers Builds verifies the checked-out GitHub repository owner and injects its numeric ID. Reload after the deployment build finishes." />
+      return <Message title="Setup is locked" text={lockedReason(e)} />
     }
     if (await isConfigured(db, e, keys)) {
       const owner = await loadOwnerLogin(db)
@@ -219,7 +219,9 @@ export const app = new Spiceflow()
       <div className="max-w-md mx-auto py-16 space-y-4">
         <h1 className="text-xl font-semibold tracking-tight">Connect your GitHub account</h1>
         <p className="text-sm text-muted-foreground">
-          This deployment is permanently bound to GitHub account ID <code>{expectedOwnerId}</code>. Create the private sign-in app with that same GitHub account. GitHub confirms the creator's numeric account ID; any other account is rejected.
+          This deployment is permanently bound to GitHub account ID <code>{expectedOwnerId}</code>
+          {typeof e.DEPLOY_OWNER_LOGIN === 'string' && e.DEPLOY_OWNER_LOGIN ? <> (<strong>@{e.DEPLOY_OWNER_LOGIN}</strong>{typeof e.DEPLOY_OWNER_REPO === 'string' && e.DEPLOY_OWNER_REPO ? <>, from repository <code>{e.DEPLOY_OWNER_REPO}</code></> : null})</> : null}.
+          If that is not you, you deployed someone else's copy: delete this deployment and deploy again from your own repository. Otherwise create the private sign-in app with that same GitHub account; any other account is rejected.
         </p>
         {failed === 'github' && <p role="alert" className="text-sm text-destructive">GitHub setup did not complete. Try again.</p>}
         {failed === 'owner_mismatch' && <p role="alert" className="text-sm text-destructive">This is not the GitHub account that owns the deployment repository. Switch accounts and try again.</p>}
@@ -421,9 +423,17 @@ export const app = new Spiceflow()
     const { RevokeSessionsButton, AddExternalForm, RunnerPolicyForm } = await import('./components/credential-actions.tsx')
     const policy = await loadRunnerPolicyInput(getDb())
     const fixedByEnv = Boolean((env as unknown as VaultEnv).RUNNER_REPOSITORY)
+    const pinnedOwner = await loadOwnerId(getDb(), vaultEnv())
+    const buildOwner = String((env as unknown as VaultEnv).OWNER_GITHUB_ID ?? '')
+    const ownerDiffers = Boolean(buildOwner && pinnedOwner && buildOwner !== pinnedOwner)
     return (
       <div className="space-y-8 max-w-2xl">
         <h1 className="text-lg font-semibold tracking-tight">Settings</h1>
+        {ownerDiffers && (
+          <p role="alert" className="rounded-lg border border-border bg-muted/40 p-4 text-sm">
+            The deployment now reports GitHub account ID {buildOwner}, but this vault stays bound to {pinnedOwner}, set when it was first deployed. The change is ignored. To bind a different account, delete the <code>owner_github_id</code> row from the <code>vault_setting</code> table (only possible before a sign-in app is registered) or deploy a fresh vault.
+          </p>
+        )}
         <section className="space-y-2">
           <h2 className="text-sm font-semibold">Runner repository</h2>
           <p className="text-sm text-muted-foreground">
@@ -450,6 +460,19 @@ export const app = new Spiceflow()
   })
 
   .use(runnerApp)
+
+function lockedReason(e: VaultEnv): string {
+  switch (e.DEPLOY_OWNER_ERROR) {
+    case 'organization':
+      return 'The repository this was deployed from belongs to an organization, and a personal GitHub account must own the vault. Set the build variable RUNNER_VAULT_OWNER_GITHUB_ID to your numeric GitHub user ID (github.com/settings/profile shows your login; api.github.com/users/<login> shows the id) and redeploy.'
+    case 'lookup_failed':
+      return 'GitHub could not be reached while building, so the owner could not be verified. Redeploy, or set the build variable RUNNER_VAULT_OWNER_GITHUB_ID to your numeric GitHub user ID.'
+    case 'no_identity':
+      return 'No GitHub identity was available while building. Deploy from your own GitHub repository, or set the build variable RUNNER_VAULT_OWNER_GITHUB_ID to your numeric GitHub user ID, then redeploy.'
+    default:
+      return 'This vault stays locked until the deployment build verifies the GitHub owner. Reload after the build finishes.'
+  }
+}
 
 function AuditTable({ rows }: { rows: Awaited<ReturnType<typeof listAudit>> }) {
   if (rows.length === 0) return <p className="text-sm text-muted-foreground">No activity yet.</p>

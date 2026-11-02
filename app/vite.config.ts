@@ -29,7 +29,7 @@ function testOutboundService(request: Request): Response {
 export default defineConfig(async ({ command }) => {
   // Resolve the owner on every production build, whether it runs through
   // Workers Builds, a dashboard-connected Git repository, or local Wrangler CLI.
-  const deploymentOwnerId = command === 'build' ? await injectDeployOwner() : null
+  const deploymentOwner = command === 'build' ? await injectDeployOwner() : null
   return {
     server: { port, strictPort: true },
     clearScreen: false,
@@ -59,7 +59,12 @@ export default defineConfig(async ({ command }) => {
       // setter priority. See https://github.com/cloudflare/workers-sdk/issues/13869
       !process.env.VITEST
         ? cloudflare({
-            ...(deploymentOwnerId ? { config: { vars: { OWNER_GITHUB_ID: deploymentOwnerId } } } : {}),
+            ...(deploymentOwner ? { config: { vars: {
+              ...(deploymentOwner.id ? { OWNER_GITHUB_ID: deploymentOwner.id } : {}),
+              ...(deploymentOwner.login ? { DEPLOY_OWNER_LOGIN: deploymentOwner.login } : {}),
+              ...(deploymentOwner.repo ? { DEPLOY_OWNER_REPO: deploymentOwner.repo } : {}),
+              ...(deploymentOwner.error ? { DEPLOY_OWNER_ERROR: deploymentOwner.error } : {}),
+            } } } : {}),
             viteEnvironment: {
               name: 'rsc',
               childEnvironments: ['ssr'],

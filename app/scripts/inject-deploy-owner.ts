@@ -2,6 +2,20 @@ import { execFileSync } from 'node:child_process'
 
 const GITHUB_ID_PATTERN = /^[1-9][0-9]{0,15}$/
 
+/**
+ * The GitHub account a deployment is bound to. `id` is null when it could not be
+ * determined safely; then the Worker stays locked and `/setup` explains why using
+ * `error`. A build never fails just because GitHub was unreachable.
+ */
+export interface DeployOwner {
+  id: string | null
+  login?: string
+  repo?: string
+  error?: 'organization' | 'lookup_failed' | 'no_identity'
+}
+
+type Fetch = typeof fetch
+
 function repositoryFromRemote(remote: string): { owner: string; repo: string } {
   const match = remote.trim().match(/^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i)
   if (!match) throw new Error('Git origin is not a supported github.com repository URL')
@@ -29,8 +43,6 @@ export function resolveGitHubActionsOwnerId(env: NodeJS.ProcessEnv = process.env
   return ownerId
 }
 
-const fromGitHubActions = () => resolveGitHubActionsOwnerId()
-
 function fromGhCli(): string | null {
   try {
     const output = execFileSync('gh', ['api', 'user', '--jq', '.id'], {
@@ -44,81 +56,110 @@ function fromGhCli(): string | null {
   }
 }
 
-/**
- * Resolve the owner before every production Vite build.
- *
- * Priority:
- * 1. Explicit numeric ID for source archives/manual deployments.
- * 2. Owner of the checked-out GitHub origin (Deploy Button, dashboard Git
- *    connection, or a local Git clone).
- * 3. GitHub Actions' immutable repository-owner ID when no usable origin exists.
- * 4. Authenticated GitHub CLI account when no GitHub origin is available.
- *
- * The Worker independently verifies the GitHub App creator against this ID.
- */
-export async function injectDeployOwner(): Promise<string> {
-  const explicitId = process.env.RUNNER_VAULT_OWNER_GITHUB_ID
-  if (explicitId) {
-    const ownerId = validatedId(explicitId, 'RUNNER_VAULT_OWNER_GITHUB_ID')
-    console.log('[deploy-owner] using explicitly configured GitHub account ID ' + ownerId)
-    return ownerId
-  }
+type Lookup = { id: string; login: string; type: string } | null
 
-  let remote = ''
+/** Preferred: the JSON API (stable, typed). A token only raises the rate limit. */
+async function lookupViaApi(owner: string, fetchFn: Fetch, env: NodeJS.ProcessEnv): Promise<Lookup> {
   try {
-    remote = execFileSync('git', ['remote', 'get-url', 'origin'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 5_000,
-    }).trim()
-  } catch {
-    // A downloaded source archive may not contain a Git repository.
-  }
-
-  if (remote) {
-    let identity: { owner: string; repo: string }
-    try {
-      identity = repositoryFromRemote(remote)
-    } catch {
-      const actionsId = fromGitHubActions()
-      if (actionsId) return actionsId
-      const cliId = fromGhCli()
-      if (cliId) {
-        console.log('[deploy-owner] using authenticated GitHub CLI account ID ' + cliId + ' (origin is not GitHub)')
-        return cliId
-      }
-      throw new Error('No GitHub origin was found. Clone your personal GitHub repository or authenticate with gh, or set RUNNER_VAULT_OWNER_GITHUB_ID explicitly.')
-    }
-
-    const profileUrl = 'https://github.com/' + encodeURIComponent(identity.owner)
-    const response = await fetch(profileUrl, {
+    const token = env.GITHUB_TOKEN || env.GH_TOKEN
+    const response = await fetchFn('https://api.github.com/users/' + encodeURIComponent(owner), {
       headers: {
-        Accept: 'text/html',
+        Accept: 'application/vnd.github+json',
         'User-Agent': 'runner-vault-deploy-owner',
+        ...(token ? { Authorization: 'Bearer ' + token } : {}),
       },
       signal: AbortSignal.timeout(10_000),
     })
-    if (!response.ok) throw new Error('GitHub profile lookup failed with HTTP ' + response.status)
+    if (!response.ok) return null
+    const body = await response.json() as { id?: unknown; login?: unknown; type?: unknown }
+    if (typeof body.id !== 'number' || typeof body.login !== 'string' || typeof body.type !== 'string') return null
+    return { id: validatedId(String(body.id), 'GitHub API'), login: body.login, type: body.type }
+  } catch {
+    return null
+  }
+}
 
+/** Last resort: the public profile page's metadata. */
+async function lookupViaProfileHtml(owner: string, fetchFn: Fetch): Promise<Lookup> {
+  try {
+    const response = await fetchFn('https://github.com/' + encodeURIComponent(owner), {
+      headers: { Accept: 'text/html', 'User-Agent': 'runner-vault-deploy-owner' },
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!response.ok) return null
     const html = await response.text()
-    const ownerId = validatedId(metaContent(html, 'octolytics-dimension-user_id') ?? undefined, 'GitHub profile')
-    const ownerLogin = metaContent(html, 'octolytics-dimension-user_login')
-    if (ownerLogin?.toLowerCase() !== identity.owner.toLowerCase()) {
-      throw new Error('GitHub profile identity does not match the checked-out origin owner')
-    }
+    const id = metaContent(html, 'octolytics-dimension-user_id')
+    const login = metaContent(html, 'octolytics-dimension-user_login')
+    if (!id || !login) return null
+    // The profile page does not state the account type; the manifest flow rejects
+    // organizations later because the App must be created by a User.
+    return { id: validatedId(id, 'GitHub profile'), login, type: 'User' }
+  } catch {
+    return null
+  }
+}
 
-    console.log('[deploy-owner] bound GitHub account ID ' + ownerId + ' from ' + identity.owner + '/' + identity.repo)
-    return ownerId
+/**
+ * Resolve the owner before every production Vite build. Never throws for a lookup
+ * problem (only for a malformed explicit ID): the Worker simply stays locked.
+ *
+ * Priority:
+ * 1. Explicit numeric ID (`RUNNER_VAULT_OWNER_GITHUB_ID`).
+ * 2. Owner of the checked-out GitHub origin: JSON API, then
+ *    GitHub Actions' immutable owner id, then the profile page.
+ * 3. GitHub Actions' owner id / authenticated GitHub CLI when there is no GitHub origin.
+ */
+export async function injectDeployOwner(
+  env: NodeJS.ProcessEnv = process.env,
+  fetchFn: Fetch = fetch,
+  readRemote: () => string = () => execFileSync('git', ['remote', 'get-url', 'origin'], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000,
+  }),
+): Promise<DeployOwner> {
+  const explicitId = env.RUNNER_VAULT_OWNER_GITHUB_ID
+  if (explicitId) {
+    const id = validatedId(explicitId, 'RUNNER_VAULT_OWNER_GITHUB_ID')
+    console.log('[deploy-owner] using explicitly configured GitHub account ID ' + id)
+    return { id }
   }
 
-  const actionsOwnerId = fromGitHubActions()
-  if (actionsOwnerId) return actionsOwnerId
+  let remote = ''
+  try { remote = readRemote().trim() } catch { /* a source archive has no Git repository */ }
 
+  let identity: { owner: string; repo: string } | null = null
+  if (remote) {
+    try { identity = repositoryFromRemote(remote) } catch { identity = null }
+  }
+
+  if (identity) {
+    const repo = identity.owner + '/' + identity.repo
+    const found = await lookupViaApi(identity.owner, fetchFn, env)
+    if (found) {
+      if (found.type !== 'User') {
+        console.warn('[deploy-owner] ' + identity.owner + ' is an organization; setup stays locked until RUNNER_VAULT_OWNER_GITHUB_ID is set to a personal account ID')
+        return { id: null, login: found.login, repo, error: 'organization' }
+      }
+      console.log('[deploy-owner] bound GitHub account ID ' + found.id + ' from ' + repo)
+      return { id: found.id, login: found.login, repo }
+    }
+    const actionsId = resolveGitHubActionsOwnerId(env)
+    if (actionsId) return { id: actionsId, login: identity.owner, repo }
+    const scraped = await lookupViaProfileHtml(identity.owner, fetchFn)
+    if (scraped && scraped.login.toLowerCase() === identity.owner.toLowerCase()) {
+      console.log('[deploy-owner] bound GitHub account ID ' + scraped.id + ' from ' + repo + ' (profile page)')
+      return { id: scraped.id, login: scraped.login, repo }
+    }
+    console.warn('[deploy-owner] could not look up ' + identity.owner + '; setup stays locked until RUNNER_VAULT_OWNER_GITHUB_ID is set')
+    return { id: null, login: identity.owner, repo, error: 'lookup_failed' }
+  }
+
+  const actionsId = resolveGitHubActionsOwnerId(env)
+  if (actionsId) return { id: actionsId }
   const cliId = fromGhCli()
   if (cliId) {
     console.log('[deploy-owner] bound authenticated GitHub CLI account ID ' + cliId)
-    return cliId
+    return { id: cliId }
   }
-
-  throw new Error('No GitHub identity is available. Clone your personal GitHub repository, run gh auth login, or set RUNNER_VAULT_OWNER_GITHUB_ID to your numeric GitHub user ID.')
+  console.warn('[deploy-owner] no GitHub identity available; set RUNNER_VAULT_OWNER_GITHUB_ID to your numeric GitHub user ID')
+  return { id: null, error: 'no_identity' }
 }
