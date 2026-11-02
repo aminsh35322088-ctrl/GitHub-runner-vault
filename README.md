@@ -207,6 +207,8 @@ owner ID, setup code, or extra Cloudflare token is required. Use a personal GitH
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/tree/main/app)
 
+The button creates a fresh copy in the GitHub account used to authorize deployment; a manual fork beforehand is not required. Its source URL is fixed to this upstream repository. To deploy an already-customized fork instead, import that fork from **Workers & Pages → Create application → GitHub**.
+
 The Worker and its D1 database are provisioned in your Cloudflare account. The schema is created on first request.
 
 **2. Confirm the owner** — open your Worker's URL (`https://<name>.<you>.workers.dev`) and press
