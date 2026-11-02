@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'vitest'
 import { getDb, schema } from 'db'
-import { buildPolicy, DEFAULT_EVENTS, loadRunnerPolicy, resolveRepositoryId, saveRunnerPolicy } from './runner-policy.ts'
+import { buildPolicy, DEFAULT_EVENTS, loadRunnerPolicy, pinRunnerPolicy, resolveRepositoryId, saveRunnerPolicy } from './runner-policy.ts'
 
 const db = getDb()
 const input = { repository: 'o/r', repositoryId: '123', branch: 'main', workflowFile: 'rdc-lab.yml', events: DEFAULT_EVENTS }
@@ -34,6 +34,28 @@ describe('runner policy', () => {
     expect((await loadRunnerPolicy(db, {}, AUD)).repositoryId).toBe('123')
     const env = { RUNNER_REPOSITORY: 'a/b', RUNNER_REPOSITORY_ID: '9', RUNNER_ALLOWED_REFS: 'refs/heads/x', RUNNER_ALLOWED_EVENTS: 'push', RUNNER_ALLOWED_WORKFLOW_REFS: 'a/b/.github/workflows/w.yml@refs/heads/x' }
     expect((await loadRunnerPolicy(db, env, AUD)).repository).toBe('a/b')
+  })
+
+  test('builds a safe bootstrap policy from the pinned owner without manual repository settings', async () => {
+    const policy = await loadRunnerPolicy(db, { OWNER_GITHUB_ID: '65' }, AUD)
+    expect(policy.bootstrap).toEqual({
+      ownerId: '65', branch: 'main', workflowFile: 'rdc-lab.yml',
+      allowedEvents: ['workflow_dispatch', 'schedule', 'push'],
+    })
+    await db.delete(schema.vaultSetting)
+    await expect(loadRunnerPolicy(db, {}, AUD)).rejects.toThrow()
+  })
+
+  test('atomically pins the first OIDC repository and refuses to replace it', async () => {
+    const ownerBound = { ...input, repositoryOwnerId: '65' }
+    const pinned = await pinRunnerPolicy(db, ownerBound, AUD)
+    expect(pinned).toMatchObject(ownerBound)
+    expect(await loadRunnerPolicy(db, {}, AUD)).toMatchObject({
+      repository: 'o/r', repositoryId: '123', repositoryOwnerId: '65',
+    })
+    await expect(pinRunnerPolicy(db, { ...input, repository: 'other/repo', repositoryId: '456', repositoryOwnerId: '65' }, AUD))
+      .rejects.toThrow(/already pinned/)
+    expect((await loadRunnerPolicy(db, {}, AUD)).repository).toBe('o/r')
   })
 
   test('an invalid policy is never stored', async () => {

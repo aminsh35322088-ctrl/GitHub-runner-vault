@@ -346,17 +346,25 @@ export const app = new Spiceflow()
     await requirePageSession(request)
     const rows = await listCredentialsForOwner(getDb())
     const now = Date.now()
-    const runnerConfigured = (await loadRunnerPolicyInput(getDb())) !== null || Boolean((env as unknown as VaultEnv).RUNNER_REPOSITORY)
+    const runnerPolicy = await loadRunnerPolicyInput(getDb())
+    const runnerConfigured = runnerPolicy !== null || Boolean((env as unknown as VaultEnv).RUNNER_REPOSITORY)
+    const runnerOwnerReady = Boolean(await loadOwnerId(getDb(), vaultEnv()))
     return (
       <div className="mx-auto w-full min-w-0 max-w-4xl space-y-4">
         <div className="flex min-w-0 flex-wrap items-center justify-between gap-3"><h1 className="text-xl font-semibold tracking-tight">Credentials</h1><a href="/vault/services" className="inline-flex min-h-11 flex-1 items-center justify-center rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground sm:flex-none">+ Add credential</a></div>
-        {!runnerConfigured && (
+        {!runnerConfigured && runnerOwnerReady && (
           <div role="status" className="rounded-lg border border-border bg-muted/40 p-4 space-y-1">
-            <p className="text-sm font-medium">Next step: connect your runner repository</p>
+            <p className="text-sm font-medium">Automatic runner connection is ready</p>
             <p className="text-sm text-muted-foreground">
-              Runners cannot reach the vault until you say which repository and workflow may.{' '}
-              <a className="underline" href="/vault/settings">Open settings</a>.
+              The first valid run of the owner’s main/.github/workflows/rdc-lab.yml workflow
+              will bind its immutable repository and owner IDs automatically. No repository ID or manual policy setup is needed.
             </p>
+          </div>
+        )}
+        {!runnerConfigured && !runnerOwnerReady && (
+          <div role="alert" className="rounded-lg border border-border bg-muted/40 p-4 space-y-1">
+            <p className="text-sm font-medium">Runner auto-connection is unavailable</p>
+            <p className="text-sm text-muted-foreground">This deployment has no pinned GitHub owner identity, so OIDC bootstrap fails closed.</p>
           </div>
         )}
         {rows.length === 0 ? (
@@ -503,7 +511,7 @@ export const app = new Spiceflow()
 
   .page('/vault/settings', async ({ request }) => {
     await requirePageSession(request)
-    const { RevokeSessionsButton, AddExternalForm, RunnerPolicyForm } = await import('./components/credential-actions.tsx')
+    const { RevokeSessionsButton, AddExternalForm } = await import('./components/credential-actions.tsx')
     const policy = await loadRunnerPolicyInput(getDb())
     const fixedByEnv = Boolean((env as unknown as VaultEnv).RUNNER_REPOSITORY)
     const pinnedOwner = await loadOwnerId(getDb(), vaultEnv())
@@ -521,14 +529,27 @@ export const app = new Spiceflow()
           </p>
         )}
         <section className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
-          <h2 className="text-base font-semibold">Runner repository</h2>
+          <h2 className="text-base font-semibold">Automatic runner connection</h2>
           <p className="text-sm text-muted-foreground">
-            Only this repository's workflow, on this branch, can sign in as a runner. Pull-request runs are never accepted.
+            No repository name, numeric ID or shared secret needs to be entered here. The first valid GitHub Actions OIDC
+            request from the vault owner’s main branch rdc-lab.yml workflow atomically pins its
+            repository ID and owner ID in this vault.
           </p>
           {fixedByEnv ? (
-            <p className="text-sm text-muted-foreground">This is fixed by the Worker's RUNNER_* variables and cannot be changed here.</p>
+            <p className="text-sm text-muted-foreground">This deployment uses an explicit RUNNER_* trust policy.</p>
+          ) : policy ? (
+            <dl className="grid grid-cols-[7.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 rounded-lg bg-muted/40 p-3 text-sm">
+              <dt className="text-muted-foreground">Repository</dt><dd className="break-all font-mono">{policy.repository}</dd>
+              <dt className="text-muted-foreground">Repository ID</dt><dd className="font-mono">{policy.repositoryId}</dd>
+              <dt className="text-muted-foreground">Owner ID</dt><dd className="font-mono">{policy.repositoryOwnerId ?? 'legacy policy'}</dd>
+              <dt className="text-muted-foreground">Branch</dt><dd className="font-mono">{policy.branch}</dd>
+              <dt className="text-muted-foreground">Workflow</dt><dd className="break-all font-mono">{policy.workflowFile}</dd>
+            </dl>
           ) : (
-            <RunnerPolicyForm defaults={{ repository: policy?.repository ?? '', branch: policy?.branch ?? 'main', workflowFile: policy?.workflowFile ?? 'rdc-lab.yml', repositoryId: policy?.repositoryId ?? '' }} />
+            <p className="rounded-lg bg-muted/40 p-3 text-sm text-muted-foreground">
+              Waiting for the first valid owner-owned run. Bootstrap accepts only workflow_dispatch, schedule and push
+              on main; pull-request events are rejected.
+            </p>
           )}
         </section>
         <section className="space-y-3 rounded-xl border border-border p-4 sm:p-5">

@@ -35,7 +35,7 @@ async function deps(overrides: Partial<RunnerDeps> = {}): Promise<RunnerDeps> {
 
 async function sessionHeader(d: RunnerDeps) {
   const { token } = await issueRunnerSession(d.sessionKey, {
-    repository: 'o/r', repositoryId: '1', runId: '9', runAttempt: '1', ref: 'refs/heads/main', event: 'workflow_dispatch', workflow: 'w', sha: 's', jti: 'j',
+    repository: 'o/r', repositoryId: '1', repositoryOwnerId: '2', runId: '9', runAttempt: '1', ref: 'refs/heads/main', event: 'workflow_dispatch', workflow: 'w', workflowRef: 'o/r/.github/workflows/w.yml@refs/heads/main', sha: 's', jti: 'j',
   }, d.now)
   return `Bearer ${token}`
 }

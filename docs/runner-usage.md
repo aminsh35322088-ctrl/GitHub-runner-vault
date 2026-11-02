@@ -1,18 +1,34 @@
 # Using the vault from a runner
 
-## One-time setup in the Lab workflow
+## Automatic setup in GitHub Runner Lab
 
-The job needs permission to request an OIDC token (this is the only change to the Lab repo):
+No Runner repository form, repository ID, shared token or manual Vault policy is required.
 
-```yaml
-permissions:
-  id-token: write
-  contents: read
-```
+The existing Lab workflow needs `permissions: id-token: write`. Before RDC starts, it
+downloads the reviewed Vault client, exchanges the GitHub OIDC identity for a 30-minute
+Vault session and reads the metadata-only registry. The first valid run is accepted only
+when all of these claims match:
 
-The vault only accepts tokens from the configured repository, from `refs/heads/main`
-(by default) and from `workflow_dispatch` / `schedule` events. Pull-request and fork
-runs cannot get a session.
+- `repository_owner_id` equals the immutable owner ID pinned by the Vault deployment.
+- `ref` is exactly `refs/heads/main`.
+- `workflow_ref` is exactly `<repository>/.github/workflows/rdc-lab.yml@refs/heads/main`.
+- `event_name` is `workflow_dispatch`, `schedule` or `push`.
+
+The Worker atomically pins the first valid `repository`, `repository_id` and owner ID in D1.
+Subsequent runs must match that immutable repository identity. Concurrent first requests
+from another repository cannot replace the winner. Pull-request and fork runs are refused.
+
+Set these Lab Actions variables once when enabling the integration:
+
+| Variable | Value |
+| --- | --- |
+| `RUNNER_VAULT_URL` | HTTPS origin of the deployed Worker |
+| `RUNNER_VAULT_REPOSITORY` | Repository containing the reviewed `client/vault.mjs` |
+| `RUNNER_VAULT_CLIENT_REF` | Reviewed immutable 40-character Git commit SHA |
+
+The existing **Vault smoke test** dispatch option checks OIDC, session issuance, registry
+access, and the configured GitHub and Cloudflare API credentials through read-only proxy
+calls. Response bodies remain in runner temporary files; logs show only pass/fail markers.
 
 ## Commands (`client/vault.mjs`)
 

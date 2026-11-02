@@ -1,8 +1,9 @@
 # Runner Credential Vault
 
 A **single-owner credential vault** on Cloudflare Workers + D1 for GitHub Actions runners.
-Each deployment is isolated and configured for one GitHub owner and one trusted runner repository; no account,
-repository, Worker URL or database ID is baked into the source.
+Each deployment is isolated to one GitHub owner. The first valid OIDC run from that owner's exact
+`main/.github/workflows/rdc-lab.yml` workflow automatically pins the runner repository's immutable ID in D1;
+no repository name, repository ID, shared token or manual policy entry is required.
 
 It solves one problem: *an agent on the runner needs a token for some service (Cloudflare, Railway, ...) but must never
 be able to read it.*
@@ -48,7 +49,7 @@ The runner is **not** a trust boundary. An agent may have elevated permissions a
 | Agent smuggles auth / routing headers | Request header **allowlist**; the auth header is set by the Worker after everything else. |
 | Upstream echoes the token back | Response body and headers are scanned and the token is **redacted** (raw, URL-encoded, JSON-escaped, base64). |
 | Agent tricks the owner into a bad setup | Models only *propose* a name and setup notes. The **owner** chooses hosts, auth header, lifetime and visibility. Notes are shown as plain text with the real hostname next to each link. |
-| Someone else gets a runner session | Runner identity is a **GitHub OIDC token** pinned to each deployment's repository name and numeric id, exact ref, event and workflow. Pull-request events are refused. |
+| Someone else gets a runner session | Bootstrap requires the deployment-pinned `repository_owner_id`, exact `main` ref, `rdc-lab.yml` `workflow_ref`, and an allowed event. The first repository ID is atomically pinned in D1; later runs must match it. Pull-request events are refused. |
 | Stolen session | 30-minute sessions, rate limits, append-only audit log, and an owner-side **revoke all sessions** button. |
 | Someone else logs in to the owner UI | Sign-in uses a **private GitHub App created by you** and is restricted to **one numeric account id** (the app's creator); cookie sessions only. |
 | Agent edits the vault code | The vault runs as a separate Cloudflare Worker. |
@@ -193,7 +194,7 @@ Sign in at `https://<origin>/login` with the owner GitHub account.
 | `/vault/register/<link>` | The one-time registration page: the agent's setup notes above a write-only secret field, automatic token verification and permission inspection, plus advanced host, auth, lifetime, expiry and visibility controls. |
 | `/vault/credentials/<id>` | Details, enable/disable, show/hide, delete, replace value or rules, recent activity. Stored values are never displayed. |
 | `/vault/audit` | Append-only audit log (database triggers block updates and deletes). |
-| `/vault/settings` | Configure the runner repository, **revoke all runner sessions**, review advanced-settings guidance and add metadata-only entries (for example `GITHUB_TOKEN`). |
+| `/vault/settings` | Inspect the automatically pinned runner identity, **revoke all runner sessions**, review advanced-settings guidance and add metadata-only entries (for example `GITHUB_TOKEN`). |
 
 ## Deployment
 
@@ -258,8 +259,8 @@ If no valid owner ID is present, `/setup` stays locked. The app never falls back
 ### Finish setup
 
 1. Open the Worker URL (`https://<name>.<you>.workers.dev`) and choose *Create the GitHub App* using the personal GitHub account that owns the deployed repository (or matches the explicitly configured owner ID).
-2. Sign in, open *Settings → Runner repository* and enter the repository, branch and workflow file that may use the vault (for example `you/your-runner-repo`, `main`, `rdc-lab.yml`). Public repositories are looked up automatically; for a private one, also enter its numeric repository ID. Pull-request runs are never accepted.
-3. Set the Actions variable `VAULT_URL` (or `RUNNER_VAULT_URL`, depending on your workflow) to the Worker URL and install `client/vault.mjs`. The trusted workflow must request `permissions: id-token: write`.
+2. Sign in to the owner dashboard. No Runner repository form is required: the first valid OIDC run from the owner's `main/.github/workflows/rdc-lab.yml` workflow proves the owner identity and atomically pins the repository ID. Later runs must match the pinned repository, owner, branch, event and workflow. Pull-request events are refused.
+3. Set the Lab Actions variables `RUNNER_VAULT_URL`, `RUNNER_VAULT_REPOSITORY` (the public Vault source repository) and `RUNNER_VAULT_CLIENT_REF` (a reviewed immutable client commit). The existing Lab workflow downloads the client, obtains an OIDC token, establishes a short-lived session and reads the registry before starting RDC. No runner token or manual policy value is needed.
 
 The Deploy Button provisions D1 automatically. Dashboard Git connection and Wrangler CLI deployments use the deploy helper to find or create the named D1 database, patch the built Worker config, and deploy. The Worker creates its tables on first request.
 
@@ -292,7 +293,7 @@ Everything below is optional. A normal deployment sets nothing; everything is co
 | `PUBLIC_ORIGIN` | var | Canonical HTTPS origin for a custom domain. By default the actual request origin is used. |
 | `OWNER_GITHUB_ID` | var | Derived during production build from GitHub `origin`, authenticated `gh`, or an explicit build variable; pinned in D1 on first use. Manual uploads must set this Worker runtime variable. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | vars / secrets | Optional override for the private GitHub sign-in App created through `/setup`. |
-| `RUNNER_REPOSITORY`, `RUNNER_REPOSITORY_ID`, `RUNNER_ALLOWED_REFS`, `RUNNER_ALLOWED_EVENTS`, `RUNNER_ALLOWED_WORKFLOW_REFS` | vars | Fix the runner policy in configuration; then the Settings form is read-only. |
+| `RUNNER_REPOSITORY`, `RUNNER_REPOSITORY_ID`, `RUNNER_ALLOWED_REFS`, `RUNNER_ALLOWED_EVENTS`, `RUNNER_ALLOWED_WORKFLOW_REFS` | vars | Optional explicit static policy override. When absent, owner-verified OIDC bootstrap pins the first repository automatically. |
 | `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY` | secrets | Legacy explicit keys; both must be set to be used. |
 | `DB` | D1 binding | Provisioned by Deploy Button or the deploy helper. Auto-discovery/creation needs D1 Read/Edit on the Workers Builds token or Wrangler login; a configured `database_id` skips those API calls. |
 
