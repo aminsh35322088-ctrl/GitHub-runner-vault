@@ -38,15 +38,21 @@ jobs:
         run: |
           set -euo pipefail
           cd app
-          WORKERS_CI=1 pnpm build
-          found=0
-          for output in dist .wrangler; do
-            if [[ -d "$output" ]] && grep -R -Eq '"OWNER_GITHUB_ID"[[:space:]]*:[[:space:]]*"[1-9][0-9]*"' "$output"; then
-              found=1
-              break
-            fi
-          done
-          test "$found" -eq 1
+          build_log="$(mktemp)"
+          trap 'rm -f "$build_log"' EXIT
+          WORKERS_CI=1 pnpm build 2>&1 | tee "$build_log"
+          owner_id="$(sed -nE 's/.*\[deploy-owner\] bound GitHub account ID ([1-9][0-9]*) from .*/\1/p' "$build_log" | tail -n1)"
+          test -n "$owner_id"
+          OWNER_ID="$owner_id" node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs'
+
+          const expected = process.env.OWNER_ID
+          const config = JSON.parse(readFileSync('dist/rsc/wrangler.json', 'utf8'))
+          if (!expected || config.vars?.OWNER_GITHUB_ID !== expected) {
+            throw new Error('Generated Worker config does not contain the exact GitHub origin owner ID')
+          }
+          console.log('[deploy-owner] verified generated Worker runtime binding: ' + expected)
+          NODE
 
       - name: Validate the standalone Deploy Button project
         shell: bash
