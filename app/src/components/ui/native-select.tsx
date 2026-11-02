@@ -27,7 +27,7 @@ export function NativeSelect({
         data-slot="native-select"
         data-size={size}
         className={cn(
-          "h-8 w-full min-w-0 appearance-none rounded-lg border border-input bg-background py-0 pr-8 pl-2.5 text-sm text-foreground outline-none transition-colors",
+          "h-11 w-full min-w-0 appearance-none rounded-lg border border-input bg-background py-0 pr-9 pl-3 text-base text-foreground outline-none transition-colors sm:h-8 sm:pr-8 sm:pl-2.5 sm:text-sm",
           "focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50",
           "disabled:pointer-events-none disabled:cursor-not-allowed",
           "dark:bg-input/32",

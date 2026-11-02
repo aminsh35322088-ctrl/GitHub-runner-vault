@@ -7,6 +7,7 @@ import { audit, listRegistryForRunner, readCredentialValue, requestRegistration 
 import { verifyGithubOidc, type JwksSource, type OidcPolicy } from './oidc.ts'
 import { issueRunnerSession, verifyRunnerSession, getRunnerRevokedBefore, type RunnerSession } from './runner-session.ts'
 import { runProxy, type ProxyError } from './proxy.ts'
+import { BOOTSTRAP_WORKFLOW_FILE, DEFAULT_EVENTS, pinRunnerPolicy } from './runner-policy.ts'
 
 type Db = ReturnType<typeof getDb>
 
@@ -51,6 +52,27 @@ export async function createSession(deps: RunnerDeps, authorization: string | nu
     await audit(deps.db, { action: 'session_denied', actor: 'runner', result: 'denied', detail: verified.error, now: deps.now })
     return fail(401, 'unauthorized')
   }
+  if (deps.policy.bootstrap) {
+    const branchPrefix = 'refs/heads/'
+    const branch = verified.identity.ref.startsWith(branchPrefix)
+      ? verified.identity.ref.slice(branchPrefix.length) : ''
+    try {
+      await pinRunnerPolicy(deps.db, {
+        repository: verified.identity.repository,
+        repositoryId: verified.identity.repositoryId,
+        repositoryOwnerId: verified.identity.repositoryOwnerId,
+        branch,
+        workflowFile: BOOTSTRAP_WORKFLOW_FILE,
+        events: DEFAULT_EVENTS,
+      }, deps.policy.audience)
+    } catch {
+      await audit(deps.db, {
+        action: 'session_denied', actor: `runner:${verified.identity.repository}`,
+        result: 'denied', detail: 'automatic_repository_pin_conflict', now: deps.now,
+      })
+      return fail(403, 'runner_not_allowed')
+    }
+  }
   if (await countSince(deps.db, 'session_issued', deps.now - 3600_000) >= SESSION_LIMIT_PER_HOUR) {
     return fail(429, 'rate_limited')
   }
@@ -84,18 +106,18 @@ export async function registry(deps: RunnerDeps, authorization: string | null) {
 export async function requestCredential(
   deps: RunnerDeps,
   authorization: string | null,
-  input: { name: unknown; service: unknown; purpose: unknown; doc: unknown },
+  input: { name: unknown; service: unknown; purpose?: unknown; doc: unknown },
 ) {
   const auth = await authenticate(deps, authorization)
   if (!auth.ok) return auth.res
-  if (typeof input.name !== 'string' || typeof input.service !== 'string' || typeof input.purpose !== 'string') {
+  if (typeof input.name !== 'string' || typeof input.service !== 'string') {
     return fail(400, 'invalid_request')
   }
   if (await countSince(deps.db, 'registration_requested', deps.now - 3600_000) >= REGISTRATION_LIMIT_PER_HOUR) {
     return fail(429, 'rate_limited')
   }
   const result = await requestRegistration(deps.db, {
-    name: input.name, service: input.service, purpose: input.purpose, doc: input.doc,
+    name: input.name, service: input.service, purpose: typeof input.purpose === 'string' ? input.purpose : undefined, doc: input.doc,
     requestedBy: auth.session.sub, now: deps.now,
   })
   if (!result.ok) return fail(result.error === 'exists' ? 409 : 400, result.error, result.detail ? { detail: result.detail } : {})

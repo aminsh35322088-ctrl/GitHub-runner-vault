@@ -41,7 +41,10 @@ jobs:
           build_log="$(mktemp)"
           trap 'rm -f "$build_log"' EXIT
           pnpm build 2>&1 | tee "$build_log"
-          owner_id="$(sed -nE 's/.*\[deploy-owner\] bound GitHub account ID ([1-9][0-9]*) from .*/\1/p' "$build_log" | tail -n1)"
+          owner_id="$(sed -nE \
+            -e 's/.*\[deploy-owner\] bound GitHub account ID ([1-9][0-9]*) from .*/\1/p' \
+            -e 's/.*\[deploy-owner\] using GitHub Actions repository owner ID ([1-9][0-9]*).*/\1/p' \
+            "$build_log" | tail -n1)"
           test -n "$owner_id"
           OWNER_ID="$owner_id" node --input-type=module <<'NODE'
           import { readFileSync } from 'node:fs'

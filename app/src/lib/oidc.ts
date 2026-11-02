@@ -26,16 +26,25 @@ export type OidcPolicy = {
   allowedRefs: string[]
   allowedEvents: string[]
   allowedWorkflowRefs: string[]
+  repositoryOwnerId?: string
+  bootstrap?: {
+    ownerId: string
+    branch: string
+    workflowFile: string
+    allowedEvents: string[]
+  }
 }
 
 export type RunnerIdentity = {
   repository: string
   repositoryId: string
+  repositoryOwnerId: string
   runId: string
   runAttempt: string
   ref: string
   event: string
   workflow: string
+  workflowRef: string
   sha: string
   jti: string
 }
@@ -158,16 +167,48 @@ export async function verifyGithubOidc(
   if (typeof claims.iat === 'number' && claims.iat > nowS + CLOCK_SKEW_S) return { ok: false, error: 'token issued in the future' }
 
   const repository = str(claims, 'repository')
-  if (!repository || !sameRepository(repository, policy.repository)) return { ok: false, error: 'wrong repository' }
   const repositoryId = str(claims, 'repository_id')
-  if (!repositoryId || repositoryId !== policy.repositoryId) return { ok: false, error: 'wrong repository' }
+  const repositoryOwnerId = str(claims, 'repository_owner_id')
   const ref = str(claims, 'ref')
-  if (!policy.allowedRefs.includes(ref)) return { ok: false, error: 'ref not allowed' }
   const event = str(claims, 'event_name')
-  if (!policy.allowedEvents.includes(event)) return { ok: false, error: 'event not allowed' }
-  const workflow = str(claims, 'job_workflow_ref')
-  if (!workflow || !policy.allowedWorkflowRefs.includes(workflow)) return { ok: false, error: 'workflow not allowed' }
+  const workflowRef = str(claims, 'workflow_ref')
+  const reusableWorkflowRef = str(claims, 'job_workflow_ref')
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || !/^\d{1,20}$/.test(repositoryId)) {
+    return { ok: false, error: 'wrong repository' }
+  }
 
+  if (policy.bootstrap) {
+    const bootstrap = policy.bootstrap
+    const expectedRef = `refs/heads/${bootstrap.branch}`
+    const expectedWorkflow = `${repository}/.github/workflows/${bootstrap.workflowFile}@${expectedRef}`
+    const repositoryOwner = str(claims, 'repository_owner')
+    if (repositoryOwnerId !== bootstrap.ownerId || !repositoryOwner ||
+        repository.split('/')[0]!.toLowerCase() !== repositoryOwner.toLowerCase()) {
+      return { ok: false, error: 'wrong repository owner' }
+    }
+    if (ref !== expectedRef || !policy.allowedRefs.includes(ref)) return { ok: false, error: 'ref not allowed' }
+    if (!bootstrap.allowedEvents.includes(event) || !policy.allowedEvents.includes(event)) return { ok: false, error: 'event not allowed' }
+    if (!workflowRef || workflowRef !== expectedWorkflow ||
+        (reusableWorkflowRef && reusableWorkflowRef !== expectedWorkflow)) {
+      return { ok: false, error: 'workflow not allowed' }
+    }
+  } else {
+    if (!sameRepository(repository, policy.repository) || repositoryId !== policy.repositoryId) {
+      return { ok: false, error: 'wrong repository' }
+    }
+    if (policy.repositoryOwnerId && repositoryOwnerId !== policy.repositoryOwnerId) {
+      return { ok: false, error: 'wrong repository owner' }
+    }
+    if (!policy.allowedRefs.includes(ref)) return { ok: false, error: 'ref not allowed' }
+    if (!policy.allowedEvents.includes(event)) return { ok: false, error: 'event not allowed' }
+    const workflow = workflowRef || reusableWorkflowRef
+    if (!workflow || !policy.allowedWorkflowRefs.includes(workflow)) return { ok: false, error: 'workflow not allowed' }
+    if (reusableWorkflowRef && !policy.allowedWorkflowRefs.includes(reusableWorkflowRef)) {
+      return { ok: false, error: 'workflow not allowed' }
+    }
+  }
+
+  const workflow = workflowRef || reusableWorkflowRef
   const runId = str(claims, 'run_id')
   if (!/^\d{1,20}$/.test(runId)) return { ok: false, error: 'missing run id' }
 
@@ -176,11 +217,13 @@ export async function verifyGithubOidc(
     identity: {
       repository,
       repositoryId,
+      repositoryOwnerId,
       runId,
       runAttempt: str(claims, 'run_attempt') || '1',
       ref,
       event,
       workflow: workflow.slice(0, 200),
+      workflowRef: workflowRef.slice(0, 300),
       sha: str(claims, 'sha').slice(0, 64),
       jti: str(claims, 'jti').slice(0, 100),
     },
@@ -207,8 +250,14 @@ export function policyFromEnv(env: Record<string, unknown>, audience: string): O
     throw new Error('Pull-request events are not allowed')
   }
   const allowedWorkflowRefs = requiredList('RUNNER_ALLOWED_WORKFLOW_REFS')
+  const repositoryOwnerId = typeof env.RUNNER_REPOSITORY_OWNER_ID === 'string' && /^\d{1,20}$/.test(env.RUNNER_REPOSITORY_OWNER_ID.trim())
+    ? env.RUNNER_REPOSITORY_OWNER_ID.trim() : undefined
+  if (env.RUNNER_REPOSITORY_OWNER_ID !== undefined && !repositoryOwnerId) {
+    throw new Error('RUNNER_REPOSITORY_OWNER_ID must be a numeric owner id')
+  }
   if (allowedWorkflowRefs.some((item) => !item.includes('/.github/workflows/') || !item.includes('@'))) {
     throw new Error('RUNNER_ALLOWED_WORKFLOW_REFS must contain exact workflow refs')
   }
-  return { audience, repository, repositoryId, allowedRefs, allowedEvents, allowedWorkflowRefs }
+  return { audience, repository, repositoryId, allowedRefs, allowedEvents, allowedWorkflowRefs,
+    ...(repositoryOwnerId ? { repositoryOwnerId } : {}) }
 }

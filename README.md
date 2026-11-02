@@ -1,8 +1,9 @@
 # Runner Credential Vault
 
 A **single-owner credential vault** on Cloudflare Workers + D1 for GitHub Actions runners.
-Each deployment is isolated and configured for one GitHub owner and one trusted runner repository; no account,
-repository, Worker URL or database ID is baked into the source.
+Each deployment is isolated to one GitHub owner. The first valid OIDC run from that owner's exact
+`main/.github/workflows/rdc-lab.yml` workflow automatically pins the runner repository's immutable ID in D1;
+no repository name, repository ID, shared token or manual policy entry is required.
 
 It solves one problem: *an agent on the runner needs a token for some service (Cloudflare, Railway, ...) but must never
 be able to read it.*
@@ -48,7 +49,7 @@ The runner is **not** a trust boundary. An agent may have elevated permissions a
 | Agent smuggles auth / routing headers | Request header **allowlist**; the auth header is set by the Worker after everything else. |
 | Upstream echoes the token back | Response body and headers are scanned and the token is **redacted** (raw, URL-encoded, JSON-escaped, base64). |
 | Agent tricks the owner into a bad setup | Models only *propose* a name and setup notes. The **owner** chooses hosts, auth header, lifetime and visibility. Notes are shown as plain text with the real hostname next to each link. |
-| Someone else gets a runner session | Runner identity is a **GitHub OIDC token** pinned to each deployment's repository name and numeric id, exact ref, event and workflow. Pull-request events are refused. |
+| Someone else gets a runner session | Bootstrap requires the deployment-pinned `repository_owner_id`, exact `main` ref, `rdc-lab.yml` `workflow_ref`, and an allowed event. The first repository ID is atomically pinned in D1; later runs must match it. Pull-request events are refused. |
 | Stolen session | 30-minute sessions, rate limits, append-only audit log, and an owner-side **revoke all sessions** button. |
 | Someone else logs in to the owner UI | Sign-in uses a **private GitHub App created by you** and is restricted to **one numeric account id** (the app's creator); cookie sessions only. |
 | Agent edits the vault code | The vault runs as a separate Cloudflare Worker. |
@@ -134,7 +135,7 @@ Only Active + Visible entries. Never values, hosts or ids.
 
 ### `POST /api/runner/registrations`
 
-Body `{ name, service, purpose, doc }`, where `doc` follows the schema in `docs/runner-usage.md`.
+Body `{ name, service, doc }`, where `doc` follows the schema in `docs/runner-usage.md`. The vault generates purpose automatically from the service catalog.
 `200 { link, expiresAt }`: give the link to the owner. `400 invalid_name | reserved_name | invalid_doc` (with `detail`),
 `409 exists`, `429 rate_limited` (10 per hour).
 
@@ -175,7 +176,7 @@ export VAULT_URL=https://<your-vault-origin>
 
 node client/vault.mjs list
 node client/vault.mjs use CF_API_TOKEN GET https://api.cloudflare.com/client/v4/user/tokens/verify --purpose "verify token"
-node client/vault.mjs request --name RAILWAY_TOKEN --service Railway --purpose "deploy" --doc doc.json
+node client/vault.mjs request --name RAILWAY_TOKEN --service Railway --doc doc.json
 ```
 
 Exit codes: `0` ok, `2` vault refused, `3` upstream HTTP error. See `docs/runner-usage.md` for `doc.json` and what a model
@@ -183,17 +184,17 @@ should expect. The trusted runner workflow must request `permissions: id-token: 
 
 ## Owner UI
 
-From the dashboard, choose **Add credential** to browse the built-in provider catalog (Cloudflare, Railway, GitHub, Vercel, Netlify, DigitalOcean, OpenAI, Anthropic, Groq, Mistral, Hugging Face, Stripe, Sentry, Supabase, Pinecone and Slack), search by provider/category, or add a custom service. Known providers prefill their documented API host and auth header; the owner can inspect and edit these values before creating a credential. This path works independently of any runner/model registration request. The runner registration flow uses the same provider catalog for its defaults.
+From the dashboard, choose **Add credential** to browse the built-in provider catalog (Cloudflare, Railway, GitHub, Vercel, Netlify, DigitalOcean, OpenAI, Anthropic, Groq, Mistral, Hugging Face, Stripe, Sentry, Supabase, Pinecone and Slack), search by provider/category, or add a custom service. Known providers prefill their documented API host and auth header; the owner can inspect and edit these values before creating a credential. This path works independently of any runner/model registration request. Purpose is generated from the selected service; no purpose field is required. On supported providers, entering a token triggers server-side verification and saving repeats the check before encryption. GitHub classic OAuth scopes and Cloudflare User/Account Token policies are shown where the provider API exposes them. GitHub does not expose a complete Fine-grained PAT permission list through its general authentication endpoint. New Cloudflare `cfat_` Account Tokens are routed directly to the Account Token verification endpoint and show an Account ID field next to the token input. The runner registration flow uses the same provider catalog for its defaults.
 
 Sign in at `https://<origin>/login` with the owner GitHub account.
 
 | Page | What it does |
 | --- | --- |
 | `/vault` | Credential list: status, delivery, expiry, last used. |
-| `/vault/register/<link>` | The one-time registration page: the agent's setup notes above a write-only secret field, plus hosts, auth header/scheme, lifetime, expiry and visibility. |
+| `/vault/register/<link>` | The one-time registration page: the agent's setup notes above a write-only secret field, automatic token verification and permission inspection, plus advanced host, auth, lifetime, expiry and visibility controls. |
 | `/vault/credentials/<id>` | Details, enable/disable, show/hide, delete, replace value or rules, recent activity. Stored values are never displayed. |
 | `/vault/audit` | Append-only audit log (database triggers block updates and deletes). |
-| `/vault/settings` | **Revoke all runner sessions**; add a metadata-only entry (for example `GITHUB_TOKEN`). |
+| `/vault/settings` | Inspect the automatically pinned runner identity, **revoke all runner sessions**, review advanced-settings guidance and add metadata-only entries (for example `GITHUB_TOKEN`). |
 
 ## Deployment
 
@@ -258,8 +259,8 @@ If no valid owner ID is present, `/setup` stays locked. The app never falls back
 ### Finish setup
 
 1. Open the Worker URL (`https://<name>.<you>.workers.dev`) and choose *Create the GitHub App* using the personal GitHub account that owns the deployed repository (or matches the explicitly configured owner ID).
-2. Sign in, open *Settings → Runner repository* and enter the repository, branch and workflow file that may use the vault (for example `you/your-runner-repo`, `main`, `rdc-lab.yml`). Public repositories are looked up automatically; for a private one, also enter its numeric repository ID. Pull-request runs are never accepted.
-3. Set the Actions variable `VAULT_URL` (or `RUNNER_VAULT_URL`, depending on your workflow) to the Worker URL and install `client/vault.mjs`. The trusted workflow must request `permissions: id-token: write`.
+2. Sign in to the owner dashboard. No Runner repository form is required: the first valid OIDC run from the owner's `main/.github/workflows/rdc-lab.yml` workflow proves the owner identity and atomically pins the repository ID. Later runs must match the pinned repository, owner, branch, event and workflow. Pull-request events are refused.
+3. Set the Lab Actions variables `RUNNER_VAULT_URL`, `RUNNER_VAULT_REPOSITORY` (the public Vault source repository) and `RUNNER_VAULT_CLIENT_REF` (a reviewed immutable client commit). The existing Lab workflow downloads the client, obtains an OIDC token, establishes a short-lived session and reads the registry before starting RDC. No runner token or manual policy value is needed.
 
 The Deploy Button provisions D1 automatically. Dashboard Git connection and Wrangler CLI deployments use the deploy helper to find or create the named D1 database, patch the built Worker config, and deploy. The Worker creates its tables on first request.
 
@@ -292,7 +293,7 @@ Everything below is optional. A normal deployment sets nothing; everything is co
 | `PUBLIC_ORIGIN` | var | Canonical HTTPS origin for a custom domain. By default the actual request origin is used. |
 | `OWNER_GITHUB_ID` | var | Derived during production build from GitHub `origin`, authenticated `gh`, or an explicit build variable; pinned in D1 on first use. Manual uploads must set this Worker runtime variable. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | vars / secrets | Optional override for the private GitHub sign-in App created through `/setup`. |
-| `RUNNER_REPOSITORY`, `RUNNER_REPOSITORY_ID`, `RUNNER_ALLOWED_REFS`, `RUNNER_ALLOWED_EVENTS`, `RUNNER_ALLOWED_WORKFLOW_REFS` | vars | Fix the runner policy in configuration; then the Settings form is read-only. |
+| `RUNNER_REPOSITORY`, `RUNNER_REPOSITORY_ID`, `RUNNER_ALLOWED_REFS`, `RUNNER_ALLOWED_EVENTS`, `RUNNER_ALLOWED_WORKFLOW_REFS` | vars | Optional explicit static policy override. When absent, owner-verified OIDC bootstrap pins the first repository automatically. |
 | `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY` | secrets | Legacy explicit keys; both must be set to be used. |
 | `DB` | D1 binding | Provisioned by Deploy Button or the deploy helper. Auto-discovery/creation needs D1 Read/Edit on the Workers Builds token or Wrangler login; a configured `database_id` skips those API calls. |
 

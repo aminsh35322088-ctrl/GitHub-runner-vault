@@ -22,5 +22,11 @@ export const SCHEMA_MIGRATIONS: SchemaMigration[] = [
       "CREATE TABLE IF NOT EXISTS `vault_setting` (\n\t`key` text PRIMARY KEY CHECK (length(`key`) BETWEEN 1 AND 64),\n\t`value` text NOT NULL CHECK (length(`value`) <= 500),\n\t`updated_at` integer NOT NULL\n);",
       "CREATE UNIQUE INDEX IF NOT EXISTS `enrollment_link_one_unused_per_credential_kind_idx`\nON `enrollment_link` (`credential_id`, `kind`)\nWHERE `used_at` IS NULL"
     ]
+  },
+  {
+    "id": "0002_credential_validation_details",
+    "statements": [
+      "ALTER TABLE credential ADD COLUMN validation_details text"
+    ]
   }
 ]

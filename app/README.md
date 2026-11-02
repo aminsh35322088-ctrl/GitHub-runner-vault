@@ -61,6 +61,12 @@ A manual upload has no Git origin and no build step from which to derive the own
 
 If no valid owner ID is available, `/setup` stays locked. The application never falls back to first-visitor ownership.
 
+## Credential validation and mobile UI
+
+The owner form does not ask for `purpose`; the vault generates it from the selected service. GitHub and Cloudflare tokens are checked server-side both on explicit verification and again before saving. GitHub classic OAuth scopes and Cloudflare User/Account Token policies are shown where the provider API exposes them. Cloudflare `cfat_` Account Tokens are routed to the Account Token verification endpoint, with a 32-character Account ID field directly beside the token input. GitHub fine-grained token permissions are not fully enumerated by the general authentication endpoint; the UI labels the limited capability probe rather than claiming a complete permission list.
+
+The dashboard uses compact mobile bottom navigation, responsive credential and audit cards, and touch-sized controls. Advanced settings are expanded in the credential form and apply per credential: allowed hosts, authentication header/scheme, expiry and runner visibility.
+
 ## After deployment
 
 1. Open the Worker URL and choose **Create the GitHub App** using the same personal GitHub account that owns the deployed repository (or matches the manually configured owner ID).
