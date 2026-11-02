@@ -201,9 +201,9 @@ You need a Cloudflare account and a GitHub account. No command line, no API toke
 
 **1. Deploy** — press the button and authorize GitHub and Cloudflare. Cloudflare clones the project into your
 GitHub account and deploys it through Workers Builds. During the build, the project reads the actual Git origin,
-reads the repository owner's numeric ID from GitHub's public repository-page metadata (avoiding the unauthenticated REST API rate limit), and injects it as the Worker's
+reads the account's numeric ID from the public GitHub profile metadata (avoiding the unauthenticated REST API rate limit and supporting private destination repositories), and injects it as the Worker's
 `OWNER_GITHUB_ID` runtime variable. The first Worker request pins that ID in D1. No GitHub Actions setup, manual
-owner ID, setup code, or extra Cloudflare token is required. Use a personal GitHub account; organization-owned repositories are intentionally rejected.
+owner ID, setup code, or extra Cloudflare token is required. Use a personal GitHub account; organization-owned repositories are intentionally rejected. The Deploy Button creates a new independent repository under the GitHub account that authorizes deployment; it does not connect an already-existing fork or preserve GitHub's fork network. To deploy your existing fork itself (including its own changes), choose **Workers & Pages → Create application → Import an existing Git repository**, select your fork, and set the project root directory to `app`. The same build-time owner binding then uses that fork's GitHub owner.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/tree/main/app)
 
