@@ -144,7 +144,6 @@ export const credentialAudit = sqliteCore.sqliteTable('credential_audit', {
 }, (table) => [
   sqliteCore.index('credential_audit_at_idx').on(table.at),
   sqliteCore.index('credential_audit_credential_idx').on(table.credentialId),
-  sqliteCore.index('credential_audit_credential_at_idx').on(table.credentialId, table.at),
   sqliteCore.index('credential_audit_name_at_idx').on(table.credentialName, table.at),
   sqliteCore.index('credential_audit_action_at_idx').on(table.action, table.at),
   sqliteCore.index('credential_audit_action_name_at_idx').on(table.action, table.credentialName, table.at),

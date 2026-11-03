@@ -20,12 +20,13 @@ export type RunnerDeps = {
   db: Db
   encryptionKey: CryptoKey
   sessionKey: CryptoKey
-  policy: OidcPolicy
+  policy?: OidcPolicy
   jwks: JwksSource
   origin: string
   fetchFn: typeof fetch
   now: number
   proxyTimeoutMs?: number
+  getProxyTimeoutMs?: () => Promise<number>
 }
 
 export type CoreResult<T> = { status: number; body: T }
@@ -49,6 +50,7 @@ async function countSince(db: Db, action: string, since: number, credentialName?
 export async function createSession(deps: RunnerDeps, authorization: string | null) {
   const token = bearer(authorization)
   if (!token) return fail(401, 'missing_token')
+  if (!deps.policy) return fail(503, 'vault_not_configured')
   const verified = await verifyGithubOidc(token, deps.policy, deps.jwks, deps.now)
   if (!verified.ok) {
     await audit(deps.db, { action: 'session_denied', actor: 'runner', result: 'denied', detail: verified.error, now: deps.now })
@@ -201,9 +203,14 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
   const startedAt = Date.now()
   const consumer = typeof input.consumer === 'string' && /^cli:[a-z0-9._-]{1,40}$/i.test(input.consumer)
     ? input.consumer.toLowerCase() : 'runner'
+  // Proxy policy is read only for actual upstream requests. Registry/session and
+  // rejected credential attempts do not need a settings-table round trip.
+  const proxyTimeoutMs = deps.getProxyTimeoutMs
+    ? await deps.getProxyTimeoutMs()
+    : deps.proxyTimeoutMs
   const result = await runProxy({
     credential: read.credential, value: read.value, method: input.method, url: input.url, headers, body: input.body as string | undefined,
-  }, deps.fetchFn, deps.proxyTimeoutMs)
+  }, deps.fetchFn, proxyTimeoutMs)
 
   if (!result.ok) {
     // Observability is deliberately best-effort: a D1 telemetry failure must not

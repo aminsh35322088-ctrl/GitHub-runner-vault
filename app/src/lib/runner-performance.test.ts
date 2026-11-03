@@ -3,6 +3,8 @@ import { env } from 'cloudflare:workers'
 import { getDb, schema } from 'db'
 import * as orm from 'drizzle-orm'
 import { listRegistryForRunner } from './credential-service.ts'
+import { registry } from './runner-core.ts'
+import { deriveSessionKey, getRunnerRevokedBefore, issueRunnerSession } from './runner-session.ts'
 
 function percentile(samples: number[], ratio: number): number {
   const sorted = [...samples].sort((a, b) => a - b)
@@ -39,11 +41,10 @@ describe('runner hot-path performance diagnostics', () => {
     ).bind('proxy_use', 'PERFORMANCE_PROBE', Date.now() - 60_000).all()
     expect(JSON.stringify(ratePlan.results)).toContain('credential_audit_action_name_at_idx')
 
-    const credentialAuditPlan = await env.DB.prepare(
-      'EXPLAIN QUERY PLAN SELECT id, at, action FROM credential_audit ' +
-      'WHERE credential_id = ? ORDER BY at DESC LIMIT 50',
-    ).bind('PERFORMANCE_PROBE').all()
-    expect(JSON.stringify(credentialAuditPlan.results)).toContain('credential_audit_credential_at_idx')
+    const actionOnlyPlan = await env.DB.prepare(
+      'EXPLAIN QUERY PLAN SELECT count(*) FROM credential_audit WHERE action = ? AND at >= ?',
+    ).bind('session_issued', Date.now() - 3_600_000).all()
+    expect(JSON.stringify(actionOnlyPlan.results)).toContain('credential_audit_action_at_idx')
 
     const namedAuditPlan = await env.DB.prepare(
       'EXPLAIN QUERY PLAN SELECT id, at, action FROM credential_audit ' +
@@ -98,6 +99,54 @@ describe('runner hot-path performance diagnostics', () => {
     console.info(
       '[VAULT_PERF_LOCAL_WORKERD] registry rows=40 samples=' + samples.length +
       ' p50_ms=' + p50.toFixed(2) + ' p95_ms=' + p95.toFixed(2),
+    )
+
+    // Include signed-session verification, per-request revocation lookup, and
+    // the actual Runner registry query. This is the authenticated route core,
+    // excluding HTTP/Worker platform ingress and buildDeps configuration reads.
+    const revokedBefore = await getRunnerRevokedBefore(db)
+    const routeNow = Math.max(Date.now(), revokedBefore + 1)
+    const sessionKey = await deriveSessionKey('local-worker-performance-session-secret-0123456789')
+    const issued = await issueRunnerSession(sessionKey, {
+      repository: 'performance/runner',
+      repositoryId: '1',
+      repositoryOwnerId: '1',
+      runId: '1',
+      runAttempt: '1',
+      ref: 'refs/heads/main',
+      event: 'workflow_dispatch',
+      workflow: 'performance',
+      workflowRef: 'performance/runner/.github/workflows/performance.yml@refs/heads/main',
+      sha: 'performance',
+      jti: 'performance',
+    }, routeNow)
+    const routeDeps = {
+      db,
+      encryptionKey: await crypto.subtle.generateKey(
+        { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'],
+      ),
+      sessionKey,
+      jwks: async () => ({ keys: [] }),
+      origin: 'https://vault.test',
+      fetchFn: fetch,
+      now: routeNow,
+    }
+    const authorization = 'Bearer ' + issued.token
+    for (let i = 0; i < 5; i += 1) {
+      expect((await registry(routeDeps, authorization)).status).toBe(200)
+    }
+    const routeSamples: number[] = []
+    for (let i = 0; i < 40; i += 1) {
+      const started = performance.now()
+      const result = await registry(routeDeps, authorization)
+      routeSamples.push(performance.now() - started)
+      expect(result.status).toBe(200)
+    }
+    const routeP50 = percentile(routeSamples, 0.50)
+    const routeP95 = percentile(routeSamples, 0.95)
+    console.info(
+      '[VAULT_PERF_LOCAL_WORKERD] authenticated_registry samples=' + routeSamples.length +
+      ' p50_ms=' + routeP50.toFixed(2) + ' p95_ms=' + routeP95.toFixed(2),
     )
   })
 })

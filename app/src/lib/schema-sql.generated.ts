@@ -57,11 +57,10 @@ export const SCHEMA_MIGRATIONS: SchemaMigration[] = [
   {
     "id": "0005_runner_hot_path_indexes",
     "statements": [
-      "CREATE INDEX credential_runner_registry_idx ON credential (status, visible, name)",
-      "CREATE INDEX credential_audit_credential_at_idx ON credential_audit (credential_id, at)",
-      "CREATE INDEX credential_audit_name_at_idx ON credential_audit (credential_name, at)",
-      "CREATE INDEX credential_audit_action_at_idx ON credential_audit (action, at)",
-      "CREATE INDEX credential_audit_action_name_at_idx ON credential_audit (action, credential_name, at)"
+      "CREATE INDEX IF NOT EXISTS credential_runner_registry_idx ON credential (status, visible, name)",
+      "CREATE INDEX IF NOT EXISTS credential_audit_name_at_idx ON credential_audit (credential_name, at)",
+      "CREATE INDEX IF NOT EXISTS credential_audit_action_at_idx ON credential_audit (action, at)",
+      "CREATE INDEX IF NOT EXISTS credential_audit_action_name_at_idx ON credential_audit (action, credential_name, at)"
     ]
   }
 ]

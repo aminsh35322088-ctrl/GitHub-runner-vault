@@ -9,17 +9,23 @@ const call = (method: string, path: string, body?: unknown) =>
   }))
 
 describe('runner HTTP surface', () => {
+  test('session exchange fails closed (503, no-store) when OIDC policy is not configured', async () => {
+    const res = await call('POST', '/api/runner/session')
+    expect(res.status).toBe(503)
+    expect(res.headers.get('cache-control')).toBe('no-store')
+    expect(await res.json()).toEqual({ error: 'vault_not_configured' })
+  })
+
   test.each([
-    ['POST', '/api/runner/session', undefined],
     ['GET', '/api/runner/registry', undefined],
     ['GET', '/api/runner/integrations', undefined],
     ['POST', '/api/runner/registrations', { name: 'X' }],
     ['POST', '/api/runner/use', { name: 'X', method: 'GET', url: 'https://example.com' }],
-  ])('%s %s fails closed (503, no-store) when the runner policy is not configured', async (method, path, body) => {
+  ])('%s %s does not require OIDC policy to reject an invalid runner session', async (method, path, body) => {
     const res = await call(method, path, body)
-    expect(res.status).toBe(503)
+    expect(res.status).toBe(401)
     expect(res.headers.get('cache-control')).toBe('no-store')
-    expect(await res.json()).toEqual({ error: 'vault_not_configured' })
+    expect(await res.json()).toEqual({ error: 'unauthorized' })
   })
 
   test('malformed and non-object JSON bodies return a generic 400', async () => {

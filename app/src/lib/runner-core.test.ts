@@ -146,6 +146,24 @@ describe('registration requests', () => {
 })
 
 describe('use (proxy)', () => {
+  test('loads proxy settings only after an active proxy credential is accepted', async () => {
+    let settingsReads = 0
+    const d = await deps({
+      getProxyTimeoutMs: async () => { settingsReads += 1; return 20_000 },
+    })
+    const header = await sessionHeader(d)
+
+    expect((await registry(d, header)).status).toBe(200)
+    expect(settingsReads).toBe(0)
+
+    expect((await useCredential(d, header, { name: 'MISSING_CREDENTIAL', ...call })).status).toBe(404)
+    expect(settingsReads).toBe(0)
+
+    const cred = await activeCredential(d)
+    expect((await useCredential(d, header, { name: cred.name, ...call })).status).toBe(200)
+    expect(settingsReads).toBe(1)
+  })
+
   test('performs the call, returns the response, never the token, and audits it', async () => {
     const seen: Array<{ url: string; auth: string | null }> = []
     const d = await deps({
