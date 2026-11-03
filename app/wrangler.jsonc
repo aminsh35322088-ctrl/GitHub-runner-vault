@@ -16,8 +16,7 @@
   // Deploy Button provisions D1 automatically; scripts/deploy.mjs resolves or creates it
   // for Git-connected builds and Wrangler CLI deployments before `wrangler deploy`.
   "d1_databases": [
-    { "binding": "DB", "database_name": "runner-vault-db",
-      "database_id": "392ce52e-e166-4db7-8106-b87dd14af345"}
+    { "binding": "DB", "database_name": "runner-vault-db" }
   ],
   "vars": {},
   "triggers": {

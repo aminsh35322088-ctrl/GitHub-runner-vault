@@ -42,6 +42,14 @@ test('injects the exact D1 ID into the generated Worker config', () => {
   assert.equal(config.d1_databases[0].database_id, undefined)
 })
 
+test('the committed Wrangler template does not pin a deployment-specific D1 UUID', () => {
+  const source = readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8')
+  const binding = [...source.matchAll(/\{[^{}]*\}/g)].map((match) => match[0])
+    .find((block) => /"binding"\s*:\s*"DB"/.test(block))
+  assert.ok(binding, 'DB binding must exist')
+  assert.doesNotMatch(binding, /"database_id"\s*:/)
+})
+
 test('rejects binding/name mismatches instead of reusing another database', () => {
   const config = { d1_databases: [{ binding: 'DB', database_name: 'other-db' }] }
   assert.throws(
@@ -188,6 +196,21 @@ function invokeDeploy(fixture, extraEnv = {}) {
     timeout: 20_000,
   })
 }
+
+test('uses the deployment-provided D1 UUID without D1 API calls', () => {
+  const f = makeDeployFixture()
+  try {
+    const result = invokeDeploy(f, {
+      WORKERS_CI: '1',
+      RUNNER_VAULT_D1_DATABASE_ID: DATABASE_ID,
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.deepEqual(readFileSync(f.callsFile, 'utf8').trim().split('\n'), ['deploy'])
+    assert.equal(JSON.parse(readFileSync(f.generatedConfig, 'utf8')).d1_databases[0].database_id, DATABASE_ID)
+  } finally {
+    f.cleanup()
+  }
+})
 
 test('Workers Builds reuses its prebuilt owner binding, resolves D1, then deploys', () => {
   const f = makeDeployFixture()

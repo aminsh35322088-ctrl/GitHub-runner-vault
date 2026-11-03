@@ -268,7 +268,7 @@ Workers Builds runs the same build-time owner resolver. The deploy command reuse
 
 **Important — D1 permissions:** Cloudflare's automatically generated Workers Builds API token does not include D1 permissions by default. To let the helper discover/create D1 automatically, open **My Profile → API Tokens**, find the token selected in this Worker under **Settings → Builds → API token**, and add **Account → D1 Read** and **Account → D1 Edit**. Keep the user-scoped token selected for Workers Builds.
 
-Alternatively, create the D1 database in **Storage & databases → D1**, copy its UUID, and add `"database_id": "<UUID>"` to the `DB` entry in `app/wrangler.jsonc` in your repository. With a configured ID the deploy helper skips D1 list/create operations, so the default Build token does not need D1 permissions. The Deploy Button's resource provisioning path normally supplies the required D1 resource automatically.
+Alternatively, create the D1 database in **Storage & databases → D1**, then set its UUID as the `RUNNER_VAULT_D1_DATABASE_ID` Workers Builds build variable (or CLI environment variable). The deploy helper uses that deployment-specific value and skips D1 list/create operations, so the default Build token does not need D1 permissions. Keep the UUID out of the reusable repository config; without this variable, the helper discovers the named database or creates it when missing.
 
 ### 3. Wrangler CLI from a Git checkout
 
@@ -342,7 +342,8 @@ Everything below is optional. A normal deployment sets nothing; everything is co
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | vars / secrets | Optional override for the private GitHub sign-in App created through `/setup`. |
 | `RUNNER_REPOSITORY`, `RUNNER_REPOSITORY_ID`, `RUNNER_ALLOWED_REFS`, `RUNNER_ALLOWED_EVENTS`, `RUNNER_ALLOWED_WORKFLOW_REFS` | vars | Optional explicit static policy override. When absent, owner-verified OIDC bootstrap pins the first repository automatically. |
 | `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY` | secrets | Legacy explicit keys; both must be set to be used. |
-| `DB` | D1 binding | Provisioned by Deploy Button or the deploy helper. Auto-discovery/creation needs D1 Read/Edit on the Workers Builds token or Wrangler login; a configured `database_id` skips those API calls. |
+| `RUNNER_VAULT_D1_DATABASE_ID` | build var | Optional UUID of a pre-created D1 database; skips D1 list/create API calls. Never commit this deployment-specific value. |
+| `DB` | D1 binding | Provisioned by Deploy Button or the deploy helper. Auto-discovery/creation needs D1 Read/Edit on the Workers Builds token or Wrangler login. |
 
 ## Operations
 

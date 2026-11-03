@@ -724,7 +724,10 @@ describe('reading a value for use', () => {
 
     releaseFetch()
     const staleReport = await validation
-    expect(staleReport.status).toBe('invalid')
+    expect(staleReport).toMatchObject({
+      status: 'unavailable',
+      message: 'Credential changed during validation; the stale result was discarded. Run validation again.',
+    })
 
     const current = await getCredentialForOwner(db, id)
     expect(current).toMatchObject({

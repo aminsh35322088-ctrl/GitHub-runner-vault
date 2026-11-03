@@ -123,13 +123,16 @@ function ensureD1(sourceConfigPath, generatedConfigPath) {
     throw new Error('Worker config is missing the DB D1 binding or database_name')
   }
 
-  let databaseId = generatedEntry.database_id ?? (sourceD1 && /"database_id"\s*:\s*"([^"]+)"/.exec(sourceD1)?.[1])
+  // A deployment-specific ID may be supplied as a Workers Builds / CLI variable.
+  // Never commit one installation's D1 UUID into the reusable source template.
+  const configuredDatabaseId = process.env.RUNNER_VAULT_D1_DATABASE_ID?.trim()
+  let databaseId = generatedEntry.database_id ?? configuredDatabaseId ?? (sourceD1 && /"database_id"\s*:\s*"([^"]+)"/.exec(sourceD1)?.[1])
   if (!databaseId) {
     let databases
     try {
       databases = parseD1DatabaseList(runLocal('wrangler', ['d1', 'list', '--json'], { capture: true }))
     } catch (error) {
-      throw new Error('Cannot resolve the DB binding. Authenticate Wrangler and grant D1 Read/Edit, or pre-create the database and set its database_id in app/wrangler.jsonc. ' + error.message)
+      throw new Error('Cannot resolve the DB binding. Authenticate Wrangler and grant D1 Read/Edit, or pre-create the database and set RUNNER_VAULT_D1_DATABASE_ID. ' + error.message)
     }
 
     let match = databases.find((item) => item.name === databaseName)

@@ -420,7 +420,7 @@ async function recordValidationResult(
   now: number,
   durationMs: number,
   intervalMs: number,
-): Promise<void> {
+): Promise<boolean> {
   const legacyStatus = report.status === 'valid' ? 'valid'
     : report.status === 'invalid' ? 'invalid'
       : report.status === 'insufficient_permissions' ? 'insufficient_permissions' : 'not_tested'
@@ -459,7 +459,7 @@ async function recordValidationResult(
 
   // A stale result is not a validation event for the current credential. In
   // particular, do not emit misleading history rows or owner notifications.
-  if (!updated) return
+  if (!updated) return false
 
   // History deliberately stores report metadata only. The credential value is
   // never written to the history table, message, permissions, or telemetry.
@@ -524,6 +524,7 @@ async function recordValidationResult(
       credentialId: target.id, credentialName: target.name, now,
     })
   }
+  return true
 }
 
 async function validateTarget(
@@ -585,7 +586,18 @@ async function validateTarget(
     }
   }
 
-  await recordValidationResult(db, target, report, source, now, Date.now() - startedAt, intervalMs)
+  const recorded = await recordValidationResult(db, target, report, source, now, Date.now() - startedAt, intervalMs)
+  if (!recorded) {
+    return {
+      provider: target.service,
+      status: 'unavailable',
+      permissions: [],
+      permissionsComplete: false,
+      permissionSource: 'not-supported',
+      checkedAt: now,
+      message: 'Credential changed during validation; the stale result was discarded. Run validation again.',
+    }
+  }
   return report
 }
 
