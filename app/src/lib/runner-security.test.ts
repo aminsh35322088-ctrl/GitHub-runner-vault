@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'vitest'
 import { getDb } from 'db'
 import {
-  cachedJwksSource, GITHUB_OIDC_ISSUER, policyFromEnv, verifyGithubOidc, type JwksSource, type OidcPolicy,
+  cachedJwksSource, GITHUB_OIDC_ISSUER, policyFromEnv, verifyGithubOidc, type JwksSource, type OidcPolicy, resetOidcVerificationKeyCache,
 } from './oidc.ts'
 import {
-  deriveSessionKey, getRunnerRevokedBefore, issueRunnerSession, revokeRunnerSessions, SESSION_TTL_MS, verifyRunnerSession,
+  deriveSessionKey, getRunnerRevokedBefore, issueRunnerSession, revokeRunnerSessions, SESSION_TTL_MS, verifyRunnerSession, resetRunnerSessionKeyCache,
 } from './runner-session.ts'
 import { MAX_REQUEST_BODY, MAX_RESPONSE_BODY, redact, runProxy, secretForms, validateTarget } from './proxy.ts'
 
@@ -187,6 +187,17 @@ describe('GitHub OIDC verification', () => {
     expect((await verifyGithubOidc(await sign(privateKey, goodClaims()), policy, jwks, NOW)).ok).toBe(true)
   })
 
+  test('replaces a cached verification key when the same key id has new key material', async () => {
+    resetOidcVerificationKeyCache()
+    const first = await makeKeyPair()
+    const rotated = await makeKeyPair()
+    const firstToken = await sign(first.privateKey, goodClaims())
+    const rotatedToken = await sign(rotated.privateKey, goodClaims())
+    expect((await verifyGithubOidc(firstToken, policy, async () => ({ keys: [first.jwk] }), NOW)).ok).toBe(true)
+    expect((await verifyGithubOidc(rotatedToken, policy, async () => ({ keys: [rotated.jwk] }), NOW)).ok).toBe(true)
+    resetOidcVerificationKeyCache()
+  })
+
   test('JWKS outage fails closed', async () => {
     const { privateKey } = await makeKeyPair()
     const jwks: JwksSource = async () => { throw new Error('down') }
@@ -280,6 +291,19 @@ describe('runner sessions', () => {
   test('the signing secret must be long enough', async () => {
     await expect(deriveSessionKey('short')).rejects.toThrow()
     await expect(deriveSessionKey(undefined)).rejects.toThrow()
+  })
+
+  test('reuses the derived key per isolate and rotates when the secret changes', async () => {
+    resetRunnerSessionKeyCache()
+    const firstPromise = deriveSessionKey(SECRET_32)
+    expect(deriveSessionKey(SECRET_32)).toBe(firstPromise)
+    const first = await firstPromise
+    const rotatedSecret = SECRET_32 + '-rotated'
+    const rotated = await deriveSessionKey(rotatedSecret)
+    expect(rotated).not.toBe(first)
+    expect(deriveSessionKey(rotatedSecret)).toBeInstanceOf(Promise)
+    expect(await deriveSessionKey(rotatedSecret)).toBe(rotated)
+    resetRunnerSessionKeyCache()
   })
 })
 

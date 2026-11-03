@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
-import { parseArgs, parseHeaders, mapLocalProxyTarget } from './vault.mjs'
+import { parseArgs, parseHeaders, mapLocalProxyTarget, fetchWithTimeout } from './vault.mjs'
 
 const SECRET = 'must-never-appear-anywhere'
 
@@ -391,5 +391,34 @@ test('works when invoked through a symlink (how the runner installs it)', async 
   } finally {
     server.close()
     fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+
+test('Vault HTTP client requests abort on timeout and expose no URL or token details', async () => {
+  const server = http.createServer((_req, res) => {
+    setTimeout(() => {
+      if (!res.destroyed) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{}')
+      }
+    }, 500)
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const url = 'http://127.0.0.1:' + server.address().port + '/sensitive-path?token=' + SECRET
+  const started = Date.now()
+  try {
+    await assert.rejects(
+      fetchWithTimeout(url, { headers: { Authorization: 'Bearer ' + SECRET } }, 'Vault test request', 60),
+      (error) => {
+        assert.equal(error.message, 'Vault test request timed out')
+        assert.ok(!error.message.includes(SECRET))
+        assert.ok(!error.message.includes(url))
+        return true
+      },
+    )
+    assert.ok(Date.now() - started < 400, 'request should be aborted before the delayed server responds')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
   }
 })

@@ -111,6 +111,7 @@ export const credential = sqliteCore.sqliteTable('credential', {
 }, (table) => [
   sqliteCore.index('credential_status_idx').on(table.status),
   sqliteCore.index('credential_validation_due_idx').on(table.status, table.nextValidationAt),
+  sqliteCore.index('credential_runner_registry_idx').on(table.status, table.visible, table.name),
 ])
 
 export const enrollmentLink = sqliteCore.sqliteTable('enrollment_link', {
@@ -143,6 +144,10 @@ export const credentialAudit = sqliteCore.sqliteTable('credential_audit', {
 }, (table) => [
   sqliteCore.index('credential_audit_at_idx').on(table.at),
   sqliteCore.index('credential_audit_credential_idx').on(table.credentialId),
+  sqliteCore.index('credential_audit_credential_at_idx').on(table.credentialId, table.at),
+  sqliteCore.index('credential_audit_name_at_idx').on(table.credentialName, table.at),
+  sqliteCore.index('credential_audit_action_at_idx').on(table.action, table.at),
+  sqliteCore.index('credential_audit_action_name_at_idx').on(table.action, table.credentialName, table.at),
 ])
 
 export const vaultSetting = sqliteCore.sqliteTable('vault_setting', {

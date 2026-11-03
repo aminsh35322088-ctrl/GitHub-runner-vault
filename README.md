@@ -110,6 +110,19 @@ One flat registry; a credential has these properties:
 hiding, deleting or expiry takes effect on the very next request. A missing, hidden, disabled or expired credential all
 answer the same `unavailable` (no probing for hidden names).
 
+**Supported credential formats.** The current registry stores opaque single-line text values and presents them through
+owner-approved HTTPS API requests. The upstream auth formatter supports Authorization: Bearer, Authorization: Token,
+and raw/custom API-key headers. This works for personal access tokens, OAuth access tokens, GitHub App installation
+tokens and ordinary provider API keys when the provider accepts a compatible HTTP header. Validation is provider-adapter
+based and does not itself refresh or renew credentials.
+
+**Explicit limits.** Browser GitHub OAuth is only the Vault owner's dashboard sign-in. Provider Device Authorization,
+automatic OAuth refresh-token rotation, browser-cookie/session capture, multi-line SSH private-key or certificate storage,
+SSH-agent signing, TLS client-certificate delivery, and environment/file injection are not implemented. The database
+and runner contract are proxy-only; legacy inject rows are not usable. Do not register these unsupported values under
+a token label or assume that a successful save makes their lifecycle operational. They require distinct, reviewed delivery
+and key-handling designs rather than relaxing the single-line/header validation.
+
 **Encryption.** Values are AES-256-GCM encrypted with a 32-byte key derived (HKDF) from a random master key the vault
 generates on first use. The authenticated data binds each ciphertext to `credential:{id}:v{keyVersion}`, so a ciphertext
 copied to another row will not decrypt. See [Where the key lives](#where-the-key-lives) for the trade-off.

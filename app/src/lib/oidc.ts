@@ -95,16 +95,47 @@ export function cachedJwksSource(fetchFn: typeof fetch = fetch, now: () => numbe
   }
 }
 
-async function verifySignature(jwk: Jwk, signingInput: string, signature: Uint8Array<ArrayBuffer>): Promise<boolean> {
-  if (jwk.kty !== 'RSA' || typeof jwk.n !== 'string' || typeof jwk.e !== 'string') return false
-  const key = await crypto.subtle.importKey(
+const verificationKeys = new Map<string, { fingerprint: string; key: Promise<CryptoKey> }>()
+const MAX_CACHED_VERIFICATION_KEYS = 32
+
+async function importVerificationKey(jwk: Jwk): Promise<CryptoKey> {
+  const fingerprint = String(jwk.kty) + ':' + jwk.n + ':' + jwk.e
+  const cached = verificationKeys.get(jwk.kid)
+  if (cached?.fingerprint === fingerprint) {
+    verificationKeys.delete(jwk.kid)
+    verificationKeys.set(jwk.kid, cached)
+    return cached.key
+  }
+  let key: Promise<CryptoKey>
+  key = crypto.subtle.importKey(
     'jwk',
     { kty: 'RSA', n: jwk.n, e: jwk.e, alg: 'RS256', ext: true },
     { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
     false,
     ['verify'],
-  )
+  ).catch((error) => {
+    if (verificationKeys.get(jwk.kid)?.key === key) verificationKeys.delete(jwk.kid)
+    throw error
+  })
+  verificationKeys.delete(jwk.kid)
+  verificationKeys.set(jwk.kid, { fingerprint, key })
+  while (verificationKeys.size > MAX_CACHED_VERIFICATION_KEYS) {
+    const oldest = verificationKeys.keys().next().value
+    if (oldest === undefined) break
+    verificationKeys.delete(oldest)
+  }
+  return key
+}
+
+async function verifySignature(jwk: Jwk, signingInput: string, signature: Uint8Array<ArrayBuffer>): Promise<boolean> {
+  if (jwk.kty !== 'RSA' || typeof jwk.n !== 'string' || typeof jwk.e !== 'string') return false
+  const key = await importVerificationKey(jwk)
   return crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, signature, new TextEncoder().encode(signingInput))
+}
+
+/** Test helper; production key cache is naturally isolate-scoped. */
+export function resetOidcVerificationKeyCache() {
+  verificationKeys.clear()
 }
 
 export function sameRepository(a: string, b: string): boolean {

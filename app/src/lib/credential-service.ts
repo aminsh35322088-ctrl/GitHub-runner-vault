@@ -430,24 +430,29 @@ export async function getCredentialForOwner(db: Db, id: string) {
 
 /** What a runner (and through it, a model) may know. Only Active + Visible entries. */
 export async function listRegistryForRunner(db: Db, now: number) {
-  const rows = await db.select(METADATA_COLUMNS).from(schema.credential)
-    .where(orm.and(orm.eq(schema.credential.status, 'active'), orm.eq(schema.credential.visible, true)))
+  // Keep the runner hot path narrow: select only fields returned by the API,
+  // filter eligibility in D1, and preserve name ordering through its index.
+  // The encrypted value is referenced only by IS NOT NULL; it is never selected.
+  return db.select({
+    name: schema.credential.name,
+    service: schema.credential.service,
+    purpose: schema.credential.purpose,
+    lifetime: schema.credential.lifetime,
+    delivery: schema.credential.delivery,
+    validation: schema.credential.validation,
+    expiresAt: schema.credential.expiresAt,
+    externallyManaged: schema.credential.externallyManaged,
+  }).from(schema.credential)
+    .where(orm.and(
+      orm.eq(schema.credential.status, 'active'),
+      orm.eq(schema.credential.visible, true),
+      orm.or(orm.isNull(schema.credential.expiresAt), orm.gt(schema.credential.expiresAt, now)),
+      orm.or(
+        orm.eq(schema.credential.externallyManaged, true),
+        orm.isNotNull(schema.credential.valueEncrypted),
+      ),
+    ))
     .orderBy(schema.credential.name)
-  return rows
-    .filter((row) => availability({
-      status: row.status, visible: row.visible, expiresAt: row.expiresAt,
-      externallyManaged: row.externallyManaged, hasValue: Boolean(row.hasValue),
-    }, now).available)
-    .map((row) => ({
-      name: row.name,
-      service: row.service,
-      purpose: row.purpose,
-      lifetime: row.lifetime,
-      delivery: row.delivery,
-      validation: row.validation,
-      expiresAt: row.expiresAt,
-      externallyManaged: row.externallyManaged,
-    }))
 }
 
 // ── Owner: lifecycle changes ───────────────────────────────────────────

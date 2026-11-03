@@ -27,6 +27,27 @@ import { createServer } from 'node:http'
 
 const env = process.env
 
+const DEFAULT_REQUEST_TIMEOUT_MS = 8_000
+const MIN_REQUEST_TIMEOUT_MS = 100
+const MAX_REQUEST_TIMEOUT_MS = 30_000
+
+function requestTimeoutMs() {
+  const configured = Number(env.VAULT_REQUEST_TIMEOUT_MS)
+  return Number.isInteger(configured) && configured >= MIN_REQUEST_TIMEOUT_MS && configured <= MAX_REQUEST_TIMEOUT_MS
+    ? configured
+    : DEFAULT_REQUEST_TIMEOUT_MS
+}
+
+/** Bounded HTTP requests with sanitized errors; never include URLs or headers in failures. */
+export async function fetchWithTimeout(url, init = {}, label = 'Vault request', timeoutMs = requestTimeoutMs()) {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+  } catch (error) {
+    const timedOut = error && (error.name === 'TimeoutError' || error.name === 'AbortError')
+    throw new Error(timedOut ? label + ' timed out' : label + ' failed')
+  }
+}
+
 function die(message, code = 1) {
   process.stderr.write(`vault: ${message}\n`)
   process.exit(code)
@@ -96,7 +117,7 @@ async function getOidcToken(base) {
   const url = env.ACTIONS_ID_TOKEN_REQUEST_URL
   const bearer = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN
   if (!url || !bearer) die('no GitHub Actions OIDC variables; the job needs `permissions: id-token: write`')
-  const res = await fetch(`${url}${url.includes('?') ? '&' : '?'}audience=${encodeURIComponent(base)}`, {
+  const res = await fetchWithTimeout(`${url}${url.includes('?') ? '&' : '?'}audience=${encodeURIComponent(base)}`, {
     headers: { Authorization: `Bearer ${bearer}`, Accept: 'application/json' },
   })
   if (!res.ok) die(`could not get an OIDC token (HTTP ${res.status})`)
@@ -120,7 +141,7 @@ async function session(base) {
       return cached.token
     }
     const oidc = await getOidcToken(base)
-    const res = await fetch(`${base}/api/runner/session`, { method: 'POST', headers: { Authorization: `Bearer ${oidc}` } })
+    const res = await fetchWithTimeout(`${base}/api/runner/session`, { method: 'POST', headers: { Authorization: `Bearer ${oidc}` } })
     const body = await res.json().catch(() => ({}))
     if (!res.ok) die(`vault refused the session (${body.error ?? res.status})`)
     memorySession = body.token
@@ -133,7 +154,7 @@ async function session(base) {
 
 async function api(base, method, route, payload) {
   const token = await session(base)
-  const res = await fetch(`${base}${route}`, {
+  const res = await fetchWithTimeout(`${base}${route}`, {
     method,
     headers: { Authorization: `Bearer ${token}`, ...(payload ? { 'Content-Type': 'application/json' } : {}) },
     body: payload ? JSON.stringify(payload) : undefined,
