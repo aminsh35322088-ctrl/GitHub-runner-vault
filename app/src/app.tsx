@@ -25,13 +25,14 @@ import { Badge } from './components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './components/ui/table'
 import { TimeAgo } from './components/ui/time-ago'
 import { availability } from './lib/credential-policy.ts'
-import { getCredentialForOwner, listAudit, listCredentialsForOwner } from './lib/credential-service.ts'
-import { peekEnrollmentLink } from './lib/enrollment.ts'
+import { getCredentialForOwner, listAudit, listCredentialsForOwner, listPendingRegistrationRequestsForOwner } from './lib/credential-service.ts'
+import { listLatestRegistrationLinks, peekEnrollmentLink } from './lib/enrollment.ts'
 import { linkHost, readStoredDoc, type CredentialDoc } from './lib/credential-docs.ts'
 import { KeyRound, LayoutDashboard, Plus, ChartNoAxesCombined, ShieldCheck, Settings as SettingsIcon, ClipboardList, Workflow, LogOut, Activity, Clock3, CheckCircle2, AlertTriangle, ChevronRight, LockKeyhole, ArrowUpRight, Fingerprint, Search, Gauge, Globe } from 'lucide-react'
 import { getUsageAnalytics, listCredentialIntegrationMetadata, listNotifications, listCredentialValidationHistory, loadVaultPreferences, runScheduledCredentialValidation, unreadNotificationCount } from './lib/vault-observability.ts'
 import { SectionCard } from './components/ui/section-card.tsx'
 import { NotificationBell } from './components/notification-actions.tsx'
+import { AddExternalForm, CredentialControls, DismissRunnerRequestButton, RenewRegistrationLinkButton, RevokeSessionsButton } from './components/credential-actions.tsx'
 import { RunCredentialValidationButton } from './components/validation-actions.tsx'
 
 const themeScript = `(function(){var d=document.documentElement;var m=document.cookie.match(/(?:^|;\\s*)color-theme=(light|dark)(?:;|$)/);var t=m?m[1]:null;if(!t)t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(t==='dark')d.classList.add('dark');else d.classList.remove('dark')})()`
@@ -53,6 +54,7 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
       label: 'Workspace',
       items: [
         { href: '/vault', label: 'Overview', icon: LayoutDashboard },
+        { href: '/vault/requests', label: 'Runner requests', icon: ClipboardList },
         { href: '/vault/services', label: 'Provider catalog', icon: Plus },
         { href: '/vault/integrations', label: 'Integrations', icon: Workflow },
       ],
@@ -68,6 +70,7 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
   ]
   const mobileItems = [
     { href: '/vault', label: 'Overview', icon: LayoutDashboard },
+    { href: '/vault/requests', label: 'Requests', icon: ClipboardList },
     { href: '/vault/services', label: 'Add', icon: Plus },
     { href: '/vault/validation', label: 'Health', icon: ShieldCheck },
     { href: '/vault/analytics', label: 'Usage', icon: ChartNoAxesCombined },
@@ -197,7 +200,7 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
               </div>
 
               <nav aria-label="Mobile navigation" className="fixed inset-x-0 bottom-0 z-30 border-t border-border/80 bg-background/95 pb-[env(safe-area-inset-bottom)] shadow-[0_-10px_30px_-22px_rgba(0,0,0,.35)] backdrop-blur-xl lg:hidden">
-                <div className="mx-auto grid max-w-xl grid-cols-5 gap-1 px-2 pt-1.5">
+                <div className="mx-auto grid max-w-xl grid-cols-6 gap-1 px-2 pt-1.5">
                   {mobileItems.map((item) => {
                     const Icon = item.icon
                     const active = isActive(item.href)
@@ -524,6 +527,7 @@ export const app = new Spiceflow()
     const rows = await listCredentialsForOwner(db)
     const searchQuery = new URL(request.url).searchParams.get('q')?.trim().slice(0, 100) ?? ''
     const healthFilter = new URL(request.url).searchParams.get('health') ?? 'all'
+    const pendingRequestRows = rows.filter((row) => row.status === 'pending' && !row.hasValue && !row.externallyManaged)
     const registryRows = rows.filter((row) => {
       const query = searchQuery.toLowerCase()
       const matchesQuery = !query || row.name.toLowerCase().includes(query) || row.service.toLowerCase().includes(query)
@@ -537,13 +541,14 @@ export const app = new Spiceflow()
     const runnerPolicy = await loadRunnerPolicyInput(db)
     const runnerConfigured = runnerPolicy !== null || Boolean((env as unknown as VaultEnv).RUNNER_REPOSITORY)
     const runnerOwnerReady = Boolean(await loadOwnerId(db, vaultEnv()))
-    const validCount = rows.filter((row) => row.validationStatus === 'valid').length
-    const attentionCount = rows.filter((row) => ['invalid', 'expired', 'insufficient_permissions'].includes(row.validationStatus ?? '')).length
-    const reviewCount = Math.max(0, rows.length - validCount - attentionCount)
+    const healthRows = rows.filter((row) => row.status !== 'pending')
+    const validCount = healthRows.filter((row) => row.validationStatus === 'valid').length
+    const attentionCount = healthRows.filter((row) => ['invalid', 'expired', 'insufficient_permissions'].includes(row.validationStatus ?? '')).length
+    const reviewCount = Math.max(0, healthRows.length - validCount - attentionCount)
     const preferences = await loadVaultPreferences(db)
     const recentChecks = await listCredentialValidationHistory(db, 6)
-    const percent = (count: number) => rows.length ? Math.round(count / rows.length * 100) : 0
-    const segmentPercent = (count: number) => rows.length ? count / rows.length * 100 : 0
+    const percent = (count: number) => healthRows.length ? Math.round(count / healthRows.length * 100) : 0
+    const segmentPercent = (count: number) => healthRows.length ? count / healthRows.length * 100 : 0
 
     return (
       <div className="mx-auto w-full min-w-0 max-w-[1360px] space-y-7 sm:space-y-8">
@@ -563,10 +568,31 @@ export const app = new Spiceflow()
           </div>
         </div>
 
+        {pendingRequestRows.length > 0 && (
+          <SectionCard
+            title="Runner requests waiting for you"
+            description="Approved Runners have asked for credentials that are not registered yet."
+            icon={<ClipboardList className="size-[18px]" />}
+            action={<a href="/vault/requests" className="inline-flex min-h-8 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-primary hover:bg-primary/5">Review requests <ArrowUpRight className="size-3.5" /></a>}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-2xl font-semibold tabular-nums">{pendingRequestRows.length}</p>
+                <p className="mt-1 text-xs text-muted-foreground">Pending owner approvals · secrets not yet stored</p>
+              </div>
+              <a href="/vault/requests" className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-primary px-4 text-xs font-semibold text-primary-foreground"><ClipboardList className="size-3.5" /> Open request inbox</a>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {pendingRequestRows.slice(0, 4).map((row) => <a key={row.id} href="/vault/requests" className="max-w-full rounded-lg border border-border px-3 py-2 text-xs hover:bg-muted"><span className="break-all font-mono font-semibold">{row.name}</span><span className="ml-2 text-muted-foreground">{row.service}</span></a>)}
+              {pendingRequestRows.length > 4 && <span className="self-center text-xs text-muted-foreground">+{pendingRequestRows.length - 4} more</span>}
+            </div>
+          </SectionCard>
+        )}
+
         <section aria-label="Credential summary" className="grid grid-cols-2 gap-3 xl:grid-cols-4">
           {[
             { label: 'Total credentials', value: rows.length, note: rows.filter((row) => row.status === 'active').length + ' active', icon: KeyRound, tone: 'bg-slate-500/10 text-slate-600 dark:text-slate-300' },
-            { label: 'Verified', value: validCount, note: rows.length ? percent(validCount) + '% of your registry' : 'No credentials yet', icon: CheckCircle2, tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' },
+            { label: 'Verified', value: validCount, note: healthRows.length ? percent(validCount) + '% of stored credentials' : 'No stored credentials yet', icon: CheckCircle2, tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' },
             { label: 'Needs attention', value: attentionCount, note: attentionCount ? 'Review required' : 'No blocking issues', icon: AlertTriangle, tone: attentionCount ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300' : 'bg-slate-500/10 text-slate-500 dark:text-slate-300' },
             { label: 'To review', value: reviewCount, note: 'Unverified or inconclusive', icon: Clock3, tone: 'bg-amber-500/10 text-amber-700 dark:text-amber-300' },
           ].map((metric) => {
@@ -587,14 +613,14 @@ export const app = new Spiceflow()
         <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
           <SectionCard
             title="Credential health"
-            description="Current verification state across the registry."
+            description="Current verification state across credentials that already have an owner-supplied value."
             icon={<ShieldCheck className="size-[18px]" />}
             action={<a href="/vault/validation" className="inline-flex min-h-8 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-primary transition hover:bg-primary/5">View details <ArrowUpRight className="size-3.5" /></a>}
           >
             <div className="space-y-5">
               <div className="flex items-end justify-between gap-3">
                 <div><p className="text-3xl font-semibold tracking-tight tabular-nums">{percent(validCount)}<span className="ml-0.5 text-base font-medium text-muted-foreground">%</span></p><p className="mt-1 text-xs text-muted-foreground">Verified credentials</p></div>
-                <p className="text-xs text-muted-foreground">{validCount} of {rows.length}</p>
+                <p className="text-xs text-muted-foreground">{validCount} of {healthRows.length} stored</p>
               </div>
               <div className="flex h-2.5 overflow-hidden rounded-full bg-muted" role="img" aria-label={validCount + ' verified, ' + attentionCount + ' need attention, ' + reviewCount + ' to review'}>
                 {validCount > 0 && <span className="h-full bg-emerald-500 transition-all" style={{ width: segmentPercent(validCount) + '%' }} />}
@@ -752,6 +778,143 @@ export const app = new Spiceflow()
     )
   })
 
+
+  // ── Runner credential request inbox ───────────────────────────────
+  .page('/vault/requests', async ({ request }) => {
+    await requirePageSession(request)
+    const db = getDb()
+    const now = Date.now()
+    const pending = await listPendingRegistrationRequestsForOwner(db)
+    const links = await listLatestRegistrationLinks(db, pending.map((row) => row.id))
+    const linkByCredential = new Map(links.map((link) => [link.credentialId, link]))
+    const requests = pending.map((row) => {
+      const link = linkByCredential.get(row.id) ?? null
+      const hasActiveLink = Boolean(link && link.usedAt === null && link.expiresAt > now)
+      const linkStatus = !link ? 'No link issued'
+        : link.usedAt !== null ? 'Used or replaced'
+          : link.expiresAt <= now ? 'Expired' : 'Active'
+      const adapter = row.doc ? serviceAdapterFromDocument(row.doc) : serviceAdapterFor(row.service)
+      return { ...row, requestedBy: link?.requestedBy ?? 'Runner identity unavailable', requestedAt: link?.createdAt ?? row.createdAt, linkExpiresAt: link?.expiresAt ?? null, hasActiveLink, linkStatus, apiBaseUrl: adapter?.apiBaseUrl ?? null }
+    })
+
+    return (
+      <div className="mx-auto w-full min-w-0 max-w-[1120px] space-y-6 sm:space-y-7">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="min-w-0">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Workspace <span className="mx-1.5 text-muted-foreground/50">/</span> Intake</p>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-[2rem]">Runner requests</h1>
+            <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-muted-foreground">Review credentials requested by an approved Runner. The model can propose metadata and documentation, but only you can provide and activate the secret.</p>
+          </div>
+          <Badge variant="outline" className="min-h-8 px-3">{requests.length} awaiting owner</Badge>
+        </div>
+
+        <section className="grid grid-cols-2 gap-3 sm:grid-cols-3" aria-label="Request summary">
+          <article className="rounded-2xl border border-border bg-card p-4 sm:p-5">
+            <p className="text-xs font-medium text-muted-foreground">Awaiting owner</p>
+            <p className="mt-3 text-3xl font-semibold tracking-tight tabular-nums">{requests.length}</p>
+            <p className="mt-1.5 text-[11px] text-muted-foreground">Pending credentials</p>
+          </article>
+          <article className="rounded-2xl border border-border bg-card p-4 sm:p-5">
+            <p className="text-xs font-medium text-muted-foreground">Active setup links</p>
+            <p className="mt-3 text-3xl font-semibold tracking-tight tabular-nums">{requests.filter((item) => item.hasActiveLink).length}</p>
+            <p className="mt-1.5 text-[11px] text-muted-foreground">Single-use · 15 minutes</p>
+          </article>
+          <article className="col-span-2 rounded-2xl border border-border bg-muted/20 p-4 sm:col-span-1 sm:p-5">
+            <p className="text-xs font-medium text-muted-foreground">Owner control</p>
+            <p className="mt-3 text-sm font-semibold">Secrets stay owner-only</p>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">Runner requests cannot set API hosts, authentication rules or the token value.</p>
+          </article>
+        </section>
+
+        {requests.length === 0 ? (
+          <section className="grid justify-items-center rounded-2xl border border-dashed border-border bg-card px-5 py-12 text-center">
+            <span className="grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary"><ClipboardList className="size-5" /></span>
+            <h2 className="mt-4 text-sm font-semibold">No pending Runner requests</h2>
+            <p className="mt-1.5 max-w-sm text-xs leading-relaxed text-muted-foreground">When an approved Runner needs a credential that is not in the Vault, its request will appear here and trigger a notification.</p>
+            <a href="/vault" className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-xl border border-border bg-background px-4 text-xs font-semibold hover:bg-muted">Back to overview</a>
+          </section>
+        ) : (
+          <div className="space-y-4">
+            {requests.map((item) => (
+              <article key={item.id} className="min-w-0 overflow-hidden rounded-2xl border border-border bg-card">
+                <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border/80 px-4 py-4 sm:px-5">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="break-all font-mono text-sm font-semibold">{item.name}</h2>
+                      <Badge variant="outline">Pending</Badge>
+                    </div>
+                    <p className="mt-1 text-sm text-muted-foreground">{item.service}</p>
+                  </div>
+                  <span className={cn('rounded-full border px-2.5 py-1 text-[11px] font-medium', item.hasActiveLink ? 'border-primary/20 bg-primary/5 text-primary' : item.linkStatus === 'No link issued' ? 'border-border bg-muted/40 text-muted-foreground' : 'border-warning/30 bg-warning/5 text-warning')}>
+                    Setup link · {item.linkStatus}
+                  </span>
+                </div>
+
+                <div className="grid gap-4 p-4 sm:grid-cols-[minmax(0,1fr)_17rem] sm:p-5">
+                  <div className="min-w-0 space-y-4">
+                    <dl className="grid gap-3 sm:grid-cols-2">
+                      <div className="min-w-0">
+                        <dt className="text-[11px] font-medium text-muted-foreground">Requested by</dt>
+                        <dd className="mt-1 break-all font-mono text-xs">{item.requestedBy}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-[11px] font-medium text-muted-foreground">Request received</dt>
+                        <dd className="mt-1 text-xs"><TimeAgo ts={item.requestedAt} /></dd>
+                      </div>
+                      <div className="min-w-0">
+                        <dt className="text-[11px] font-medium text-muted-foreground">Requested task</dt>
+                        <dd className="mt-1 break-words text-sm">{item.doc?.task ?? item.purpose}</dd>
+                      </div>
+                      <div className="min-w-0">
+                        <dt className="text-[11px] font-medium text-muted-foreground">Vault service purpose</dt>
+                        <dd className="mt-1 break-words text-xs text-muted-foreground">{item.purpose}</dd>
+                      </div>
+                      <div className="min-w-0">
+                        <dt className="text-[11px] font-medium text-muted-foreground">Link expiry</dt>
+                        <dd className="mt-1 text-xs">{item.linkExpiresAt ? item.linkStatus === 'Active' ? <TimeAgo ts={item.linkExpiresAt} /> : item.linkStatus === 'Expired' ? `Expired ${new Date(item.linkExpiresAt).toLocaleString()}` : item.linkStatus : 'Not issued yet'}</dd>
+                      </div>
+                    </dl>
+
+                    {item.apiBaseUrl && (
+                      <div className="rounded-xl border border-border bg-muted/20 p-3">
+                        <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Reviewed API destination</p>
+                        <p className="mt-1 break-all font-mono text-xs">{item.apiBaseUrl}</p>
+                      </div>
+                    )}
+
+                    {item.doc && (
+                      <details className="rounded-xl border border-border">
+                        <summary className="cursor-pointer px-3.5 py-3 text-xs font-semibold">Review model-supplied setup documentation</summary>
+                        <div className="border-t border-border p-3">
+                          <DocView doc={item.doc} />
+                        </div>
+                      </details>
+                    )}
+                  </div>
+
+                  <aside className="flex min-w-0 flex-col justify-between gap-4 rounded-xl border border-border bg-muted/15 p-3.5">
+                    <div>
+                      <p className="text-sm font-semibold">Owner action</p>
+                      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">Open the secure owner form, inspect the provider notes, then enter the secret and choose its access policy.</p>
+                    </div>
+                    <RenewRegistrationLinkButton id={item.id} hasActiveLink={item.hasActiveLink} />
+                    <a href={'/vault/credentials/' + item.id} className="inline-flex min-h-9 items-center justify-center rounded-lg px-3 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground">View credential record</a>
+                    <div className="border-t border-border pt-3">
+                      <p className="mb-2 text-[11px] leading-relaxed text-muted-foreground">Do not need this request? Dismiss it to remove the pending record and invalidate its owner links.</p>
+                      <DismissRunnerRequestButton id={item.id} name={item.name} />
+                    </div>
+                  </aside>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+
+        <p className="text-xs leading-relaxed text-muted-foreground">Request documentation is model-authored and treated as untrusted input. Verify provider details independently. The Vault enforces the reviewed API host and authentication policy when validating and storing a token.</p>
+      </div>
+    )
+  })
+
   // ── Owner-facing provider catalog and direct registration ─────────
   .page('/vault/services', async ({ request }) => {
     await requirePageSession(request)
@@ -804,7 +967,6 @@ export const app = new Spiceflow()
     if (!c) return <Message title="Not found" text="No such credential." />
     const now = Date.now()
     const log = await listAudit(db, { credentialName: c.name, limit: 20 })
-    const { CredentialControls } = await import('./components/credential-actions.tsx')
     const { CredentialForm } = await import('./components/credential-form.tsx')
     return (
       <div className="mx-auto w-full min-w-0 max-w-[1120px] space-y-6">
@@ -1247,7 +1409,6 @@ export const app = new Spiceflow()
 
   .page('/vault/settings', async ({ request }) => {
     await requirePageSession(request)
-    const { RevokeSessionsButton, AddExternalForm } = await import('./components/credential-actions.tsx')
     const { VaultSettingsForm } = await import('./components/vault-settings-form.tsx')
     const db = getDb()
     const preferences = await loadVaultPreferences(db)

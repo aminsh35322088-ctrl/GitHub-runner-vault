@@ -109,7 +109,7 @@ export function NotificationBell({
                           {new Date(item.createdAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
                         </time>
                         <div className="flex items-center gap-2">
-                          {item.credentialId && <a href={'/vault/credentials/' + item.credentialId} className="inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline">{item.credentialName || 'Credential'}<ChevronRight className="size-3"/></a>}
+                          {item.credentialId && <a href={item.kind === 'credential_registration_requested' ? '/vault/requests' : '/vault/credentials/' + item.credentialId} className="inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline">{item.kind === 'credential_registration_requested' ? 'Review request' : item.credentialName || 'Credential'}<ChevronRight className="size-3"/></a>}
                           {!item.readAt && <button type="button" disabled={busy} onClick={() => void markOne(item.id)} aria-label="Mark notification read" className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"><Check className="size-3.5"/></button>}
                         </div>
                       </div>

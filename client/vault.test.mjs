@@ -20,6 +20,10 @@ function startStub() {
       if (req.url.startsWith('/oidc')) return json(200, { value: 'oidc-token-value' })
       if (req.url === '/api/runner/session') return json(200, { token: 'rs1.session.token', expiresAt: Date.now() + 1_800_000 })
       if (req.url === '/api/runner/registry') return json(200, { credentials: [{ name: 'CF_TOKEN', service: 'Cloudflare' }] })
+      if (req.url === '/api/runner/registrations') return json(200, {
+        link: `http://localhost:${server.address().port}/vault/register/lnk_${'a'.repeat(43)}`,
+        expiresAt: Date.now() + 15 * 60_000,
+      })
       if (req.url === '/api/runner/use') {
         const body = JSON.parse(raw)
         if (body.name === 'MISSING') return json(404, { error: 'unavailable' })
@@ -59,6 +63,52 @@ test('local API proxy preserves provider base paths without allowing an absolute
   assert.throws(() => mapLocalProxyTarget('http://api.northflank.com/v1', '/projects'))
   assert.throws(() => mapLocalProxyTarget('https://user:pass@api.northflank.com/v1', '/projects'))
   assert.throws(() => mapLocalProxyTarget('https://api.northflank.com:8443/v1', '/projects'))
+})
+
+test('request shows the owner inbox and one-time registration form', async () => {
+  const { server, seen, port } = await startStub()
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-request-e2e-'))
+  const docPath = path.join(dir, 'service-doc.json')
+  fs.writeFileSync(docPath, JSON.stringify({
+    overview: 'Deploy a Worker',
+    task: 'Deploy a Worker',
+    token_type: 'API token',
+    creation_steps: [],
+    required_permissions: [],
+    unnecessary_permissions: [],
+    security_notes: [],
+    expiration_guidance: [],
+    official_documentation_links: [],
+    verification: 'unverified',
+    unverified_note: 'Not yet checked',
+  }))
+  const env = {
+    VAULT_URL: `http://localhost:${port}`,
+    ACTIONS_ID_TOKEN_REQUEST_URL: `http://127.0.0.1:${port}/oidc`,
+    ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'req-token',
+    VAULT_SESSION_FILE: path.join(dir, 'session.json'),
+  }
+  try {
+    const result = await run(['request', '--name', 'CF_NEW_TOKEN', '--service', 'Cloudflare', '--doc', docPath], env)
+    assert.equal(result.code, 0, result.stderr)
+    assert.match(result.stdout, /Credential request created: CF_NEW_TOKEN \(Cloudflare\)/)
+    assert.match(result.stdout, new RegExp(`Owner inbox: http://localhost:${port}/vault/requests`))
+    assert.match(result.stdout, /One-time owner form .*works once/)
+    assert.match(result.stdout, new RegExp(`http://localhost:${port}/vault/register/lnk_${'a'.repeat(43)}`))
+    const request = seen.find((entry) => entry.url === '/api/runner/registrations')
+    assert.ok(request)
+    assert.equal(request.method, 'POST')
+    assert.equal(request.auth, 'Bearer rs1.session.token')
+    assert.deepEqual(JSON.parse(request.body), {
+      name: 'CF_NEW_TOKEN', service: 'Cloudflare', doc: JSON.parse(fs.readFileSync(docPath, 'utf8')),
+    })
+    assert.equal(seen.filter((entry) => entry.url === '/api/runner/session').length, 1)
+    assert.ok(!result.stdout.includes(SECRET))
+    assert.ok(!result.stderr.includes(SECRET))
+  } finally {
+    server.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('serve runs a Northflank loopback bridge without forwarding a CLI placeholder as a secret', async () => {
@@ -120,7 +170,16 @@ test('serve runs a Northflank loopback bridge without forwarding a CLI placehold
   child.stdout.on('data', (chunk) => {
     stdout += chunk.toString()
     const match = stdout.match(/Listening only on 127\.0\.0\.1:(\d+)/)
-    if (match && stdout.includes('NF_API_BASE_URL') && !port) { port = Number(match[1]); resolveReady() }
+    if (
+      match
+      && stdout.includes('Use: export NF_API_BASE_URL=')
+      && stdout.includes('export NF_API_TOKEN="vault-local-placeholder"')
+      && stdout.includes('Then run: nf')
+      && !port
+    ) {
+      port = Number(match[1])
+      resolveReady()
+    }
   })
   child.stderr.on('data', (chunk) => { stderr += chunk.toString() })
   const close = new Promise((resolve) => child.once('close', resolve))

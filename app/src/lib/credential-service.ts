@@ -103,6 +103,53 @@ export async function requestRegistration(db: Db, req: RegistrationRequest): Pro
   return { ok: true, value: { credentialId, link } }
 }
 
+/** Dismiss only an unfilled Runner request; active credentials are never eligible. */
+export async function dismissPendingRegistrationRequest(
+  db: Db,
+  credentialId: string,
+  now: number,
+): Promise<Result<{ name: string }>> {
+  const [row] = await db.delete(schema.credential).where(orm.and(
+    orm.eq(schema.credential.id, credentialId),
+    orm.eq(schema.credential.status, 'pending'),
+    orm.eq(schema.credential.externallyManaged, false),
+    orm.isNull(schema.credential.valueEncrypted),
+  )).returning({ id: schema.credential.id, name: schema.credential.name })
+  if (!row) return { ok: false, error: 'not_found' }
+  await audit(db, {
+    action: 'registration_request_dismissed', actor: 'owner', credentialId: row.id,
+    credentialName: row.name, result: 'ok', now,
+  })
+  return { ok: true, value: { name: row.name } }
+}
+
+/** The owner can reissue a link for a still-pending request after the original expires. */
+export async function renewRegistrationLink(
+  db: Db,
+  credentialId: string,
+  requestedBy: string,
+  now: number,
+): Promise<Result<{ credentialId: string; name: string; link: CreatedLink }>> {
+  const [row] = await db.select({
+    id: schema.credential.id,
+    name: schema.credential.name,
+    status: schema.credential.status,
+    externallyManaged: schema.credential.externallyManaged,
+    hasValue: orm.sql<number>`(${schema.credential.valueEncrypted} IS NOT NULL)`,
+  }).from(schema.credential).where(orm.eq(schema.credential.id, credentialId)).limit(1)
+  if (!row || row.status !== 'pending' || row.externallyManaged || Boolean(row.hasValue)) {
+    return { ok: false, error: 'not_found' }
+  }
+  const link = await createEnrollmentLink(db, {
+    credentialId: row.id, kind: 'register', requestedBy, now,
+  })
+  await audit(db, {
+    action: 'registration_link_renewed', actor: requestedBy, credentialId: row.id,
+    credentialName: row.name, result: 'ok', detail: `expires_at:${link.expiresAt}`, now,
+  })
+  return { ok: true, value: { credentialId: row.id, name: row.name, link } }
+}
+
 // ── Owner: create directly from the dashboard ──────────────────────────
 
 export async function createCredential(
@@ -258,6 +305,26 @@ const METADATA_COLUMNS = {
 export async function listCredentialsForOwner(db: Db) {
   const rows = await db.select(METADATA_COLUMNS).from(schema.credential).orderBy(schema.credential.name)
   return rows.map((row) => ({ ...row, hasValue: Boolean(row.hasValue), allowedHosts: readAllowedHosts(row.allowedHosts) }))
+}
+
+/** Pending owner requests in one metadata-only query; never selects encrypted value columns. */
+export async function listPendingRegistrationRequestsForOwner(db: Db) {
+  const rows = await db.select({
+    ...METADATA_COLUMNS,
+    docJson: schema.credential.docJson,
+  }).from(schema.credential)
+    .where(orm.and(
+      orm.eq(schema.credential.status, 'pending'),
+      orm.eq(schema.credential.externallyManaged, false),
+      orm.isNull(schema.credential.valueEncrypted),
+    ))
+    .orderBy(schema.credential.name)
+  return rows.map((row) => ({
+    ...row,
+    hasValue: Boolean(row.hasValue),
+    allowedHosts: readAllowedHosts(row.allowedHosts),
+    doc: readStoredDoc(row.docJson),
+  }))
 }
 
 export async function getCredentialForOwner(db: Db, id: string) {

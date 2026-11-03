@@ -3,8 +3,8 @@
 //
 //   vault list                                  credentials this runner may use (metadata only)
 //   vault request --name N --service S --doc doc.json
-//                                               ask the owner to register a credential; prints a
-//                                               one-time link for the owner. Prints no secret.
+//                                               ask the owner to register a credential; prints the
+//                                               owner inbox and one-time link. Prints no secret.
 //   vault use NAME METHOD URL [--purpose P] [--header 'K: V']... [--data BODY | --data-file F]
 //                                               make an HTTPS call with the stored credential.
 //                                               The Worker adds the token; it is never returned.
@@ -358,7 +358,9 @@ async function main() {
     try { doc = JSON.parse(fs.readFileSync(flags.doc, 'utf8')) } catch { die('--doc must be a JSON file') }
     const { status, body } = await api(base, 'POST', '/api/runner/registrations', { name: flags.name, service: flags.service, doc })
     if (status !== 200) die(`registration refused (${body.error}${body.detail ? `: ${body.detail}` : ''})`)
-    console.log(`Give this one-time link to the owner (expires ${new Date(body.expiresAt).toISOString()}):\n${body.link}`)
+    console.log(`Credential request created: ${flags.name} (${flags.service})`)
+    console.log(`Owner inbox: ${base}/vault/requests`)
+    console.log(`One-time owner form (expires ${new Date(body.expiresAt).toISOString()}, works once):\n${body.link}`)
     return
   }
 

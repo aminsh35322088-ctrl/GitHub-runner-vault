@@ -3,12 +3,12 @@ import { getDb, schema } from 'db'
 import * as orm from 'drizzle-orm'
 import { importEncryptionKey } from './credential-crypto.ts'
 import {
-  createCredential, deleteCredential, getCredentialForOwner, listCredentialsForOwner, listRegistryForRunner,
-  readCredentialValue, registerExternallyManaged, requestRegistration, setEnabled, setVisibility,
+  createCredential, deleteCredential, dismissPendingRegistrationRequest, getCredentialForOwner, listCredentialsForOwner, listPendingRegistrationRequestsForOwner, listRegistryForRunner,
+  readCredentialValue, registerExternallyManaged, renewRegistrationLink, requestRegistration, setEnabled, setVisibility,
   storeCredentialValue, MAX_TEMPORARY_MS,
 } from './credential-service.ts'
-import { consumeEnrollmentLink, peekEnrollmentLink } from './enrollment.ts'
-import { getUsageAnalytics, listCredentialValidationHistory, listNotifications, listRunnerIntegrationMetadata, recordCredentialUsage, runScheduledCredentialValidation, validateStoredCredentialNow } from './vault-observability.ts'
+import { consumeEnrollmentLink, listLatestRegistrationLinks, peekEnrollmentLink } from './enrollment.ts'
+import { createNotification, getUsageAnalytics, listCredentialValidationHistory, listNotifications, listRunnerIntegrationMetadata, listUnreadRegistrationNotificationIds, markNotificationIdsRead, markRegistrationNotificationsRead, recordCredentialUsage, runScheduledCredentialValidation, validateStoredCredentialNow } from './vault-observability.ts'
 
 const KEY_B64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
 const SECRET = 'cfut_SUPERSECRETVALUE_123456789'
@@ -54,6 +54,37 @@ async function activeCredential(opts: Partial<Parameters<typeof storeCredentialV
 }
 
 describe('registration requests', () => {
+  test('resolving a request marks only that request notification as read', async () => {
+    const { db, now } = await setup()
+    const first = await requestRegistration(db, { name: uniqueName(), service: 'Cloudflare', doc, requestedBy: 'runner:first', now })
+    const second = await requestRegistration(db, { name: uniqueName(), service: 'Cloudflare', doc, requestedBy: 'runner:second', now })
+    if (!first.ok || !second.ok) throw new Error('unexpected registration failure')
+    const credentialId = first.value.credentialId
+    await createNotification(db, {
+      dedupeKey: 'registration:resolved:' + credentialId,
+      kind: 'credential_registration_requested', severity: 'info',
+      title: 'Runner requested a credential', message: 'Waiting for owner.',
+      credentialId, credentialName: 'REQUEST_TOKEN', now,
+    })
+    await createNotification(db, {
+      dedupeKey: 'other-event:' + credentialId,
+      kind: 'credential_validation_failed', severity: 'warning',
+      title: 'Validation failed', message: 'Review the token.',
+      credentialId, credentialName: 'REQUEST_TOKEN', now,
+    })
+    await createNotification(db, {
+      dedupeKey: 'registration:other-credential',
+      kind: 'credential_registration_requested', severity: 'info',
+      title: 'Runner requested a credential', message: 'Another request.',
+      credentialId: second.value.credentialId, credentialName: 'OTHER_TOKEN', now,
+    })
+    await markRegistrationNotificationsRead(db, credentialId, now + 1)
+    const rows = await db.select().from(schema.vaultNotification)
+    expect(rows.find((row) => row.dedupeKey === 'registration:resolved:' + credentialId)?.readAt).toBe(now + 1)
+    expect(rows.find((row) => row.dedupeKey === 'other-event:' + credentialId)?.readAt).toBeNull()
+    expect(rows.find((row) => row.dedupeKey === 'registration:other-credential')?.readAt).toBeNull()
+  })
+
   test('create a pending, hidden entry with docs and a one-time link', async () => {
     const { db, now } = await setup()
     const name = uniqueName()
@@ -67,6 +98,72 @@ describe('registration requests', () => {
     expect(await peekEnrollmentLink(db, result.value.link.token, now)).not.toBeNull()
     // A model-created entry is never visible to runners until the owner activates it.
     expect((await listRegistryForRunner(db, now)).some((c) => c.name === name)).toBe(false)
+    const inbox = await listPendingRegistrationRequestsForOwner(db)
+    expect(inbox.find((item) => item.id === result.value.credentialId)).toMatchObject({
+      name, status: 'pending', hasValue: false, doc: { task: 'Deploy a Worker' },
+    })
+    expect(JSON.stringify(inbox.find((item) => item.id === result.value.credentialId))).not.toContain(SECRET)
+  })
+
+  test('owner can renew a pending request link without exposing stored token hashes', async () => {
+    const { db, now } = await setup()
+    const name = uniqueName()
+    const requested = await requestRegistration(db, { name, service: 'Cloudflare', doc, requestedBy: 'runner:owner/repo', now })
+    if (!requested.ok) throw new Error('unexpected registration failure')
+    const renewed = await renewRegistrationLink(db, requested.value.credentialId, 'owner:manual-reissue', now + 1)
+    expect(renewed).toMatchObject({ ok: true, value: { credentialId: requested.value.credentialId, name } })
+    if (!renewed.ok) return
+    expect(await peekEnrollmentLink(db, requested.value.link.token, now + 1)).toBeNull()
+    expect(await peekEnrollmentLink(db, renewed.value.link.token, now + 1)).not.toBeNull()
+    const latest = await listLatestRegistrationLinks(db, [requested.value.credentialId])
+    expect(latest.find((row) => row.credentialId === requested.value.credentialId)).toMatchObject({
+      requestedBy: 'owner:manual-reissue', expiresAt: renewed.value.link.expiresAt, usedAt: null,
+    })
+    expect(JSON.stringify(latest)).not.toContain(renewed.value.link.token)
+    expect(JSON.stringify(latest)).not.toContain('tokenHash')
+    const events = await db.select().from(schema.credentialAudit).where(orm.eq(schema.credentialAudit.credentialId, requested.value.credentialId))
+    expect(events.map((event) => event.action)).toContain('registration_link_renewed')
+  })
+
+  test('owner can dismiss a pending request and invalidate every registration link', async () => {
+    const { db, now } = await setup()
+    const name = uniqueName()
+    const requested = await requestRegistration(db, { name, service: 'Cloudflare', doc, requestedBy: 'runner:owner/repo', now })
+    if (!requested.ok) throw new Error('unexpected registration failure')
+    await createNotification(db, {
+      dedupeKey: 'registration:dismiss-test:' + requested.value.credentialId,
+      kind: 'credential_registration_requested', severity: 'info',
+      title: 'Runner requested a credential', message: 'Waiting for owner.',
+      credentialId: requested.value.credentialId, credentialName: name, now,
+    })
+    const notificationIds = await listUnreadRegistrationNotificationIds(db, requested.value.credentialId)
+    expect(notificationIds).toHaveLength(1)
+    const dismissed = await dismissPendingRegistrationRequest(db, requested.value.credentialId, now + 1)
+    expect(dismissed).toMatchObject({ ok: true, value: { name } })
+    expect(await getCredentialForOwner(db, requested.value.credentialId)).toBeNull()
+    expect(await peekEnrollmentLink(db, requested.value.link.token, now + 1)).toBeNull()
+    expect((await listPendingRegistrationRequestsForOwner(db)).some((row) => row.id === requested.value.credentialId)).toBe(false)
+    await markNotificationIdsRead(db, notificationIds, now + 1)
+    const [notification] = await db.select().from(schema.vaultNotification)
+      .where(orm.eq(schema.vaultNotification.id, notificationIds[0]!))
+    expect(notification).toMatchObject({ credentialId: null, readAt: now + 1 })
+    const events = await db.select().from(schema.credentialAudit).where(orm.eq(schema.credentialAudit.credentialId, requested.value.credentialId))
+    expect(events.map((event) => event.action)).toContain('registration_request_dismissed')
+  })
+
+  test('cannot dismiss a request after it has become an active credential', async () => {
+    const { db, now } = await setup()
+    const active = await activeCredential()
+    expect(await dismissPendingRegistrationRequest(db, active.id, now)).toMatchObject({ ok: false, error: 'not_found' })
+    expect(await getCredentialForOwner(db, active.id)).not.toBeNull()
+  })
+
+  test('cannot renew a request after it has become an active credential', async () => {
+    const { db, now } = await setup()
+    const active = await activeCredential()
+    expect(await renewRegistrationLink(db, active.id, 'owner:manual-reissue', now)).toMatchObject({ ok: false, error: 'not_found' })
+    expect((await listPendingRegistrationRequestsForOwner(db)).some((row) => row.id === active.id)).toBe(false)
+    expect(await listLatestRegistrationLinks(db, [])).toEqual([])
   })
 
   test.each([['lowercase'], ['1BAD'], ['A']])('rejects invalid name %s', async (name) => {
@@ -91,12 +188,15 @@ describe('registration requests', () => {
   test('a second request for a pending entry reuses it and supersedes the old link', async () => {
     const { db, now } = await setup()
     const name = uniqueName()
-    const a = await requestRegistration(db, { name, service: 's', purpose: 'p', doc, requestedBy: 'r', now })
-    const b = await requestRegistration(db, { name, service: 's', purpose: 'p2', doc, requestedBy: 'r', now })
+    const a = await requestRegistration(db, { name, service: 's', purpose: 'p', doc, requestedBy: 'runner:first', now })
+    const b = await requestRegistration(db, { name, service: 's', purpose: 'p2', doc, requestedBy: 'runner:second', now })
     if (!a.ok || !b.ok) throw new Error('unexpected')
     expect(b.value.credentialId).toBe(a.value.credentialId)
     expect(await peekEnrollmentLink(db, a.value.link.token, now)).toBeNull()
     expect(await peekEnrollmentLink(db, b.value.link.token, now)).not.toBeNull()
+    expect(await listLatestRegistrationLinks(db, [a.value.credentialId])).toMatchObject([
+      { credentialId: a.value.credentialId, requestedBy: 'runner:second', usedAt: null },
+    ])
   })
 
   test('a model cannot re-request an entry that already exists', async () => {

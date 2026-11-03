@@ -127,6 +127,36 @@ export async function markAllNotificationsRead(db: Db, now = Date.now()) {
     .where(orm.isNull(schema.vaultNotification.readAt))
 }
 
+/** Resolve only the in-panel alerts created for a specific Runner registration. */
+export async function markRegistrationNotificationsRead(db: Db, credentialId: string, now = Date.now()) {
+  await db.update(schema.vaultNotification).set({ readAt: now })
+    .where(orm.and(
+      orm.eq(schema.vaultNotification.credentialId, credentialId),
+      orm.eq(schema.vaultNotification.kind, 'credential_registration_requested'),
+      orm.isNull(schema.vaultNotification.readAt),
+    ))
+}
+
+/** Capture notification IDs before deleting a credential (the FK sets its ID to NULL). */
+export async function listUnreadRegistrationNotificationIds(db: Db, credentialId: string) {
+  const rows = await db.select({ id: schema.vaultNotification.id }).from(schema.vaultNotification)
+    .where(orm.and(
+      orm.eq(schema.vaultNotification.credentialId, credentialId),
+      orm.eq(schema.vaultNotification.kind, 'credential_registration_requested'),
+      orm.isNull(schema.vaultNotification.readAt),
+    ))
+  return rows.map((row) => row.id)
+}
+
+export async function markNotificationIdsRead(db: Db, ids: string[], now = Date.now()) {
+  if (ids.length === 0) return
+  await db.update(schema.vaultNotification).set({ readAt: now })
+    .where(orm.and(
+      orm.inArray(schema.vaultNotification.id, ids),
+      orm.isNull(schema.vaultNotification.readAt),
+    ))
+}
+
 export async function recordCredentialUsage(
   db: Db,
   input: { credentialId: string; consumer: string; success: boolean; latencyMs: number; now: number },

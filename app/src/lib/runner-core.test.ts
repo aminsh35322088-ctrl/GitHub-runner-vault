@@ -118,9 +118,21 @@ describe('registry', () => {
 describe('registration requests', () => {
   test('return an owner link, nothing else', async () => {
     const d = await deps()
-    const res = await requestCredential(d, await sessionHeader(d), { name: uname(), service: 'Cloudflare', purpose: 'Deploy', doc })
+    const name = uname()
+    const res = await requestCredential(d, await sessionHeader(d), { name, service: 'Cloudflare', purpose: 'Deploy', doc })
     expect(res.status).toBe(200)
-    expect((res.body as { link: string }).link).toMatch(/^https:\/\/vault\.test\/vault\/register\/lnk_[A-Za-z0-9_-]{43}$/)
+    const link = (res.body as { link: string }).link
+    expect(link).toMatch(/^https:\/\/vault\.test\/vault\/register\/lnk_[A-Za-z0-9_-]{43}$/)
+    const [notification] = await d.db.select().from(schema.vaultNotification)
+      .where(orm.and(
+        orm.eq(schema.vaultNotification.kind, 'credential_registration_requested'),
+        orm.eq(schema.vaultNotification.credentialName, name),
+      ))
+    expect(notification).toMatchObject({
+      severity: 'info', title: 'Runner requested a credential', credentialName: name,
+    })
+    expect(notification?.message).toContain('waiting for owner review')
+    expect(JSON.stringify(notification)).not.toContain(link)
   })
 
   test('invalid input is rejected; existing names conflict', async () => {

@@ -76,16 +76,18 @@ See `SECURITY.md` for the short version.
  │   ◀ one-time owner link  │ ◀───────────── │   creates pending entry + link│
  └──────────────────────────┘                └───────────────▲───────────────┘
                                                              │ GitHub OAuth (owner only)
-                                              Owner browser ─┘  /vault  list · register · detail · audit · settings
+                                              Owner browser ─┘  /vault  requests · register · detail · audit · settings
 ```
 
 Registering a new credential:
 
 1. The agent finds the name missing in `list` and runs `request` with a setup document.
 2. The vault creates a **pending, hidden** entry and returns a **one-time link** (about 15 minutes, works once).
-3. The owner signs in with GitHub, reviews the model-authored setup notes and read-only API destination, then supplies only the secret token, lifetime/expiry and runner visibility. Hosts, auth header/scheme and validation behavior come from the verified provider adapter; no manual network or scope settings are exposed.
-4. Known providers can also be added directly from **Add credential**. Unknown providers are requested by the runner so the model can attach official documentation and a reviewed Service Adapter.
-5. The credential becomes **Active**; the agent sees minimal metadata in `list` and can call it through `use`. CLI integration metadata is returned separately and only when requested.
+3. The owner signs in with GitHub. A Vault notification and the Runner requests inbox show the pending request, runner identity, setup notes and read-only API destination. The owner reviews the request, then supplies only the secret token, lifetime/expiry and runner visibility. Hosts, auth header/scheme and validation behavior come from the verified provider adapter; no manual network or scope settings are exposed.
+4. If the original 15-minute link expires or is superseded, the owner can create a fresh one-time owner form from the request inbox. Reissuing invalidates every earlier unused link; the link hash remains the only value stored in the database.
+5. The owner can dismiss an unwanted pending request. Dismissal atomically removes only an unfilled pending credential, invalidates its links through the foreign-key cascade and records an append-only audit event; active credentials cannot be dismissed through this action.
+6. Known providers can also be added directly from **Add credential**. Unknown providers are requested by the runner so the model can attach official documentation and a reviewed Service Adapter.
+7. The credential becomes **Active**; the agent sees minimal metadata in `list` and can call it through `use`. CLI integration metadata is returned separately and only when requested.
 
 ## Credential model
 
@@ -207,19 +209,20 @@ should expect. The trusted runner workflow must request `permissions: id-token: 
 
 ## Owner UI
 
-The dashboard has a searchable provider catalog and a minimal credential form. The owner supplies only the secret, lifetime/expiry and visibility. The UI displays the verified API destination as read-only; hosts, auth header/scheme and validation behavior are derived from reviewed provider adapters and cannot be manually broadened from the form. For model-requested credentials, the read-only API origin and supported CLI consumer are shown in the setup notes. On supported providers, the UI can test a token and inspect identity/permissions where the provider exposes them. A timeout, rate limit or missing permission is never silently labelled an invalid token.
+The dashboard has a searchable provider catalog and a guided three-step credential form (Service/Request → Secret → Access). Runner-created credentials appear in a dedicated request inbox with automatic in-panel notifications, runner identity, requested task, setup documentation, API destination and explicit link state (active, expired, used/replaced or not issued). The inbox uses a bounded metadata-only query rather than fetching each request separately. The owner can reissue an expired one-time form without creating a duplicate credential, or dismiss an unwanted pending request with explicit confirmation and an audit record. When a request is approved or dismissed, its request notifications are marked read. The owner supplies only the secret, lifetime/expiry and visibility. The UI displays the verified API destination as read-only; hosts, auth header/scheme and validation behavior are derived from reviewed provider adapters and cannot be manually broadened from the form. For model-requested credentials, the read-only API origin and supported CLI consumer are shown in the setup notes. On supported providers, the UI can test a token and inspect identity/permissions where the provider exposes them. A timeout, rate limit or missing permission is never silently labelled an invalid token.
 
 Sign in at `https://<origin>/login` with the owner GitHub account.
 
 | Page | What it does |
 | --- | --- |
-| `/vault` | Dashboard overview, credential registry, validation summary and integration shortcuts. |
+| `/vault` | Dashboard overview, credential registry, validation summary, pending Runner request shortcut and integration shortcuts. |
+| `/vault/requests` | Owner inbox for pending Runner requests, runner identity metadata, model-authored setup notes, API destination, explicit link state, single-use link renewal and safe dismissal. |
 | `/vault/register/<link>` | One-time registration page with model-authored setup notes, read-only API destination and write-only secret field. |
 | `/vault/credentials/<id>` | Credential details, token validation report, enable/disable, show/hide, delete, replace value and recent activity. |
 | `/vault/validation` | Validation state and history, first-failure time, next check, exponential retry backoff and manual recheck. |
 | `/vault/analytics` | 30-day aggregate request counts, success/error rate, latency and usage by CLI/Runner consumer; no request bodies, headers or token values. |
 | `/vault/integrations` | Owner view of provider destinations and supported CLI adapters. |
-| Global header bell | Unread count, recent Vault events, mark-read and mark-all-read actions on every panel page. No separate notification page or Telegram delivery. |
+| Global header bell | Unread count, recent Vault events including new Runner credential requests, mark-read and mark-all-read actions on every panel page. No separate notification page or Telegram delivery. |
 | `/vault/audit` | Append-only audit log (database triggers block updates and deletes). |
 | `/vault/settings` | Validation interval, default lifetime/visibility, proxy timeout, analytics/notification retention, runner session revocation and metadata-only external entries. |
 

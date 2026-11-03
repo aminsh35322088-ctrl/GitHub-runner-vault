@@ -11,7 +11,7 @@ import { env } from 'cloudflare:workers'
 import { getDb, getRequestOrigin, getSession } from './db.ts'
 import { loadVaultKeys, type VaultEnv } from './lib/vault-config.ts'
 import {
-  createCredential, deleteCredential, getCredentialForOwner, registerExternallyManaged, setEnabled, setVisibility, storeCredentialValue, validateStoreInput,
+  createCredential, deleteCredential, dismissPendingRegistrationRequest, getCredentialForOwner, registerExternallyManaged, renewRegistrationLink, setEnabled, setVisibility, storeCredentialValue, validateStoreInput,
 } from './lib/credential-service.ts'
 import { consumeEnrollmentLink, peekEnrollmentLink, releaseEnrollmentLink } from './lib/enrollment.ts'
 import { revokeRunnerSessions } from './lib/runner-session.ts'
@@ -21,7 +21,7 @@ import { defaultPurposeForService, presetForService } from './lib/presets.ts'
 import { adapterHost, serviceAdapterFor, serviceAdapterFromDocument } from './lib/service-adapter.ts'
 import { validateProviderToken, type CredentialValidationReport } from './lib/credential-validation.ts'
 import { publicCredentialActionError } from './lib/public-action-error.ts'
-import { loadVaultPreferences, markAllNotificationsRead, markNotificationRead, saveVaultPreferences, validateStoredCredentialNow, type VaultPreferences } from './lib/vault-observability.ts'
+import { listUnreadRegistrationNotificationIds, loadVaultPreferences, markAllNotificationsRead, markNotificationIdsRead, markNotificationRead, markRegistrationNotificationsRead, saveVaultPreferences, validateStoredCredentialNow, type VaultPreferences } from './lib/vault-observability.ts'
 
 type CredentialActionResult<T> = { ok: true; value: T } | { ok: false; error: string }
 
@@ -202,12 +202,47 @@ export async function submitRegistrationAction(token: string, form: StoreForm) {
         await releaseEnrollmentLink(db, link.id, now)
         fail(result)
       }
+      try {
+        await markRegistrationNotificationsRead(db, info.credentialId, Date.now())
+      } catch {
+        // Notification cleanup is best-effort; a stored credential must still report success.
+        console.warn('[vault] registration notification could not be marked as resolved')
+      }
       return { name: result.value.name }
     } catch (error) {
       await releaseEnrollmentLink(db, link.id, now).catch(() => false)
       throw error
     }
   })
+}
+
+/** Dismiss a pending request without making active or filled credentials eligible. */
+export async function dismissRegistrationRequestAction(id: string) {
+  await requireOwner()
+  const credentialId = idSchema.parse(id)
+  const now = Date.now()
+  const db = getDb()
+  const notificationIds = await listUnreadRegistrationNotificationIds(db, credentialId)
+  const r = await dismissPendingRegistrationRequest(db, credentialId, now)
+  if (!r.ok) throw new Error('This Runner request is no longer pending. Refresh the request inbox.')
+  try {
+    // The credential FK is ON DELETE SET NULL, so resolve the captured IDs.
+    await markNotificationIdsRead(db, notificationIds, now)
+  } catch {
+    console.warn('[vault] dismissed registration notification could not be marked as resolved')
+  }
+  return { ok: true as const }
+}
+
+/** Reissue a one-time owner form for an unchanged pending Runner request. */
+export async function renewRegistrationLinkAction(id: string) {
+  await requireOwner()
+  const credentialId = idSchema.parse(id)
+  const now = Date.now()
+  const renewed = await renewRegistrationLink(getDb(), credentialId, 'owner:manual-reissue', now)
+  if (!renewed.ok) throw new Error('This Runner request is no longer pending. Refresh the request inbox.')
+  const url = new URL(`/vault/register/${renewed.value.link.token}`, getRequestOrigin(getActionRequest())).toString()
+  return { url, expiresAt: renewed.value.link.expiresAt }
 }
 
 /** Replace the value / rules of an existing credential (owner is signed in; no link needed). */

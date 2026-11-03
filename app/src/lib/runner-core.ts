@@ -8,7 +8,7 @@ import { verifyGithubOidc, type JwksSource, type OidcPolicy } from './oidc.ts'
 import { issueRunnerSession, verifyRunnerSession, getRunnerRevokedBefore, type RunnerSession } from './runner-session.ts'
 import { runProxy, type ProxyError } from './proxy.ts'
 import { BOOTSTRAP_WORKFLOW_FILE, DEFAULT_EVENTS, pinRunnerPolicy } from './runner-policy.ts'
-import { listRunnerIntegrationMetadata, recordCredentialUsage } from './vault-observability.ts'
+import { createNotification, listRunnerIntegrationMetadata, recordCredentialUsage } from './vault-observability.ts'
 
 type Db = ReturnType<typeof getDb>
 
@@ -130,6 +130,22 @@ export async function requestCredential(
     requestedBy: auth.session.sub, now: deps.now,
   })
   if (!result.ok) return fail(result.error === 'exists' ? 409 : 400, result.error, result.detail ? { detail: result.detail } : {})
+  try {
+    await createNotification(deps.db, {
+      dedupeKey: `registration-request:${result.value.credentialId}:${result.value.link.expiresAt}`,
+      kind: 'credential_registration_requested',
+      severity: 'info',
+      title: 'Runner requested a credential',
+      message: `${input.name} (${input.service}) is waiting for owner review and a secret value.`,
+      credentialId: result.value.credentialId,
+      credentialName: input.name,
+      now: deps.now,
+    })
+  } catch {
+    // The credential request and one-time link already exist. A notification
+    // write failure must not turn a successful registration into a lost response.
+    console.warn('[vault] registration notification could not be persisted')
+  }
   return {
     status: 200,
     body: {
