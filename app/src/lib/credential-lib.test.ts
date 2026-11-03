@@ -10,7 +10,7 @@ import {
   normalizeAllowedHosts, normalizeHost, readAllowedHosts, reservedName, validCredentialName,
 } from './credential-input.ts'
 import {
-  consumeEnrollmentLink, createEnrollmentLink, hashLinkToken, peekEnrollmentLink, releaseEnrollmentLink, MAX_LINK_TTL_MS,
+  consumeEnrollmentLink, createEnrollmentLink, discardEnrollmentLink, hashLinkToken, peekEnrollmentLink, releaseEnrollmentLink, MAX_LINK_TTL_MS,
 } from './enrollment.ts'
 
 const KEY_B64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
@@ -376,6 +376,16 @@ describe('enrollment links', () => {
     const b = await createEnrollmentLink(db, { credentialId: id, kind: 'register', requestedBy: '', now })
     expect(await peekEnrollmentLink(db, a.token, now)).toBeNull()
     expect(await peekEnrollmentLink(db, b.token, now)).not.toBeNull()
+  })
+
+  test('a stale just-issued link can be discarded without leaving its token hash behind', async () => {
+    const { db, id } = await makeCredential()
+    const now = Date.now()
+    const { token } = await createEnrollmentLink(db, { credentialId: id, kind: 'register', requestedBy: 'runner', now })
+    expect(await peekEnrollmentLink(db, token, now)).not.toBeNull()
+    await discardEnrollmentLink(db, token)
+    expect(await peekEnrollmentLink(db, token, now)).toBeNull()
+    expect(await db.select().from(schema.enrollmentLink).where(orm.eq(schema.enrollmentLink.credentialId, id))).toHaveLength(0)
   })
 
   test('only the hash of the token is stored', async () => {

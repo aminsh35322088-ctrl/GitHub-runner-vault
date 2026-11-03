@@ -784,7 +784,11 @@ export const app = new Spiceflow()
     await requirePageSession(request)
     const db = getDb()
     const now = Date.now()
-    const pending = await listPendingRegistrationRequestsForOwner(db)
+    const requestedPage = Number(new URL(request.url).searchParams.get('page') ?? '1')
+    const inbox = await listPendingRegistrationRequestsForOwner(db, {
+      page: Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1,
+    })
+    const pending = inbox.rows
     const links = await listLatestRegistrationLinks(db, pending.map((row) => row.id))
     const linkByCredential = new Map(links.map((link) => [link.credentialId, link]))
     const requests = pending.map((row) => {
@@ -794,7 +798,7 @@ export const app = new Spiceflow()
         : link.usedAt !== null ? 'Used or replaced'
           : link.expiresAt <= now ? 'Expired' : 'Active'
       const adapter = row.doc ? serviceAdapterFromDocument(row.doc) : serviceAdapterFor(row.service)
-      return { ...row, requestedBy: link?.requestedBy ?? 'Runner identity unavailable', requestedAt: link?.createdAt ?? row.createdAt, linkExpiresAt: link?.expiresAt ?? null, hasActiveLink, linkStatus, apiBaseUrl: adapter?.apiBaseUrl ?? null }
+      return { ...row, requestedBy: link?.requestedBy ?? 'Runner identity unavailable', requestedAt: row.updatedAt, linkExpiresAt: link?.expiresAt ?? null, hasActiveLink, linkStatus, apiBaseUrl: adapter?.apiBaseUrl ?? null }
     })
 
     return (
@@ -805,19 +809,19 @@ export const app = new Spiceflow()
             <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-[2rem]">Runner requests</h1>
             <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-muted-foreground">Review credentials requested by an approved Runner. The model can propose metadata and documentation, but only you can provide and activate the secret.</p>
           </div>
-          <Badge variant="outline" className="min-h-8 px-3">{requests.length} awaiting owner</Badge>
+          <Badge variant="outline" className="min-h-8 px-3">{inbox.total} awaiting owner</Badge>
         </div>
 
         <section className="grid grid-cols-2 gap-3 sm:grid-cols-3" aria-label="Request summary">
           <article className="rounded-2xl border border-border bg-card p-4 sm:p-5">
             <p className="text-xs font-medium text-muted-foreground">Awaiting owner</p>
-            <p className="mt-3 text-3xl font-semibold tracking-tight tabular-nums">{requests.length}</p>
-            <p className="mt-1.5 text-[11px] text-muted-foreground">Pending credentials</p>
+            <p className="mt-3 text-3xl font-semibold tracking-tight tabular-nums">{inbox.total}</p>
+            <p className="mt-1.5 text-[11px] text-muted-foreground">Pending credentials · all pages</p>
           </article>
           <article className="rounded-2xl border border-border bg-card p-4 sm:p-5">
             <p className="text-xs font-medium text-muted-foreground">Active setup links</p>
             <p className="mt-3 text-3xl font-semibold tracking-tight tabular-nums">{requests.filter((item) => item.hasActiveLink).length}</p>
-            <p className="mt-1.5 text-[11px] text-muted-foreground">Single-use · 15 minutes</p>
+            <p className="mt-1.5 text-[11px] text-muted-foreground">This page · single-use · 15 minutes</p>
           </article>
           <article className="col-span-2 rounded-2xl border border-border bg-muted/20 p-4 sm:col-span-1 sm:p-5">
             <p className="text-xs font-medium text-muted-foreground">Owner control</p>
@@ -826,7 +830,7 @@ export const app = new Spiceflow()
           </article>
         </section>
 
-        {requests.length === 0 ? (
+        {inbox.total === 0 ? (
           <section className="grid justify-items-center rounded-2xl border border-dashed border-border bg-card px-5 py-12 text-center">
             <span className="grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary"><ClipboardList className="size-5" /></span>
             <h2 className="mt-4 text-sm font-semibold">No pending Runner requests</h2>
@@ -907,6 +911,26 @@ export const app = new Spiceflow()
                 </div>
               </article>
             ))}
+            {inbox.totalPages > 1 && (
+              <nav aria-label="Runner request pages" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card px-4 py-3">
+                <p className="text-xs text-muted-foreground">
+                  Showing {(inbox.page - 1) * inbox.pageSize + 1}–{Math.min(inbox.page * inbox.pageSize, inbox.total)} of {inbox.total}
+                </p>
+                <div className="flex items-center gap-2">
+                  <a
+                    href={inbox.page > 1 ? `/vault/requests?page=${inbox.page - 1}` : undefined}
+                    aria-disabled={inbox.page <= 1}
+                    className={cn('inline-flex min-h-9 items-center rounded-lg border border-border px-3 text-xs font-medium', inbox.page <= 1 ? 'pointer-events-none opacity-40' : 'hover:bg-muted')}
+                  >Previous</a>
+                  <span className="min-w-20 text-center text-xs tabular-nums text-muted-foreground">Page {inbox.page} / {inbox.totalPages}</span>
+                  <a
+                    href={inbox.page < inbox.totalPages ? `/vault/requests?page=${inbox.page + 1}` : undefined}
+                    aria-disabled={inbox.page >= inbox.totalPages}
+                    className={cn('inline-flex min-h-9 items-center rounded-lg border border-border px-3 text-xs font-medium', inbox.page >= inbox.totalPages ? 'pointer-events-none opacity-40' : 'hover:bg-muted')}
+                  >Next</a>
+                </div>
+              </nav>
+            )}
           </div>
         )}
 

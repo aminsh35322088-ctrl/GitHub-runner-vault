@@ -99,10 +99,65 @@ describe('registration requests', () => {
     // A model-created entry is never visible to runners until the owner activates it.
     expect((await listRegistryForRunner(db, now)).some((c) => c.name === name)).toBe(false)
     const inbox = await listPendingRegistrationRequestsForOwner(db)
-    expect(inbox.find((item) => item.id === result.value.credentialId)).toMatchObject({
+    expect(inbox.rows.find((item) => item.id === result.value.credentialId)).toMatchObject({
       name, status: 'pending', hasValue: false, doc: { task: 'Deploy a Worker' },
     })
-    expect(JSON.stringify(inbox.find((item) => item.id === result.value.credentialId))).not.toContain(SECRET)
+    expect(JSON.stringify(inbox.rows.find((item) => item.id === result.value.credentialId))).not.toContain(SECRET)
+  })
+
+  test('pending request inbox is paginated, ordered and clamps out-of-range pages', async () => {
+    const { db, now } = await setup()
+    const baseline = await listPendingRegistrationRequestsForOwner(db, { page: 1, pageSize: 1 })
+    const ids: string[] = []
+    for (let index = 0; index < 3; index += 1) {
+      const result = await requestRegistration(db, {
+        name: uniqueName(), service: 'Cloudflare', doc,
+        requestedBy: `runner:page-${index}`, now: now + 1_000_000 + index,
+      })
+      if (!result.ok) throw new Error('unexpected registration failure')
+      ids.push(result.value.credentialId)
+    }
+    const first = await listPendingRegistrationRequestsForOwner(db, { page: 1, pageSize: 1 })
+    const second = await listPendingRegistrationRequestsForOwner(db, { page: 2, pageSize: 1 })
+    const third = await listPendingRegistrationRequestsForOwner(db, { page: 3, pageSize: 1 })
+    const clamped = await listPendingRegistrationRequestsForOwner(db, { page: 99, pageSize: 1 })
+    expect(first.total).toBeGreaterThanOrEqual(baseline.total + 3)
+    expect(first).toMatchObject({ page: 1, pageSize: 1 })
+    expect(second).toMatchObject({ total: first.total, page: 2, pageSize: 1 })
+    expect(third).toMatchObject({ total: first.total, page: 3, pageSize: 1 })
+    expect(clamped).toMatchObject({ total: first.total, page: first.totalPages, pageSize: 1, totalPages: first.total })
+    expect(first.rows).toHaveLength(1)
+    expect(second.rows).toHaveLength(1)
+    expect(third.rows).toHaveLength(1)
+    expect([first.rows[0]?.id, second.rows[0]?.id, third.rows[0]?.id]).toEqual([...ids].reverse())
+  })
+
+  test('registration stores a value only while the credential is still pending', async () => {
+    const { db, key, now } = await setup()
+    const name = uniqueName()
+    const requested = await requestRegistration(db, { name, service: 'Cloudflare', doc, requestedBy: 'runner:atomic-store', now })
+    if (!requested.ok) throw new Error('unexpected registration failure')
+    const stored = await storeCredentialValue(db, key, {
+      credentialId: requested.value.credentialId, value: SECRET,
+      lifetime: 'permanent', expiresAt: null, visible: true, delivery: 'proxy',
+      allowedHosts: ['api.cloudflare.com'], now,
+    }, { requirePending: true })
+    expect(stored).toMatchObject({ ok: true, value: { name } })
+    expect(await getCredentialForOwner(db, requested.value.credentialId)).toMatchObject({
+      status: 'active', hasValue: true, visible: true,
+    })
+  })
+
+  test('registration cannot overwrite an active credential after its link was checked', async () => {
+    const { db, key, now, id, name } = await activeCredential()
+    const stored = await storeCredentialValue(db, key, {
+      credentialId: id, value: 'cfut_DIFFERENT_SECRET_987654321',
+      lifetime: 'permanent', expiresAt: null, visible: true, delivery: 'proxy',
+      allowedHosts: ['api.cloudflare.com'], now,
+    }, { requirePending: true })
+    expect(stored).toMatchObject({ ok: false, error: 'not_found' })
+    const current = await readCredentialValue(db, key, name, now)
+    expect(current).toMatchObject({ ok: true, value: SECRET })
   })
 
   test('owner can renew a pending request link without exposing stored token hashes', async () => {
@@ -117,7 +172,7 @@ describe('registration requests', () => {
     expect(await peekEnrollmentLink(db, renewed.value.link.token, now + 1)).not.toBeNull()
     const latest = await listLatestRegistrationLinks(db, [requested.value.credentialId])
     expect(latest.find((row) => row.credentialId === requested.value.credentialId)).toMatchObject({
-      requestedBy: 'owner:manual-reissue', expiresAt: renewed.value.link.expiresAt, usedAt: null,
+      requestedBy: 'runner:owner/repo', expiresAt: renewed.value.link.expiresAt, usedAt: null,
     })
     expect(JSON.stringify(latest)).not.toContain(renewed.value.link.token)
     expect(JSON.stringify(latest)).not.toContain('tokenHash')
@@ -142,7 +197,7 @@ describe('registration requests', () => {
     expect(dismissed).toMatchObject({ ok: true, value: { name } })
     expect(await getCredentialForOwner(db, requested.value.credentialId)).toBeNull()
     expect(await peekEnrollmentLink(db, requested.value.link.token, now + 1)).toBeNull()
-    expect((await listPendingRegistrationRequestsForOwner(db)).some((row) => row.id === requested.value.credentialId)).toBe(false)
+    expect((await listPendingRegistrationRequestsForOwner(db)).rows.some((row) => row.id === requested.value.credentialId)).toBe(false)
     await markNotificationIdsRead(db, notificationIds, now + 1)
     const [notification] = await db.select().from(schema.vaultNotification)
       .where(orm.eq(schema.vaultNotification.id, notificationIds[0]!))
@@ -162,7 +217,7 @@ describe('registration requests', () => {
     const { db, now } = await setup()
     const active = await activeCredential()
     expect(await renewRegistrationLink(db, active.id, 'owner:manual-reissue', now)).toMatchObject({ ok: false, error: 'not_found' })
-    expect((await listPendingRegistrationRequestsForOwner(db)).some((row) => row.id === active.id)).toBe(false)
+    expect((await listPendingRegistrationRequestsForOwner(db)).rows.some((row) => row.id === active.id)).toBe(false)
     expect(await listLatestRegistrationLinks(db, [])).toEqual([])
   })
 
@@ -199,9 +254,45 @@ describe('registration requests', () => {
     ])
   })
 
-  test('a model cannot re-request an entry that already exists', async () => {
-    const { db, now, name } = await activeCredential()
-    expect(await requestRegistration(db, { name, service: 's', purpose: 'p', doc, requestedBy: 'r', now })).toMatchObject({ ok: false, error: 'exists' })
+  test('simultaneous first requests for one name never create duplicates or throw uniqueness errors', async () => {
+    const { db, now } = await setup()
+    const name = uniqueName()
+    const results = await Promise.allSettled(Array.from({ length: 8 }, (_, index) =>
+      requestRegistration(db, {
+        name, service: 'Cloudflare', purpose: 'Deploy', doc,
+        requestedBy: `runner:concurrent-${index}`, now: now + index,
+      }),
+    ))
+    expect(results.every((result) => result.status === 'fulfilled')).toBe(true)
+    const rows = await db.select().from(schema.credential).where(orm.eq(schema.credential.name, name))
+    expect(rows).toHaveLength(1)
+    const links = await db.select().from(schema.enrollmentLink)
+      .where(orm.and(orm.eq(schema.enrollmentLink.credentialId, rows[0]!.id), orm.eq(schema.enrollmentLink.kind, 'register')))
+    expect(links.filter((link) => link.usedAt === null)).toHaveLength(1)
+    const activeTokens = await Promise.all(results.flatMap((result) =>
+      result.status === 'fulfilled' && result.value.ok
+        ? [peekEnrollmentLink(db, result.value.value.link.token, now + 10)]
+        : [],
+    ))
+    expect(activeTokens.filter((link) => link !== null)).toHaveLength(1)
+  })
+
+  test('a model cannot re-request or change metadata on an active credential', async () => {
+    const { db, now, name, id } = await activeCredential()
+    const before = await getCredentialForOwner(db, id)
+    const result = await requestRegistration(db, {
+      name, service: 'Different provider', purpose: 'Different purpose',
+      doc: { ...doc, task: 'Overwrite an active credential' }, requestedBy: 'runner:late', now,
+    })
+    expect(result).toMatchObject({ ok: false, error: 'exists' })
+    const after = await getCredentialForOwner(db, id)
+    expect(after).toMatchObject({
+      service: before?.service,
+      purpose: before?.purpose,
+      doc: before?.doc,
+      status: 'active',
+      hasValue: true,
+    })
   })
 
   test('the registration request is audited by the worker', async () => {

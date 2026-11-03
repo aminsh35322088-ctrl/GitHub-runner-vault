@@ -83,6 +83,13 @@ export async function releaseEnrollmentLink(db: Db, id: string, consumedAt: numb
 }
 
 
+/** Remove a just-issued link that lost a race with an owner state transition. */
+export async function discardEnrollmentLink(db: Db, token: string): Promise<void> {
+  if (!TOKEN_SHAPE.test(token)) return
+  const tokenHash = await hashLinkToken(token)
+  await db.delete(schema.enrollmentLink).where(orm.eq(schema.enrollmentLink.tokenHash, tokenHash))
+}
+
 /** Look at a link without using it. Returns null for unknown, expired or used links. */
 export async function peekEnrollmentLink(db: Db, token: string, now: number): Promise<LinkInfo | null> {
   if (!TOKEN_SHAPE.test(token)) return null

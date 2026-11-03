@@ -197,7 +197,7 @@ export async function submitRegistrationAction(token: string, form: StoreForm) {
       throw new Error('This link is invalid, expired or already used')
     }
     try {
-      const result = await storeCredentialValue(db, encryptionKey, storeInput)
+      const result = await storeCredentialValue(db, encryptionKey, storeInput, { requirePending: true })
       if (!result.ok) {
         await releaseEnrollmentLink(db, link.id, now)
         fail(result)

@@ -94,6 +94,7 @@ function makeDeployFixture({ withBuild = false, databases = [{ name: 'runner-vau
   mkdirSync(bin, { recursive: true })
   mkdirSync(generated, { recursive: true })
   copyFileSync(deployScript, join(scripts, 'deploy.mjs'))
+  copyFileSync(new URL('./prepare-worker-entry.mjs', import.meta.url), join(scripts, 'prepare-worker-entry.mjs'))
 
   writeFileSync(join(app, 'wrangler.jsonc'), `{
   "name": "runner-vault",
@@ -104,8 +105,11 @@ function makeDeployFixture({ withBuild = false, databases = [{ name: 'runner-vau
 }
 `)
   if (!withBuild) {
+    writeFileSync(join(generated, 'index.js'), "export const helper = 'internal'; export default { fetch: () => new Response('ok') }")
     writeFileSync(join(generated, 'wrangler.json'), JSON.stringify({
       name: 'runner-vault',
+      main: 'index.js',
+      no_bundle: true,
       vars: { OWNER_GITHUB_ID: OWNER_ID },
       d1_databases: [{ binding: 'DB', database_name: 'runner-vault-db' }],
     }))
@@ -143,8 +147,11 @@ const fs = require('node:fs')
 const path = require('node:path')
 fs.appendFileSync(process.env.TEST_CALL_LOG, 'vite ' + process.argv.slice(2).join(' ') + '\\n')
 fs.mkdirSync('dist/rsc', { recursive: true })
+fs.writeFileSync(path.join('dist/rsc', 'index.js'), "export const helper = 'internal'; export default { fetch: () => new Response('ok') }")
 fs.writeFileSync(path.join('dist/rsc', 'wrangler.json'), JSON.stringify({
   name: 'runner-vault',
+  main: 'index.js',
+  no_bundle: true,
   vars: { OWNER_GITHUB_ID: process.env.TEST_OWNER_ID },
   d1_databases: [{ binding: 'DB', database_name: 'runner-vault-db' }]
 }))
@@ -192,6 +199,9 @@ test('Workers Builds reuses its prebuilt owner binding, resolves D1, then deploy
     const generated = JSON.parse(readFileSync(f.generatedConfig, 'utf8'))
     assert.equal(generated.vars.OWNER_GITHUB_ID, OWNER_ID)
     assert.equal(generated.d1_databases[0].database_id, DATABASE_ID)
+    assert.equal(generated.main, 'worker.js')
+    assert.equal('no_bundle' in generated, false)
+    assert.equal(readFileSync(join(f.app, 'dist', 'rsc', 'worker.js'), 'utf8'), "import worker from './index.js'\nexport default worker\n")
     assert.match(readFileSync(f.sourceConfig, 'utf8'), new RegExp(DATABASE_ID))
   } finally {
     f.cleanup()
@@ -208,6 +218,9 @@ test('Wrangler CLI path builds first, then resolves D1 and deploys', () => {
     const generated = JSON.parse(readFileSync(f.generatedConfig, 'utf8'))
     assert.equal(generated.vars.OWNER_GITHUB_ID, OWNER_ID)
     assert.equal(generated.d1_databases[0].database_id, DATABASE_ID)
+    assert.equal(generated.main, 'worker.js')
+    assert.equal('no_bundle' in generated, false)
+    assert.ok(existsSync(join(f.app, 'dist', 'rsc', 'worker.js')))
   } finally {
     f.cleanup()
   }

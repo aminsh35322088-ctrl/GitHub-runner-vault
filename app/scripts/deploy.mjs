@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { prepareWorkerEntrypoint } from './prepare-worker-entry.mjs'
 
 const isWindows = process.platform === 'win32'
 const binPath = (name) => resolve('node_modules', '.bin', name + (isWindows ? '.cmd' : ''))
@@ -170,6 +171,7 @@ export function deploy() {
     runLocal('vite', ['build'])
   }
 
+  prepareWorkerEntrypoint(resolve(process.cwd(), 'dist/rsc'))
   const generated = loadGeneratedConfig(generatedConfigPath)
   ensureOwner(generated)
   ensureD1(sourceConfigPath, generatedConfigPath)

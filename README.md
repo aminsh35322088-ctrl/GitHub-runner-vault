@@ -271,6 +271,10 @@ pnpm deploy
 
 `pnpm deploy` runs the Vite production build, derives the owner from GitHub `origin`, resolves or creates the configured D1 database, updates the generated Wrangler config with its ID, and finally runs `wrangler deploy`. Use this project command rather than invoking `wrangler deploy` directly, because the wrapper performs the owner and D1 bootstrap first.
 
+The Vite RSC bundle is kept at `dist/rsc/index.js` for its internal server-action and module graph imports. The build then generates a small `dist/rsc/worker.js` entry that exports only the default Worker handler and removes Wrangler's `no_bundle` setting. This is intentional: Workerd service entrypoints accept handlers, not arbitrary named RSC exports. Both Workers Builds (which reuses the prepared build) and the Wrangler CLI path run the same idempotent preparation step before deployment.
+
+The repository contains two pnpm workspaces: the root workspace used by CI and the `app` workspace used by Cloudflare Workers Builds. Both lockfiles are committed and must be kept in sync. The root workspace explicitly includes `app` and `app/db`; build output under `app/dist` is not a workspace package.
+
 When there is no GitHub origin (for example, a source archive), the build falls back to the authenticated GitHub CLI account:
 
 ```bash
