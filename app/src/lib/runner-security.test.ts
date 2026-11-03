@@ -204,6 +204,24 @@ describe('GitHub OIDC verification', () => {
     expect(await verifyGithubOidc(await sign(privateKey, goodClaims()), policy, jwks, NOW)).toEqual({ ok: false, error: 'signing keys unavailable' })
   })
 
+  test('bounds stale JWKS fallback during an outage, then fails closed', async () => {
+    let fetches = 0
+    let clock = 0
+    let unavailable = false
+    const source = cachedJwksSource((async () => {
+      fetches += 1
+      return unavailable ? new Response('', { status: 503 }) : Response.json({ keys: [] })
+    }) as typeof fetch, () => clock)
+
+    const initial = await source(false)
+    unavailable = true
+    clock = 11 * 60_000
+    expect(await source(false)).toEqual(initial)
+    clock = 16 * 60_000
+    await expect(source(false)).rejects.toThrow('could not fetch GitHub JWKS')
+    expect(fetches).toBe(3)
+  })
+
   test('the cached JWKS source limits refreshes to once a minute', async () => {
     let fetches = 0
     let clock = 0
