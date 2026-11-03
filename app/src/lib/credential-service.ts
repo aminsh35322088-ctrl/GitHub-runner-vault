@@ -130,7 +130,8 @@ export async function createCredential(
     authHeader: validated.value.style.header, authScheme: validated.value.style.scheme,
     externallyManaged: false, validation: input.validation ?? 'not_tested', validationDetails: input.validationDetails ?? null,
     validationStatus: input.validationStatus ?? input.validation ?? 'not_tested', lastValidatedAt: input.validationStatus ? input.now : null,
-    nextValidationAt: input.now + Math.max(1, Math.min(24, Math.trunc(input.validationIntervalHours ?? 6))) * 3600_000, docJson: '{}',
+    nextValidationAt: input.now + Math.max(1, Math.min(24, Math.trunc(input.validationIntervalHours ?? 6))) * 3600_000,
+    validationFailureCount: 0, firstValidationFailureAt: null, docJson: '{}',
     valueEncrypted: sealed.encrypted, valueIv: sealed.iv, keyVersion: KEY_VERSION,
     expiresAt: validated.value.expiresAt, createdAt: input.now, updatedAt: input.now,
   })
@@ -217,6 +218,8 @@ export async function storeCredentialValue(db: Db, key: CryptoKey, input: StoreI
     validationStatus: input.validationStatus ?? input.validation ?? 'not_tested',
     lastValidatedAt: input.validationStatus ? input.now : null,
     nextValidationAt: input.now + Math.max(1, Math.min(24, Math.trunc(input.validationIntervalHours ?? 6))) * 3600_000,
+    validationFailureCount: 0,
+    firstValidationFailureAt: null,
     updatedAt: input.now,
   }).where(orm.eq(schema.credential.id, row.id))
   await audit(db, { action: 'value_stored', actor: 'owner', credentialId: row.id, credentialName: row.name, result: 'ok', detail: input.lifetime + '/proxy', now: input.now })
@@ -243,6 +246,8 @@ const METADATA_COLUMNS = {
   validationStatus: schema.credential.validationStatus,
   lastValidatedAt: schema.credential.lastValidatedAt,
   nextValidationAt: schema.credential.nextValidationAt,
+  validationFailureCount: schema.credential.validationFailureCount,
+  firstValidationFailureAt: schema.credential.firstValidationFailureAt,
   expiresAt: schema.credential.expiresAt,
   lastUsedAt: schema.credential.lastUsedAt,
   createdAt: schema.credential.createdAt,

@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
 import { validateWithServiceAdapter } from './service-adapter-validation.ts'
-import type { ServiceAdapter } from './service-adapter.ts'
+import { serviceAdapterFor, serviceAdapterFromDocument, type ServiceAdapter } from './service-adapter.ts'
 
 const adapter: ServiceAdapter = {
   apiBaseUrl: 'https://api.example.com/v1',
@@ -18,6 +18,41 @@ const adapter: ServiceAdapter = {
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
+
+describe('built-in CLI adapter mappings', () => {
+  test('maps Cloudflare tokens to Wrangler through its documented API base URL override', () => {
+    const adapter = serviceAdapterFor('Cloudflare')
+    expect(adapter?.cliTools).toContainEqual(expect.objectContaining({
+      id: 'wrangler', binary: 'wrangler', integration: 'base-url-env',
+      variable: 'CLOUDFLARE_API_BASE_URL', tokenVariable: 'CLOUDFLARE_API_TOKEN',
+    }))
+  })
+
+  test('retains the documented Northflank token environment variable', () => {
+    const adapter = serviceAdapterFor('Northflank')
+    expect(adapter?.cliTools).toContainEqual(expect.objectContaining({
+      id: 'northflank', variable: 'NF_API_BASE_URL', tokenVariable: 'NF_API_TOKEN',
+    }))
+  })
+
+  test('loads a token variable only from the reviewed credential document field', () => {
+    const adapter = serviceAdapterFromDocument({
+      service_adapter: {
+        api_base_url: 'https://api.custom.dev',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        cli_tools: [{
+          id: 'custom-cli', label: 'Custom CLI', binary: 'custom',
+          integration: 'base-url-env', variable: 'CUSTOM_API_BASE_URL',
+          token_variable: 'CUSTOM_API_TOKEN', setup_hint: 'Use the local bridge.',
+        }],
+      },
+    })
+    expect(adapter?.cliTools[0]).toMatchObject({
+      id: 'custom-cli', variable: 'CUSTOM_API_BASE_URL', tokenVariable: 'CUSTOM_API_TOKEN',
+    })
+  })
+})
 
 describe('service adapter validation', () => {
   test('uses only the allowed HTTPS host and does not put the token in its report', async () => {

@@ -11,6 +11,7 @@
 //  - the document says whether the model verified it against official documentation.
 
 import { z } from 'zod'
+import { reservedName } from './credential-input.ts'
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F​-‏‪-‮⁦-⁩]/g
 
 /** Strip control and bidi-override characters so text cannot visually spoof the UI. */
@@ -105,6 +106,7 @@ const serviceAdapterSchema = z.object({
     binary: z.string().trim().regex(/^[a-zA-Z0-9._-]{1,60}$/),
     integration: z.enum(['base-url-env', 'host-flag']),
     variable: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).optional(),
+    token_variable: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).optional(),
     flag: z.string().regex(/^--[a-z][a-z-]{0,30}$/).optional(),
     setup_hint: text(300),
   }).strict()).max(8).default([]),
@@ -162,6 +164,12 @@ export const credentialDocSchema = z.object({
     }
     if (doc.service_adapter.cli_tools.some((tool) => tool.integration === 'base-url-env' && (!tool.variable || !tool.variable.endsWith('_API_BASE_URL')))) {
       ctx.addIssue({ code: 'custom', path: ['service_adapter', 'cli_tools'], message: 'base URL integration must use a documented *_API_BASE_URL variable' })
+    }
+    if (doc.service_adapter.cli_tools.some((tool) => tool.token_variable && reservedName(tool.token_variable))) {
+      ctx.addIssue({ code: 'custom', path: ['service_adapter', 'cli_tools'], message: 'token environment variable is reserved by the local process' })
+    }
+    if (doc.service_adapter.cli_tools.some((tool) => tool.variable && tool.variable === tool.token_variable)) {
+      ctx.addIssue({ code: 'custom', path: ['service_adapter', 'cli_tools'], message: 'API base URL and token environment variables must be different' })
     }
     if (doc.service_adapter.cli_tools.some((tool) => tool.integration === 'host-flag' && !tool.flag)) {
       ctx.addIssue({ code: 'custom', path: ['service_adapter', 'cli_tools'], message: 'host-flag integration needs a documented flag' })

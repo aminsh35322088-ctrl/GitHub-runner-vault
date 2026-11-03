@@ -21,7 +21,7 @@ import { defaultPurposeForService, presetForService } from './lib/presets.ts'
 import { adapterHost, serviceAdapterFor, serviceAdapterFromDocument } from './lib/service-adapter.ts'
 import { validateProviderToken, type CredentialValidationReport } from './lib/credential-validation.ts'
 import { publicCredentialActionError } from './lib/public-action-error.ts'
-import { loadVaultPreferences, markAllNotificationsRead, markNotificationRead, saveVaultPreferences, type VaultPreferences } from './lib/vault-observability.ts'
+import { loadVaultPreferences, markAllNotificationsRead, markNotificationRead, saveVaultPreferences, validateStoredCredentialNow, type VaultPreferences } from './lib/vault-observability.ts'
 
 type CredentialActionResult<T> = { ok: true; value: T } | { ok: false; error: string }
 
@@ -121,6 +121,16 @@ export async function validateCredentialTokenAction(service: string, value: stri
     const adapter = serviceAdapterFromDocument(document) ?? serviceAdapterFor(parsed.service)
     const policy = credentialPolicy(parsed.service, document)
     return validateProviderToken(parsed.service, parsed.value, fetch, Date.now(), undefined, adapter, policy.allowedHosts)
+  })
+}
+
+/** Recheck a stored credential without returning or logging its decrypted value. */
+export async function validateStoredCredentialAction(id: string) {
+  return captureCredentialAction(async () => {
+    await requireOwner()
+    const credentialId = idSchema.parse(id)
+    const report = await validateStoredCredentialNow(getDb(), await key(), credentialId, Date.now(), fetch)
+    return { status: report.status, message: report.message, checkedAt: report.checkedAt }
   })
 }
 

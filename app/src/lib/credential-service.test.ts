@@ -8,7 +8,7 @@ import {
   storeCredentialValue, MAX_TEMPORARY_MS,
 } from './credential-service.ts'
 import { consumeEnrollmentLink, peekEnrollmentLink } from './enrollment.ts'
-import { listNotifications, listRunnerIntegrationMetadata, runScheduledCredentialValidation } from './vault-observability.ts'
+import { getUsageAnalytics, listCredentialValidationHistory, listNotifications, listRunnerIntegrationMetadata, recordCredentialUsage, runScheduledCredentialValidation, validateStoredCredentialNow } from './vault-observability.ts'
 
 const KEY_B64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
 const SECRET = 'cfut_SUPERSECRETVALUE_123456789'
@@ -408,15 +408,34 @@ describe('reading a value for use', () => {
       now,
     })
     expect(stored.ok).toBe(true)
+
+    // Keep a second due credential behind the first one to verify that the
+    // batch summary counts the whole queue, not just the selected page.
+    const backlogName = uniqueName('BACKLOG')
+    const backlogRequest = await requestRegistration(db, {
+      name: backlogName, service: 'Example Service', doc: adapterDoc, requestedBy: 'runner:test', now,
+    })
+    if (!backlogRequest.ok) throw new Error(backlogRequest.error)
+    const backlogStored = await storeCredentialValue(db, key, {
+      credentialId: backlogRequest.value.credentialId, value: SECRET, lifetime: 'permanent',
+      expiresAt: null, visible: true, delivery: 'proxy', allowedHosts: ['api.example.com'],
+      validationIntervalHours: 1, now,
+    })
+    expect(backlogStored.ok).toBe(true)
     await db.update(schema.credential).set({ nextValidationAt: now - 1 })
       .where(orm.eq(schema.credential.id, request.value.credentialId))
+    await db.update(schema.credential).set({ nextValidationAt: now })
+      .where(orm.eq(schema.credential.id, backlogRequest.value.credentialId))
 
     const goodFetch = async (url: string | URL | Request, init?: RequestInit) => {
       expect(String(url)).toBe('https://api.example.com/v1/me')
       expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${SECRET}`)
       return Response.json({ user: 'automation-user', permissions: ['read:projects'] })
     }
-    await runScheduledCredentialValidation(db, key, now, goodFetch as typeof fetch, 12)
+    const firstBatch = await runScheduledCredentialValidation(db, key, now, goodFetch as typeof fetch, 1)
+    expect(firstBatch).toMatchObject({ checked: 1, remainingDue: 1 })
+    await db.update(schema.credential).set({ status: 'disabled' })
+      .where(orm.eq(schema.credential.id, backlogRequest.value.credentialId))
     let credential = await getCredentialForOwner(db, request.value.credentialId)
     expect(credential).toMatchObject({ validationStatus: 'valid', validation: 'valid', lastValidatedAt: now })
     expect(credential?.validationDetails).not.toContain(SECRET)
@@ -425,21 +444,79 @@ describe('reading a value for use', () => {
       identity: 'automation-user',
       permissions: [{ name: 'read:projects', access: 'granted' }],
     })
+    expect(credential).toMatchObject({ validationFailureCount: 0, firstValidationFailureAt: null })
+    let history = await listCredentialValidationHistory(db, 20)
+    expect(history.filter((item) => item.credentialId === request.value.credentialId)).toHaveLength(1)
+    expect(history[0]).toMatchObject({ source: 'scheduled', status: 'valid', credentialName: name })
+    expect(JSON.stringify(history)).not.toContain(SECRET)
 
     await db.update(schema.credential).set({ nextValidationAt: now - 1 })
       .where(orm.eq(schema.credential.id, request.value.credentialId))
     const badFetch = async () => new Response('', { status: 401 })
     await runScheduledCredentialValidation(db, key, now + 1, badFetch as typeof fetch, 12)
     credential = await getCredentialForOwner(db, request.value.credentialId)
-    expect(credential).toMatchObject({ validationStatus: 'invalid', validation: 'invalid' })
+    expect(credential).toMatchObject({
+      validationStatus: 'invalid',
+      validation: 'invalid',
+      validationFailureCount: 1,
+      firstValidationFailureAt: now + 1,
+      nextValidationAt: now + 1 + 15 * 60_000,
+    })
+
+    // A second consecutive failure doubles the retry delay and preserves the
+    // timestamp of the first failure instead of resetting it.
+    await db.update(schema.credential).set({ nextValidationAt: now + 1 })
+      .where(orm.eq(schema.credential.id, request.value.credentialId))
+    await runScheduledCredentialValidation(db, key, now + 2, badFetch as typeof fetch, 12)
+    credential = await getCredentialForOwner(db, request.value.credentialId)
+    expect(credential).toMatchObject({
+      validationStatus: 'invalid',
+      validationFailureCount: 2,
+      firstValidationFailureAt: now + 1,
+      nextValidationAt: now + 2 + 30 * 60_000,
+    })
+
+    // Manual validation runs immediately, records its source and clears the
+    // consecutive-failure state after the provider confirms the token again.
+    const manual = await validateStoredCredentialNow(db, key, request.value.credentialId, now + 3, goodFetch as typeof fetch)
+    expect(manual.status).toBe('valid')
+    credential = await getCredentialForOwner(db, request.value.credentialId)
+    expect(credential).toMatchObject({ validationStatus: 'valid', validationFailureCount: 0, firstValidationFailureAt: null })
+    history = await listCredentialValidationHistory(db, 20)
+    expect(history.filter((item) => item.credentialId === request.value.credentialId)).toHaveLength(4)
+    expect(history.find((item) => item.source === 'manual')).toMatchObject({ status: 'valid', provider: 'Example Service' })
+    expect(JSON.stringify(history)).not.toContain(SECRET)
+
     const notifications = await listNotifications(db, 200)
     expect(notifications.filter((item) => item.credentialId === request.value.credentialId && item.kind === 'validation_invalid')).toHaveLength(1)
+    expect(notifications.filter((item) => item.credentialId === request.value.credentialId && item.kind === 'validation_recovered')).toHaveLength(1)
     expect(JSON.stringify(notifications)).not.toContain(SECRET)
 
-    await db.update(schema.credential).set({ nextValidationAt: now + 2 })
+    await db.update(schema.credential).set({ nextValidationAt: now + 4 })
       .where(orm.eq(schema.credential.id, request.value.credentialId))
     await db.delete(schema.credential).where(orm.eq(schema.credential.id, request.value.credentialId))
     const retained = await listNotifications(db, 200)
     expect(retained.find((item) => item.kind === 'validation_invalid' && item.credentialName === name)?.credentialId).toBeNull()
+    expect((await listCredentialValidationHistory(db, 20)).some((item) => item.credentialId === request.value.credentialId)).toBe(false)
+  })
+})
+
+
+describe('credential usage analytics', () => {
+  test('aggregates requests by credential and by consuming tool without storing request data', async () => {
+    const { db, now, id } = await activeCredential()
+    await recordCredentialUsage(db, { credentialId: id, consumer: 'cli:northflank', success: true, latencyMs: 80, now })
+    await recordCredentialUsage(db, { credentialId: id, consumer: 'cli:northflank', success: false, latencyMs: 160, now })
+    await recordCredentialUsage(db, { credentialId: id, consumer: 'runner', success: true, latencyMs: 40, now })
+    const analytics = await getUsageAnalytics(db, now + 1)
+    expect(analytics.totals).toMatchObject({ requests: 3, successes: 2, errors: 1, averageLatencyMs: 93, maxLatencyMs: 160 })
+    expect(analytics.credentials.find((row) => row.credentialId === id)).toMatchObject({
+      credentialName: expect.any(String), requests: 3, successes: 2, errors: 1, averageLatencyMs: 93,
+    })
+    expect(analytics.consumers).toEqual(expect.arrayContaining([
+      { consumer: 'cli:northflank', requests: 2, successes: 1, errors: 1, averageLatencyMs: 120, maxLatencyMs: 160 },
+      { consumer: 'runner', requests: 1, successes: 1, errors: 0, averageLatencyMs: 40, maxLatencyMs: 40 },
+    ]))
+    expect(JSON.stringify(analytics)).not.toContain(SECRET)
   })
 })

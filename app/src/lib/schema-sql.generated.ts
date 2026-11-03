@@ -43,5 +43,15 @@ export const SCHEMA_MIGRATIONS: SchemaMigration[] = [
       "CREATE INDEX credential_usage_window_idx ON credential_usage_hourly (window_start)",
       "CREATE INDEX credential_usage_credential_idx ON credential_usage_hourly (credential_id, window_start)"
     ]
+  },
+  {
+    "id": "0004_validation_history_backoff",
+    "statements": [
+      "ALTER TABLE credential ADD COLUMN validation_failure_count integer NOT NULL DEFAULT 0 CHECK (validation_failure_count BETWEEN 0 AND 1000)",
+      "ALTER TABLE credential ADD COLUMN first_validation_failure_at integer",
+      "CREATE TABLE credential_validation_history (\n  id text PRIMARY KEY,\n  credential_id text NOT NULL,\n  credential_name text NOT NULL DEFAULT '',\n  provider text NOT NULL CHECK (length(provider) BETWEEN 1 AND 80),\n  source text NOT NULL CHECK (source IN ('scheduled', 'manual')),\n  status text NOT NULL CHECK (length(status) BETWEEN 1 AND 40),\n  message text NOT NULL DEFAULT '' CHECK (length(message) <= 600),\n  identity text,\n  token_type text,\n  permission_source text NOT NULL CHECK (length(permission_source) <= 40),\n  permissions_json text NOT NULL DEFAULT '[]',\n  permissions_complete integer NOT NULL DEFAULT 0 CHECK (permissions_complete IN (0, 1)),\n  duration_ms integer NOT NULL DEFAULT 0 CHECK (duration_ms >= 0),\n  checked_at integer NOT NULL,\n  CONSTRAINT fk_credential_validation_history_credential\n    FOREIGN KEY (credential_id) REFERENCES credential(id) ON DELETE CASCADE\n)",
+      "CREATE INDEX credential_validation_history_credential_idx ON credential_validation_history (credential_id, checked_at)",
+      "CREATE INDEX credential_validation_history_checked_idx ON credential_validation_history (checked_at)"
+    ]
   }
 ]

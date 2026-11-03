@@ -15,22 +15,100 @@ function getPointer(value: unknown, pointer?: string): unknown {
   }, value)
 }
 
+function permissionName(value: unknown): string {
+  if (typeof value === 'string') return value.trim()
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+  const row = value as Record<string, unknown>
+  return typeof row.name === 'string' ? row.name
+    : typeof row.permission === 'string' ? row.permission
+      : typeof row.id === 'string' ? row.id : ''
+}
+
 function permissionsFrom(value: unknown): TokenPermission[] {
-  if (!Array.isArray(value)) return []
-  return value.slice(0, 100).flatMap((entry): TokenPermission[] => {
-    if (typeof entry === 'string' && entry.trim()) return [{ name: entry.slice(0, 120), access: 'granted' }]
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
-    const row = entry as Record<string, unknown>
-    const name = typeof row.name === 'string' ? row.name
-      : typeof row.permission === 'string' ? row.permission
-        : typeof row.id === 'string' ? row.id : ''
-    if (!name) return []
-    const rawAccess = typeof row.access === 'string' ? row.access
-      : typeof row.level === 'string' ? row.level
-        : typeof row.status === 'string' ? row.status : 'granted'
-    const access = /deny|revok|disable/i.test(rawAccess) ? 'deny' : 'granted'
-    return [{ name: name.slice(0, 120), access }]
-  })
+  if (typeof value === 'string') {
+    return value.split(/[,\s]+/).map((name) => name.trim()).filter(Boolean).slice(0, 100)
+      .map((name) => ({ name: name.slice(0, 120), access: 'granted' as const }))
+  }
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 100).flatMap((entry): TokenPermission[] => {
+      if (typeof entry === 'string' && entry.trim()) return [{ name: entry.slice(0, 120), access: 'granted' }]
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
+      const row = entry as Record<string, unknown>
+      const name = permissionName(row)
+      if (!name) return []
+      const rawAccess = typeof row.access === 'string' ? row.access
+        : typeof row.level === 'string' ? row.level
+          : typeof row.status === 'string' ? row.status : 'granted'
+      const access = /deny|revok|disable/i.test(rawAccess) ? 'deny' : 'granted'
+      return [{ name: name.slice(0, 120), access }]
+    })
+  }
+
+  // Many providers return grants as a JSON object rather than an array:
+  // { "projects": { "read": true, "write": false } }. Flatten bounded leaves
+  // into explicit capabilities without claiming that omitted keys are denied.
+  if (!value || typeof value !== 'object') return []
+  const permissions: TokenPermission[] = []
+  const visit = (current: unknown, prefix: string, depth: number) => {
+    if (permissions.length >= 100 || depth > 4) return
+    if (typeof current === 'boolean') {
+      if (!prefix) return
+      permissions.push({ name: prefix.slice(0, 120), access: current ? 'granted' : 'unavailable' })
+      return
+    }
+    if (typeof current === 'string') {
+      if (!prefix || !current.trim()) return
+      const access = /deny|revok|disable|false/i.test(current) ? 'deny' : 'granted'
+      permissions.push({ name: prefix.slice(0, 120), access })
+      return
+    }
+    if (Array.isArray(current)) {
+      for (const entry of current.slice(0, 100 - permissions.length)) {
+        if (typeof entry === 'string' && entry.trim()) {
+          permissions.push({ name: entry.slice(0, 120), access: 'granted' })
+        } else if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+          const row = entry as Record<string, unknown>
+          const name = permissionName(row)
+          if (name) {
+            const rawAccess = typeof row.access === 'string' ? row.access
+              : typeof row.level === 'string' ? row.level
+                : typeof row.status === 'string' ? row.status : 'granted'
+            permissions.push({ name: name.slice(0, 120), access: /deny|revok|disable/i.test(rawAccess) ? 'deny' : 'granted' })
+          }
+        }
+      }
+      return
+    }
+    if (!current || typeof current !== 'object') return
+    for (const [key, nested] of Object.entries(current as Record<string, unknown>).slice(0, 100 - permissions.length)) {
+      if (!/^[a-zA-Z0-9_.:/ -]{1,100}$/.test(key)) continue
+      const name = prefix ? prefix + "." + key : key
+      if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+        const row = nested as Record<string, unknown>
+        if (permissionName(row)) {
+          const itemName = permissionName(row)
+          const rawAccess = typeof row.access === 'string' ? row.access
+            : typeof row.level === 'string' ? row.level
+              : typeof row.status === 'string' ? row.status : 'granted'
+          permissions.push({ name: itemName.slice(0, 120), access: /deny|revok|disable/i.test(rawAccess) ? 'deny' : 'granted' })
+        } else {
+          visit(nested, name, depth + 1)
+        }
+      } else {
+        visit(nested, name, depth + 1)
+      }
+      if (permissions.length >= 100) break
+    }
+  }
+  visit(value, '', 0)
+  return permissions
+}
+
+function hasPermissionRepresentation(value: unknown): boolean {
+  return (typeof value === 'string' && Boolean(value.trim()))
+    || Array.isArray(value)
+    || Boolean(value && typeof value === 'object' && Object.keys(value).length > 0)
 }
 
 async function readBounded(response: Response): Promise<string | null> {
@@ -195,7 +273,7 @@ export async function validateWithServiceAdapter(
   const permissions = permissionsFrom(permissionsValue).filter((permission) => !permission.name.includes(token))
   return {
     provider, status: 'valid', permissions,
-    permissionsComplete: Boolean(verification.permissionsPointer && Array.isArray(permissionsValue)),
+    permissionsComplete: Boolean(verification.permissionsPointer && hasPermissionRepresentation(permissionsValue)),
     permissionSource: 'service-adapter', checkedAt,
     ...(identity ? { identity } : {}),
     message: permissions.length

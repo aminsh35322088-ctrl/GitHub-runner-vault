@@ -40,6 +40,13 @@ node vault.mjs use CF_API_TOKEN GET https://api.cloudflare.com/client/v4/user/to
 node vault.mjs request --name RAILWAY_TOKEN --service Railway --doc doc.json
 
 # Run the reviewed local CLI adapter (Northflank example)
+# Run the reviewed Cloudflare Wrangler adapter:
+node vault.mjs serve CLOUDFLARE_API_TOKEN --tool wrangler
+# Export the exact loopback URL and non-secret placeholder printed by serve:
+# CLOUDFLARE_API_BASE_URL=http://127.0.0.1:<ephemeral-port>/client/v4
+# CLOUDFLARE_API_TOKEN=vault-local-placeholder
+# wrangler whoami
+
 node vault.mjs serve NORTHFLANK_API_TOKEN
 # In another terminal, export the exact loopback URL and placeholder printed by serve:
 # NF_API_BASE_URL=http://127.0.0.1:<ephemeral-port>/v1

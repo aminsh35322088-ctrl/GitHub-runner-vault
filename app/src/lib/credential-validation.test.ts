@@ -197,6 +197,110 @@ describe('provider token validation', () => {
     expect(report.status).toBe('invalid')
   })
 
+  test('discovers nested permission grants for a custom provider outside the built-in catalog', async () => {
+    const secret = 'custom-provider-private-token'
+    const adapter = {
+      apiBaseUrl: 'https://api.acme-platform.io/v1',
+      authHeader: 'Authorization',
+      authScheme: 'Bearer' as const,
+      validation: {
+        method: 'GET' as const,
+        path: '/whoami',
+        identityPointer: '/data/user',
+        permissionsPointer: '/data/permissions',
+      },
+      cliTools: [],
+    }
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      data: {
+        user: 'deploy-bot',
+        permissions: {
+          projects: { read: true, write: false },
+          deployments: { create: true, delete: false },
+        },
+      },
+    }))
+    const report = await validateProviderToken('Acme Platform', secret, fetchFn, 44, undefined, adapter, ['api.acme-platform.io'])
+    expect(report).toMatchObject({
+      provider: 'Acme Platform',
+      status: 'valid',
+      identity: 'deploy-bot',
+      permissionSource: 'service-adapter',
+      permissionsComplete: true,
+      permissions: [
+        { name: 'projects.read', access: 'granted' },
+        { name: 'projects.write', access: 'unavailable' },
+        { name: 'deployments.create', access: 'granted' },
+        { name: 'deployments.delete', access: 'unavailable' },
+      ],
+    })
+    expect(fetchFn).toHaveBeenCalledWith('https://api.acme-platform.io/v1/whoami', expect.objectContaining({
+      method: 'GET', redirect: 'manual', headers: expect.any(Headers),
+    }))
+    expect(new Headers(fetchFn.mock.calls[0]?.[1]?.headers).get('authorization')).toBe('Bearer ' + secret)
+    expect(JSON.stringify(report)).not.toContain(secret)
+  })
+
+  test('discovers scope-string permissions for an undocumented-in-catalog custom service without marking them as complete when no pointer exists', async () => {
+    const secret = 'scope-based-custom-secret'
+    const adapter = {
+      apiBaseUrl: 'https://api.scope-service.dev',
+      authHeader: 'x-api-key',
+      authScheme: 'Raw' as const,
+      validation: { method: 'GET' as const, path: '/v1/token', permissionsPointer: '/scopes' },
+      cliTools: [],
+    }
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      scopes: 'projects:read deployments:write users:read',
+    }))
+    const report = await validateProviderToken('Scope Service', secret, fetchFn, 45, undefined, adapter, ['api.scope-service.dev'])
+    expect(report).toMatchObject({
+      status: 'valid',
+      permissionSource: 'service-adapter',
+      permissionsComplete: true,
+      permissions: [
+        { name: 'projects:read', access: 'granted' },
+        { name: 'deployments:write', access: 'granted' },
+        { name: 'users:read', access: 'granted' },
+      ],
+    })
+    expect(new Headers(fetchFn.mock.calls[0]?.[1]?.headers).get('x-api-key')).toBe(secret)
+    expect(JSON.stringify(report)).not.toContain(secret)
+  })
+
+  test('does not claim complete permission discovery when a custom provider returns an empty object', async () => {
+    const adapter = {
+      apiBaseUrl: 'https://api.acme-platform.io',
+      authHeader: 'Authorization',
+      authScheme: 'Bearer' as const,
+      validation: { method: 'GET' as const, path: '/v1/me', permissionsPointer: '/permissions' },
+      cliTools: [],
+    }
+    const report = await validateProviderToken('Acme Platform', 'custom-valid-token', async () => jsonResponse({
+      user: 'deploy-bot',
+      permissions: {},
+    }), 47, undefined, adapter, ['api.acme-platform.io'])
+    expect(report).toMatchObject({
+      status: 'valid',
+      permissionsComplete: false,
+      permissionSource: 'service-adapter',
+      permissions: [],
+    })
+  })
+
+  test('distinguishes a custom provider permission denial from an invalid token', async () => {
+    const adapter = {
+      apiBaseUrl: 'https://api.acme-platform.io',
+      authHeader: 'Authorization',
+      authScheme: 'Bearer' as const,
+      validation: { method: 'GET' as const, path: '/v1/me' },
+      cliTools: [],
+    }
+    const report = await validateProviderToken('Acme Platform', 'custom-valid-token', async () => new Response('', { status: 403 }), 46, undefined, adapter, ['api.acme-platform.io'])
+    expect(report.status).toBe('insufficient_permissions')
+    expect(report.permissionSource).toBe('service-adapter')
+  })
+
   test('reports network failures as unavailable and supports unknown providers without false validation', async () => {
     const network = await validateProviderToken('GitHub', 'github_pat_secret_value', vi.fn<typeof fetch>().mockRejectedValue(new Error('offline')), 1)
     const other = await validateProviderToken('Custom API', 'custom-secret-value', fetch, 2)

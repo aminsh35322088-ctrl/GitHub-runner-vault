@@ -222,6 +222,7 @@ async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPor
   }
   if (!['base-url-env', 'host-flag'].includes(tool.integration)) die('the CLI integration type is not supported')
   if (tool.integration === 'base-url-env' && !/^[A-Z][A-Z0-9_]{0,63}$/.test(tool.variable ?? '')) die('the CLI environment variable is not safe')
+  if (tool.tokenVariable && (!/^[A-Z][A-Z0-9_]{0,63}$/.test(tool.tokenVariable) || tool.tokenVariable === tool.variable)) die('the CLI token environment variable is not safe')
   if (tool.integration === 'host-flag' && !/^--[a-z][a-z-]{0,30}$/.test(tool.flag ?? '')) die('the CLI host flag is not safe')
 
   let upstreamBase
@@ -315,12 +316,13 @@ async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPor
   process.stdout.write(`Listening only on 127.0.0.1:${address.port}. Keep this process running while the CLI is in use.\n`)
   if (tool.integration === 'base-url-env') {
     const mount = upstreamBase.pathname.replace(/\/$/, '')
-    process.stdout.write(`Use: export ${tool.variable}="${localOrigin}${mount}"\n`)
-    if (tool.id === 'northflank') {
-      process.stdout.write('export NF_API_TOKEN="vault-local-placeholder"\n')
-      process.stdout.write('Northflank CLI uses NF_API_BASE_URL + NF_API_TOKEN in headless mode; the placeholder is intercepted locally and is never sent upstream.\n')
+    process.stdout.write('Use: export ' + tool.variable + '="' + localOrigin + mount + '"\n')
+    const tokenVariable = tool.tokenVariable ?? (tool.id === 'northflank' ? 'NF_API_TOKEN' : undefined)
+    if (tokenVariable) {
+      process.stdout.write('export ' + tokenVariable + '="vault-local-placeholder"\n')
+      process.stdout.write('The placeholder is intercepted locally and is never sent upstream; the Vault injects the stored token at the provider boundary.\n')
     }
-    process.stdout.write(`Then run: ${tool.binary} …\n`)
+    process.stdout.write('Then run: ' + tool.binary + ' …\n')
   } else {
     process.stdout.write(`Use: ${tool.binary} login --token-login --token "vault-local-placeholder" ${tool.flag} "${localOrigin}" --name "vault-local"\n`)
     process.stdout.write(`The placeholder is not a credential; Vault injects the stored token at the upstream boundary.\n`)

@@ -6,6 +6,7 @@ export type ServiceAdapterTool = {
   binary: string
   integration: 'base-url-env' | 'host-flag'
   variable?: string
+  tokenVariable?: string
   flag?: string
   setupHint: string
 }
@@ -32,6 +33,7 @@ const northflank: ServiceAdapterTool = {
   binary: 'nf',
   integration: 'base-url-env',
   variable: 'NF_API_BASE_URL',
+  tokenVariable: 'NF_API_TOKEN',
   setupHint: 'Set NF_API_BASE_URL to the local Vault proxy and NF_API_TOKEN to the non-secret placeholder shown by the CLI bridge. Northflank CLI documents both overrides for headless use.',
 }
 
@@ -40,7 +42,12 @@ const adapters: Record<string, ServiceAdapter> = {
     apiBaseUrl: 'https://api.cloudflare.com/client/v4',
     authHeader: 'Authorization',
     authScheme: 'Bearer',
-    cliTools: [],
+    cliTools: [{
+      id: 'wrangler', label: 'Wrangler CLI', binary: 'wrangler',
+      integration: 'base-url-env', variable: 'CLOUDFLARE_API_BASE_URL',
+      tokenVariable: 'CLOUDFLARE_API_TOKEN',
+      setupHint: 'Wrangler documents CLOUDFLARE_API_BASE_URL and CLOUDFLARE_API_TOKEN. The local bridge supplies the base URL and a non-secret placeholder; Vault injects the stored token upstream.',
+    }],
   },
   northflank: {
     apiBaseUrl: 'https://api.northflank.com/v1',
@@ -175,6 +182,7 @@ export function serviceAdapterFromDocument(document: unknown): ServiceAdapter | 
       id: tool.id, label: tool.label, binary: tool.binary,
       integration: tool.integration as ServiceAdapterTool['integration'],
       ...(typeof tool.variable === 'string' ? { variable: tool.variable } : {}),
+      ...(typeof tool.token_variable === 'string' ? { tokenVariable: tool.token_variable } : {}),
       ...(typeof tool.flag === 'string' ? { flag: tool.flag } : {}),
       setupHint: tool.setup_hint,
     }]

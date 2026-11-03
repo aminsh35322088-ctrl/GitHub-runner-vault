@@ -186,7 +186,7 @@ describe('credential documentation', () => {
         validation: { method: 'GET', path: '/projects' },
         cli_tools: [{
           id: 'northflank', label: 'Northflank CLI', binary: 'nf',
-          integration: 'base-url-env', variable: 'NF_API_BASE_URL',
+          integration: 'base-url-env', variable: 'NF_API_BASE_URL', token_variable: 'NF_API_TOKEN',
           setup_hint: 'Use the local credential proxy.',
         }],
       },
@@ -204,6 +204,41 @@ describe('credential documentation', () => {
         auth_scheme: 'Bearer',
         validation: { method: 'GET', path: '/me' },
         cli_tools: [],
+      },
+    })
+    expect(parsed.ok).toBe(false)
+  })
+
+  test('rejects a CLI adapter that tries to overwrite a reserved process variable', () => {
+    const parsed = parseCredentialDoc({
+      ...goodDoc,
+      service_adapter: {
+        api_base_url: 'https://api.northflank.com/v1',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        cli_tools: [{
+          id: 'northflank', label: 'Northflank CLI', binary: 'nf',
+          integration: 'base-url-env', variable: 'NF_API_BASE_URL',
+          token_variable: 'PATH', setup_hint: 'Use the local bridge.',
+        }],
+      },
+    })
+    expect(parsed.ok).toBe(false)
+  })
+
+  test('rejects adapters that reuse one environment variable for the URL and token', () => {
+    const parsed = parseCredentialDoc({
+      ...goodDoc,
+      official_documentation_links: [{ title: 'Provider docs', url: 'https://northflank.com/docs/v1/api/use-the-cli' }],
+      service_adapter: {
+        api_base_url: 'https://api.northflank.com/v1',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        cli_tools: [{
+          id: 'northflank', label: 'Northflank CLI', binary: 'nf',
+          integration: 'base-url-env', variable: 'NF_API_BASE_URL',
+          token_variable: 'NF_API_BASE_URL', setup_hint: 'Use the local bridge.',
+        }],
       },
     })
     expect(parsed.ok).toBe(false)

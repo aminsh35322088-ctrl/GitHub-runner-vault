@@ -98,6 +98,8 @@ export const credential = sqliteCore.sqliteTable('credential', {
   validationStatus: sqliteCore.text('validation_status').notNull().default('not_tested'),
   lastValidatedAt: epochMs('last_validated_at'),
   nextValidationAt: epochMs('next_validation_at'),
+  validationFailureCount: sqliteCore.integer('validation_failure_count').notNull().default(0),
+  firstValidationFailureAt: epochMs('first_validation_failure_at'),
   docJson: sqliteCore.text('doc_json').notNull().default('{}'),
   valueEncrypted: sqliteCore.text('value_encrypted'),
   valueIv: sqliteCore.text('value_iv'),
@@ -179,6 +181,26 @@ export const credentialUsageHourly = sqliteCore.sqliteTable('credential_usage_ho
   sqliteCore.uniqueIndex('credential_usage_hourly_unique_idx').on(table.credentialId, table.windowStart, table.consumer),
   sqliteCore.index('credential_usage_window_idx').on(table.windowStart),
   sqliteCore.index('credential_usage_credential_idx').on(table.credentialId, table.windowStart),
+])
+
+export const credentialValidationHistory = sqliteCore.sqliteTable('credential_validation_history', {
+  id: sqliteCore.text('id').primaryKey().notNull(),
+  credentialId: sqliteCore.text('credential_id').notNull().references(() => credential.id, { onDelete: 'cascade' }),
+  credentialName: sqliteCore.text('credential_name').notNull().default(''),
+  provider: sqliteCore.text('provider').notNull(),
+  source: sqliteCore.text('source', { enum: ['scheduled', 'manual'] }).notNull(),
+  status: sqliteCore.text('status').notNull(),
+  message: sqliteCore.text('message').notNull().default(''),
+  identity: sqliteCore.text('identity'),
+  tokenType: sqliteCore.text('token_type'),
+  permissionSource: sqliteCore.text('permission_source').notNull(),
+  permissionsJson: sqliteCore.text('permissions_json').notNull().default('[]'),
+  permissionsComplete: sqliteCore.integer('permissions_complete', { mode: 'boolean' }).notNull().default(false),
+  durationMs: sqliteCore.integer('duration_ms').notNull().default(0),
+  checkedAt: epochMs('checked_at').notNull(),
+}, (table) => [
+  sqliteCore.index('credential_validation_history_credential_idx').on(table.credentialId, table.checkedAt),
+  sqliteCore.index('credential_validation_history_checked_idx').on(table.checkedAt),
 ])
 
 export const relations = defineRelations(

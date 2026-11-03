@@ -183,6 +183,13 @@ node client/vault.mjs use CF_API_TOKEN GET https://api.cloudflare.com/client/v4/
 node client/vault.mjs request --name RAILWAY_TOKEN --service Railway --doc doc.json
 
 # Supported CLI bridge (Northflank example): run in one terminal
+# Supported Cloudflare Wrangler bridge:
+node client/vault.mjs serve CLOUDFLARE_API_TOKEN --tool wrangler
+# Export the loopback URL and placeholder printed by serve:
+# CLOUDFLARE_API_BASE_URL=http://127.0.0.1:<ephemeral-port>/client/v4
+# CLOUDFLARE_API_TOKEN=vault-local-placeholder
+# wrangler whoami
+
 node client/vault.mjs serve NORTHFLANK_API_TOKEN
 
 # In a second terminal, use the displayed loopback-only env values:
@@ -192,6 +199,8 @@ node client/vault.mjs serve NORTHFLANK_API_TOKEN
 ```
 
 The bridge binds only to `127.0.0.1`, maps paths to the Adapter's fixed HTTPS API origin, filters request headers and never forwards the CLI's placeholder token. The Vault Worker injects the actual credential directly upstream. Stop the bridge with Ctrl+C; it is not a general-purpose reverse proxy.
+
+Wrangler's API base URL and token overrides are documented in the [Cloudflare system environment variables reference](https://developers.cloudflare.com/workers/wrangler/system-environment-variables/). Northflank's `NF_API_BASE_URL` and `NF_API_TOKEN` behavior is documented in the [Northflank CLI package reference](https://www.npmjs.com/package/@northflank/cli).
 
 Exit codes: `0` ok, `2` vault refused, `3` upstream HTTP error. See `docs/runner-usage.md` for `doc.json` and what a model
 should expect. The trusted runner workflow must request `permissions: id-token: write` and set `VAULT_URL` to the deployed Worker origin.
@@ -207,10 +216,10 @@ Sign in at `https://<origin>/login` with the owner GitHub account.
 | `/vault` | Dashboard overview, credential registry, validation summary and integration shortcuts. |
 | `/vault/register/<link>` | One-time registration page with model-authored setup notes, read-only API destination and write-only secret field. |
 | `/vault/credentials/<id>` | Credential details, token validation report, enable/disable, show/hide, delete, replace value and recent activity. |
-| `/vault/validation` | Validation state across credentials, with last-check timestamps. |
-| `/vault/analytics` | 30-day aggregate request counts, success/error rate and latency; no request bodies, headers or token values. |
+| `/vault/validation` | Validation state and history, first-failure time, next check, exponential retry backoff and manual recheck. |
+| `/vault/analytics` | 30-day aggregate request counts, success/error rate, latency and usage by CLI/Runner consumer; no request bodies, headers or token values. |
 | `/vault/integrations` | Owner view of provider destinations and supported CLI adapters. |
-| `/vault/notifications` | In-panel events for rejected/expired credentials, inconclusive checks and recovery. |
+| Global header bell | Unread count, recent Vault events, mark-read and mark-all-read actions on every panel page. No separate notification page or Telegram delivery. |
 | `/vault/audit` | Append-only audit log (database triggers block updates and deletes). |
 | `/vault/settings` | Validation interval, default lifetime/visibility, proxy timeout, analytics/notification retention, runner session revocation and metadata-only external entries. |
 

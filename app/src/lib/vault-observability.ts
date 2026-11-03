@@ -191,6 +191,18 @@ export async function getUsageAnalytics(db: Db, now = Date.now()) {
     .groupBy(schema.credentialUsageHourly.credentialId, schema.credential.name, schema.credential.service)
     .orderBy(orm.desc(orm.sum(schema.credentialUsageHourly.requestCount)))
     .limit(20)
+  const consumerRows = await db.select({
+    consumer: schema.credentialUsageHourly.consumer,
+    requests: orm.sum(schema.credentialUsageHourly.requestCount),
+    successes: orm.sum(schema.credentialUsageHourly.successCount),
+    errors: orm.sum(schema.credentialUsageHourly.errorCount),
+    latencyTotal: orm.sum(schema.credentialUsageHourly.latencyTotalMs),
+    latencyMax: orm.max(schema.credentialUsageHourly.latencyMaxMs),
+  }).from(schema.credentialUsageHourly)
+    .where(orm.gte(schema.credentialUsageHourly.windowStart, since))
+    .groupBy(schema.credentialUsageHourly.consumer)
+    .orderBy(orm.desc(orm.sum(schema.credentialUsageHourly.requestCount)))
+    .limit(30)
   const requestCount = asNumber(totals?.requests)
   const latencyTotal = asNumber(totals?.latencyTotal)
   return {
@@ -218,6 +230,17 @@ export async function getUsageAnalytics(db: Db, now = Date.now()) {
         successes: asNumber(row.successes),
         errors: asNumber(row.errors),
         averageLatencyMs: requests ? Math.round(asNumber(row.latencyTotal) / requests) : 0,
+      }
+    }),
+    consumers: consumerRows.map((row) => {
+      const requests = asNumber(row.requests)
+      return {
+        consumer: row.consumer,
+        requests,
+        successes: asNumber(row.successes),
+        errors: asNumber(row.errors),
+        averageLatencyMs: requests ? Math.round(asNumber(row.latencyTotal) / requests) : 0,
+        maxLatencyMs: asNumber(row.latencyMax),
       }
     }),
   }
@@ -294,6 +317,243 @@ export async function listRunnerIntegrationMetadata(db: Db, now = Date.now()) {
   })
 }
 
+export type ValidationHistorySource = 'scheduled' | 'manual'
+
+type ValidationTarget = {
+  id: string
+  name: string
+  service: string
+  status: string
+  visible: boolean
+  expiresAt: number | null
+  updatedAt: number
+  validationStatus: string
+  validationFailureCount: number
+  firstValidationFailureAt: number | null
+  nextValidationAt: number | null
+  docJson: string
+  allowedHosts: string
+  externallyManaged: boolean
+  hasValue: number
+}
+
+const VALIDATION_TARGET_COLUMNS = {
+  id: schema.credential.id,
+  name: schema.credential.name,
+  service: schema.credential.service,
+  status: schema.credential.status,
+  visible: schema.credential.visible,
+  expiresAt: schema.credential.expiresAt,
+  updatedAt: schema.credential.updatedAt,
+  validationStatus: schema.credential.validationStatus,
+  validationFailureCount: schema.credential.validationFailureCount,
+  firstValidationFailureAt: schema.credential.firstValidationFailureAt,
+  nextValidationAt: schema.credential.nextValidationAt,
+  docJson: schema.credential.docJson,
+  allowedHosts: schema.credential.allowedHosts,
+  externallyManaged: schema.credential.externallyManaged,
+  hasValue: orm.sql<number>`(${schema.credential.valueEncrypted} IS NOT NULL)`,
+}
+
+function retryState(
+  status: CredentialValidationReport['status'],
+  target: ValidationTarget,
+  now: number,
+  intervalMs: number,
+) {
+  const countsAsFailure = ['invalid', 'expired', 'insufficient_permissions', 'unavailable'].includes(status)
+  if (!countsAsFailure) {
+    return {
+      validationFailureCount: 0,
+      firstValidationFailureAt: null,
+      nextValidationAt: now + intervalMs,
+    }
+  }
+
+  const validationFailureCount = Math.min(1_000, target.validationFailureCount + 1)
+  const exponent = Math.min(validationFailureCount - 1, 8)
+  const delay = Math.min(intervalMs, 15 * 60_000 * (2 ** exponent))
+  return {
+    validationFailureCount,
+    firstValidationFailureAt: target.firstValidationFailureAt ?? now,
+    nextValidationAt: now + delay,
+  }
+}
+
+async function recordValidationResult(
+  db: Db,
+  target: ValidationTarget,
+  report: CredentialValidationReport,
+  source: ValidationHistorySource,
+  now: number,
+  durationMs: number,
+  intervalMs: number,
+): Promise<void> {
+  const legacyStatus = report.status === 'valid' ? 'valid'
+    : report.status === 'invalid' ? 'invalid'
+      : report.status === 'insufficient_permissions' ? 'insufficient_permissions' : 'not_tested'
+  const retry = retryState(report.status, target, now, intervalMs)
+
+  // History deliberately stores report metadata only. The credential value is
+  // never written to the history table, message, permissions, or telemetry.
+  await db.insert(schema.credentialValidationHistory).values({
+    id: crypto.randomUUID(),
+    credentialId: target.id,
+    credentialName: target.name,
+    provider: report.provider.slice(0, 80),
+    source,
+    status: report.status,
+    message: report.message.slice(0, 600),
+    identity: report.identity?.slice(0, 200) ?? null,
+    tokenType: report.tokenType?.slice(0, 120) ?? null,
+    permissionSource: report.permissionSource,
+    permissionsJson: JSON.stringify(report.permissions).slice(0, 16_000),
+    permissionsComplete: report.permissionsComplete,
+    durationMs: Math.max(0, Math.min(120_000, Math.round(durationMs))),
+    checkedAt: now,
+  })
+
+  await db.update(schema.credential).set({
+    validation: legacyStatus,
+    validationStatus: report.status,
+    validationDetails: JSON.stringify(report).slice(0, 32_000),
+    lastValidatedAt: now,
+    ...retry,
+  }).where(orm.eq(schema.credential.id, target.id))
+
+  const previous = target.validationStatus
+  if (report.status === 'invalid' && previous !== 'invalid') {
+    await createNotification(db, {
+      dedupeKey: `validation:${target.id}:invalid:${now}`,
+      kind: 'validation_invalid', severity: 'critical',
+      title: `${target.service} token rejected`,
+      message: `The provider rejected the stored token for ${target.name}. Replace it or review its status.`,
+      credentialId: target.id, credentialName: target.name, now,
+    })
+  } else if (report.status === 'expired' && previous !== 'expired') {
+    await createNotification(db, {
+      dedupeKey: `validation:${target.id}:expired:${target.expiresAt}`,
+      kind: 'credential_expired', severity: 'critical',
+      title: `${target.service} token expired`,
+      message: `${target.name} reached its configured Vault expiry time.`,
+      credentialId: target.id, credentialName: target.name, now,
+    })
+  } else if (report.status === 'unavailable' && previous !== 'unavailable') {
+    await createNotification(db, {
+      dedupeKey: `validation:${target.id}:unavailable:${now}`,
+      kind: 'validation_unavailable', severity: 'warning',
+      title: `${target.service} could not be reached`,
+      message: `Validation for ${target.name} was inconclusive. The token was not marked invalid.`,
+      credentialId: target.id, credentialName: target.name, now,
+    })
+  } else if (report.status === 'valid' && ['invalid', 'expired', 'unavailable', 'insufficient_permissions'].includes(previous)) {
+    await createNotification(db, {
+      dedupeKey: `validation:${target.id}:recovered:${now}`,
+      kind: 'validation_recovered', severity: 'info',
+      title: `${target.service} token verified again`,
+      message: `${target.name} passed its latest provider validation.`,
+      credentialId: target.id, credentialName: target.name, now,
+    })
+  }
+
+  if (target.expiresAt !== null && target.expiresAt > now && target.expiresAt <= now + 72 * 3_600_000) {
+    await createNotification(db, {
+      dedupeKey: `expiry-soon:${target.id}:${target.expiresAt}`,
+      kind: 'credential_expiring', severity: 'warning',
+      title: `${target.service} token expires soon`,
+      message: `${target.name} expires within 72 hours. Update its lifetime or replace the token if needed.`,
+      credentialId: target.id, credentialName: target.name, now,
+    })
+  }
+}
+
+async function validateTarget(
+  db: Db,
+  encryptionKey: CryptoKey,
+  target: ValidationTarget,
+  now: number,
+  fetchFn: typeof fetch,
+  source: ValidationHistorySource,
+  intervalMs: number,
+): Promise<CredentialValidationReport> {
+  const startedAt = Date.now()
+  let report: CredentialValidationReport
+
+  if (target.expiresAt !== null && target.expiresAt <= now) {
+    report = {
+      provider: target.service, status: 'expired', permissions: [], permissionsComplete: false,
+      permissionSource: 'not-supported', checkedAt: now,
+      message: 'مدت ماندگاری ثبت‌شده در Vault به پایان رسیده است؛ مقدار توکن بدون ارسال به سرویس منقضی محسوب می‌شود.',
+    }
+  } else {
+    const document = readStoredDoc(target.docJson)
+    const adapter = serviceAdapterFromDocument(document) ?? serviceAdapterFor(target.service)
+    const allowedHosts = readAllowedHosts(target.allowedHosts)
+    if (!adapter) {
+      report = {
+        provider: target.service, status: 'unsupported', permissions: [], permissionsComplete: false,
+        permissionSource: 'not-supported', checkedAt: now,
+        message: 'برای این سرویس Service Adapter مستند ثبت نشده است؛ Vault وضعیت معتبر را حدس نمی‌زند.',
+      }
+    } else {
+      const host = adapterHost(adapter)
+      if (!host || !allowedHosts.includes(host)) {
+        report = {
+          provider: target.service, status: 'unsupported', permissions: [], permissionsComplete: false,
+          permissionSource: 'not-supported', checkedAt: now,
+          message: 'Host مربوط به Service Adapter با Hostهای مجاز ذخیره‌شده یکسان نیست.',
+        }
+      } else {
+        const read = await readCredentialValue(db, encryptionKey, target.name, now, { validation: true })
+        if (!read.ok) {
+          report = {
+            provider: target.service, status: 'unavailable', permissions: [], permissionsComplete: false,
+            permissionSource: 'not-supported', checkedAt: now,
+            message: 'مقدار Credential برای اعتبارسنجی در دسترس نیست؛ وضعیت توکن تغییر داده نشد.',
+          }
+        } else {
+          try {
+            report = await validateProviderToken(target.service, read.value, fetchFn, now, undefined, adapter, allowedHosts)
+          } catch {
+            report = {
+              provider: target.service, status: 'unavailable', permissions: [], permissionsComplete: false,
+              permissionSource: 'not-exposed', checkedAt: now,
+              message: 'بررسی سرویس با خطای موقت مواجه شد؛ Credential نامعتبر علامت‌گذاری نشد.',
+            }
+          }
+        }
+      }
+    }
+  }
+
+  await recordValidationResult(db, target, report, source, now, Date.now() - startedAt, intervalMs)
+  return report
+}
+
+export async function validateStoredCredentialNow(
+  db: Db,
+  encryptionKey: CryptoKey,
+  credentialId: string,
+  now = Date.now(),
+  fetchFn: typeof fetch = fetch,
+): Promise<CredentialValidationReport> {
+  const [target] = await db.select(VALIDATION_TARGET_COLUMNS).from(schema.credential)
+    .where(orm.eq(schema.credential.id, credentialId)).limit(1)
+  if (!target) throw new Error('Credential not found')
+  if (target.externallyManaged || !target.hasValue) {
+    throw new Error('This credential has no stored value to validate')
+  }
+
+  const preferences = await loadVaultPreferences(db, now)
+  return validateTarget(db, encryptionKey, target as ValidationTarget, now, fetchFn, 'manual', preferences.validationIntervalHours * 3_600_000)
+}
+
+export async function listCredentialValidationHistory(db: Db, limit = 100) {
+  return db.select().from(schema.credentialValidationHistory)
+    .orderBy(orm.desc(schema.credentialValidationHistory.checkedAt))
+    .limit(Math.min(Math.max(limit, 1), 200))
+}
+
 export async function runScheduledCredentialValidation(
   db: Db,
   encryptionKey: CryptoKey,
@@ -301,134 +561,53 @@ export async function runScheduledCredentialValidation(
   fetchFn: typeof fetch = fetch,
   maxBatch = 12,
 ) {
-  const preferences = await loadVaultPreferences(db)
+  const preferences = await loadVaultPreferences(db, now)
   const intervalMs = preferences.validationIntervalHours * 3_600_000
-  const targets = await db.select({
-    id: schema.credential.id,
-    name: schema.credential.name,
-    service: schema.credential.service,
-    status: schema.credential.status,
-    visible: schema.credential.visible,
-    expiresAt: schema.credential.expiresAt,
-    updatedAt: schema.credential.updatedAt,
-    validationStatus: schema.credential.validationStatus,
-    docJson: schema.credential.docJson,
-    allowedHosts: schema.credential.allowedHosts,
-  }).from(schema.credential)
-    .where(orm.and(
-      orm.eq(schema.credential.status, 'active'),
-      orm.eq(schema.credential.externallyManaged, false),
-      orm.isNotNull(schema.credential.valueEncrypted),
-      orm.or(orm.isNull(schema.credential.nextValidationAt), orm.lte(schema.credential.nextValidationAt, now)),
-    ))
+  const dueFilter = orm.and(
+    orm.eq(schema.credential.status, 'active'),
+    orm.eq(schema.credential.externallyManaged, false),
+    orm.isNotNull(schema.credential.valueEncrypted),
+    orm.or(orm.isNull(schema.credential.nextValidationAt), orm.lte(schema.credential.nextValidationAt, now)),
+  )
+  const targets = await db.select(VALIDATION_TARGET_COLUMNS).from(schema.credential)
+    .where(dueFilter)
     .orderBy(schema.credential.nextValidationAt)
     .limit(Math.min(Math.max(maxBatch, 1), 30))
 
   let checked = 0
-  for (const target of targets) {
-    const retryAt = now + Math.max(15 * 60_000, Math.min(intervalMs, 60 * 60_000))
-    await db.update(schema.credential).set({ nextValidationAt: retryAt }).where(orm.eq(schema.credential.id, target.id))
-    let report: CredentialValidationReport
-    if (target.expiresAt !== null && target.expiresAt <= now) {
-      report = {
-        provider: target.service, status: 'expired', permissions: [], permissionsComplete: false,
-        permissionSource: 'not-supported', checkedAt: now,
-        message: 'مدت ماندگاری ثبت‌شده در Vault به پایان رسیده است؛ مقدار توکن بدون ارسال به سرویس منقضی محسوب می‌شود.',
-      }
-    } else {
-      const document = readStoredDoc(target.docJson)
-      const adapter = serviceAdapterFromDocument(document) ?? serviceAdapterFor(target.service)
-      const allowedHosts = readAllowedHosts(target.allowedHosts)
-      if (!adapter) {
-        report = {
-          provider: target.service, status: 'unsupported', permissions: [], permissionsComplete: false,
-          permissionSource: 'not-supported', checkedAt: now,
-          message: 'برای این سرویس Service Adapter مستند ثبت نشده است؛ Vault وضعیت معتبر را حدس نمی‌زند.',
-        }
-      } else {
-        const host = adapterHost(adapter)
-        if (!host || !allowedHosts.includes(host)) {
-          report = {
-            provider: target.service, status: 'unsupported', permissions: [], permissionsComplete: false,
-            permissionSource: 'not-supported', checkedAt: now,
-            message: 'Host مربوط به Service Adapter با Hostهای مجاز ذخیره‌شده یکسان نیست.',
-          }
-        } else {
-          const read = await readCredentialValue(db, encryptionKey, target.name, now, { validation: true })
-          if (!read.ok) {
-            report = {
-              provider: target.service, status: 'unavailable', permissions: [], permissionsComplete: false,
-              permissionSource: 'not-supported', checkedAt: now,
-              message: 'مقدار Credential برای اعتبارسنجی در دسترس نیست؛ وضعیت توکن تغییر داده نشد.',
-            }
-          } else {
-            report = await validateProviderToken(target.service, read.value, fetchFn, now, undefined, adapter, allowedHosts)
-          }
-        }
-      }
-    }
-
-    const legacyStatus = report.status === 'valid' ? 'valid'
-      : report.status === 'invalid' ? 'invalid'
-        : report.status === 'insufficient_permissions' ? 'insufficient_permissions' : 'not_tested'
-    const nextInterval = report.status === 'invalid' ? Math.min(intervalMs, 60 * 60_000)
-      : report.status === 'unavailable' ? Math.min(intervalMs, 30 * 60_000) : intervalMs
-    await db.update(schema.credential).set({
-      validation: legacyStatus,
-      validationStatus: report.status,
-      validationDetails: JSON.stringify(report).slice(0, 32_000),
-      lastValidatedAt: now,
-      nextValidationAt: now + nextInterval,
-    }).where(orm.eq(schema.credential.id, target.id))
-
-    const previous = target.validationStatus
-    if (report.status === 'invalid' && previous !== 'invalid') {
-      await createNotification(db, {
-        dedupeKey: `validation:${target.id}:invalid:${now}`,
-        kind: 'validation_invalid', severity: 'critical',
-        title: `${target.service} token rejected`,
-        message: `The provider rejected the stored token for ${target.name}. Replace it or review its status.`,
-        credentialId: target.id, credentialName: target.name, now,
-      })
-    } else if (report.status === 'expired' && previous !== 'expired') {
-      await createNotification(db, {
-        dedupeKey: `validation:${target.id}:expired:${target.expiresAt}`,
-        kind: 'credential_expired', severity: 'critical',
-        title: `${target.service} token expired`,
-        message: `${target.name} reached its configured Vault expiry time.`,
-        credentialId: target.id, credentialName: target.name, now,
-      })
-    } else if (report.status === 'unavailable' && previous !== 'unavailable') {
-      await createNotification(db, {
-        dedupeKey: `validation:${target.id}:unavailable:${now}`,
-        kind: 'validation_unavailable', severity: 'warning',
-        title: `${target.service} could not be reached`,
-        message: `Validation for ${target.name} was inconclusive. The token was not marked invalid.`,
-        credentialId: target.id, credentialName: target.name, now,
-      })
-    } else if (report.status === 'valid' && ['invalid', 'expired', 'unavailable'].includes(previous)) {
-      await createNotification(db, {
-        dedupeKey: `validation:${target.id}:recovered:${now}`,
-        kind: 'validation_recovered', severity: 'info',
-        title: `${target.service} token verified again`,
-        message: `${target.name} passed its latest provider validation.`,
-        credentialId: target.id, credentialName: target.name, now,
-      })
-    }
-
-    if (target.expiresAt !== null && target.expiresAt > now && target.expiresAt <= now + 72 * 3_600_000) {
-      await createNotification(db, {
-        dedupeKey: `expiry-soon:${target.id}:${target.expiresAt}`,
-        kind: 'credential_expiring', severity: 'warning',
-        title: `${target.service} token expires soon`,
-        message: `${target.name} expires within 72 hours. Update its lifetime or replace the token if needed.`,
-        credentialId: target.id, credentialName: target.name, now,
-      })
-    }
+  for (const rawTarget of targets) {
+    const target = rawTarget as ValidationTarget
+    // Claim the item before contacting the provider. A crashed Worker will make
+    // it eligible again after this short lease instead of retrying every cron.
+    const claimConditions = [
+      orm.eq(schema.credential.id, target.id),
+      orm.eq(schema.credential.status, 'active'),
+      orm.eq(schema.credential.externallyManaged, false),
+      orm.isNotNull(schema.credential.valueEncrypted),
+      target.nextValidationAt === null
+        ? orm.isNull(schema.credential.nextValidationAt)
+        : orm.eq(schema.credential.nextValidationAt, target.nextValidationAt),
+    ]
+    const claimed = await db.update(schema.credential).set({ nextValidationAt: now + 15 * 60_000 })
+      .where(orm.and(...claimConditions))
+      .returning({ id: schema.credential.id })
+    // Another cron or a manual owner action may have moved this credential
+    // while this batch was being prepared. Only the successful claimant runs it.
+    if (!claimed.length) continue
+    await validateTarget(db, encryptionKey, target, now, fetchFn, 'scheduled', intervalMs)
     checked++
   }
 
+  // Count the entire remaining queue, not just targets.length (which is capped
+  // by maxBatch). The UI/cron summary must expose backlogs larger than one batch.
+  const [remainingRow] = await db.select({ count: orm.count() }).from(schema.credential)
+    .where(dueFilter)
+
   await db.delete(schema.credentialUsageHourly).where(orm.lt(schema.credentialUsageHourly.windowStart, now - preferences.analyticsRetentionDays * 86_400_000))
   await db.delete(schema.vaultNotification).where(orm.lt(schema.vaultNotification.createdAt, now - preferences.notificationRetentionDays * 86_400_000))
-  return { checked, remainingDue: Math.max(0, targets.length - checked) }
+  await db.delete(schema.credentialValidationHistory).where(orm.lt(
+    schema.credentialValidationHistory.checkedAt,
+    now - preferences.analyticsRetentionDays * 86_400_000,
+  ))
+  return { checked, remainingDue: remainingRow?.count ?? 0 }
 }

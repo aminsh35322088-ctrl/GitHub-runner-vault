@@ -28,9 +28,11 @@ import { availability } from './lib/credential-policy.ts'
 import { getCredentialForOwner, listAudit, listCredentialsForOwner } from './lib/credential-service.ts'
 import { peekEnrollmentLink } from './lib/enrollment.ts'
 import { linkHost, readStoredDoc, type CredentialDoc } from './lib/credential-docs.ts'
-import { Bell, KeyRound, LayoutDashboard, Plus, ChartNoAxesCombined, ShieldCheck, Settings as SettingsIcon, ClipboardList, Workflow, LogOut, Activity, Clock3, CheckCircle2, AlertTriangle, XCircle, ChevronRight } from 'lucide-react'
-import { getUsageAnalytics, listCredentialIntegrationMetadata, listNotifications, loadVaultPreferences, runScheduledCredentialValidation, unreadNotificationCount } from './lib/vault-observability.ts'
+import { KeyRound, LayoutDashboard, Plus, ChartNoAxesCombined, ShieldCheck, Settings as SettingsIcon, ClipboardList, Workflow, LogOut, Activity, Clock3, CheckCircle2, AlertTriangle, ChevronRight } from 'lucide-react'
+import { getUsageAnalytics, listCredentialIntegrationMetadata, listNotifications, listCredentialValidationHistory, loadVaultPreferences, runScheduledCredentialValidation, unreadNotificationCount } from './lib/vault-observability.ts'
 import { SectionCard } from './components/ui/section-card.tsx'
+import { NotificationBell } from './components/notification-actions.tsx'
+import { RunCredentialValidationButton } from './components/validation-actions.tsx'
 
 const themeScript = `(function(){var d=document.documentElement;var m=document.cookie.match(/(?:^|;\\s*)color-theme=(light|dark)(?:;|$)/);var t=m?m[1]:null;if(!t)t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(t==='dark')d.classList.add('dark');else d.classList.remove('dark')})()`
 
@@ -45,6 +47,7 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
   const dark = /(?:^|;\s*)color-theme=dark(?:;|$)/.test(request.headers.get('cookie') ?? '')
   const current = new URL(request.url).pathname
   const unread = signedIn ? await unreadNotificationCount(getDb()) : 0
+  const notifications = signedIn ? await listNotifications(getDb(), 8) : []
   const navItems = [
     { href: '/vault', label: 'Overview', icon: LayoutDashboard },
     { href: '/vault/services', label: 'Add', icon: Plus },
@@ -89,10 +92,7 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
                   </a>
                 </nav>
                 <div className="flex shrink-0 items-center gap-2">
-                  <a href="/vault/notifications" aria-label={unread ? `Notifications, ${unread} unread` : 'Notifications'} className={cn('relative grid size-10 place-items-center rounded-xl border border-border bg-card transition-colors hover:bg-muted', isActive('/vault/notifications') && 'border-primary/40 bg-primary/5 text-primary')}>
-                    <Bell className="size-[18px]" aria-hidden />
-                    {unread > 0 && <span className="absolute -right-1 -top-1 grid min-h-5 min-w-5 place-items-center rounded-full bg-destructive px-1 text-[10px] font-bold leading-none text-white">{unread > 99 ? '99+' : unread}</span>}
-                  </a>
+<NotificationBell unread={unread} notifications={notifications} />
                   <a href="/vault/settings" aria-label="Settings" className="hidden size-10 place-items-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:grid lg:hidden">
                     <SettingsIcon className="size-[18px]" aria-hidden />
                   </a>
@@ -429,7 +429,7 @@ export const app = new Spiceflow()
             <a href="/vault/integrations" className="inline-flex items-center gap-1 underline underline-offset-4">View integrations <ChevronRight className="size-3"/></a>
           </div>
         </section>
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
           {[
             { label: 'Total credentials', value: rows.length, icon: KeyRound, tone: 'bg-slate-500/10 text-slate-600 dark:text-slate-300' },
             { label: 'Verified', value: validCount, icon: CheckCircle2, tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' },
@@ -566,6 +566,9 @@ export const app = new Spiceflow()
           <dt className="text-muted-foreground">Auth header</dt><dd className="break-words font-mono">{c.authHeader}: {c.authScheme}</dd>
           <dt className="text-muted-foreground">Lifetime</dt><dd className="break-words">{c.lifetime}{c.expiresAt ? <> · expires <TimeAgo ts={c.expiresAt} /></> : null}</dd>
           <dt className="text-muted-foreground">Value stored</dt><dd>{c.hasValue ? 'yes (write-only)' : 'no'}</dd>
+          <dt className="text-muted-foreground">Last checked</dt><dd>{c.lastValidatedAt ? <TimeAgo ts={c.lastValidatedAt}/> : 'Never'}</dd>
+          <dt className="text-muted-foreground">Next check</dt><dd>{c.nextValidationAt ? <TimeAgo ts={c.nextValidationAt}/> : 'Not scheduled'}</dd>
+          {c.firstValidationFailureAt && <><dt className="text-muted-foreground">First failure</dt><dd><TimeAgo ts={c.firstValidationFailureAt}/> · {c.validationFailureCount} consecutive failures</dd></>}
         </dl>
         <CredentialValidationSummary value={c.validationDetails} />
         <section className="rounded-xl border border-border p-4 sm:p-5">
@@ -586,54 +589,49 @@ export const app = new Spiceflow()
     )
   })
 
-  .page('/vault/notifications', async ({ request }) => {
-    await requirePageSession(request)
-    const db = getDb()
-    const [rows, unread] = await Promise.all([listNotifications(db, 100), unreadNotificationCount(db)])
-    const { MarkAllNotificationsRead, MarkNotificationRead } = await import('./components/notification-actions.tsx')
-    const severityIcon = (severity: string) => severity === 'critical'
-      ? <XCircle className="size-5 text-destructive" />
-      : severity === 'warning' ? <AlertTriangle className="size-5 text-warning" />
-        : <CheckCircle2 className="size-5 text-success" />
-    return <div className="mx-auto w-full max-w-4xl space-y-6">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Activity center</p><h1 className="mt-1 text-2xl font-bold tracking-tight">Notifications</h1><p className="mt-1 text-sm text-muted-foreground">{unread} unread · only visible inside this Vault</p></div>
-        {unread > 0 ? <MarkAllNotificationsRead /> : null}
-      </div>
-      {rows.length === 0 ? <SectionCard title="All quiet" description="Credential validation and security events will appear here."><div className="grid min-h-40 place-items-center text-center"><div><Bell className="mx-auto size-8 text-muted-foreground" /><p className="mt-3 text-sm font-medium">No notifications yet</p><p className="mt-1 text-xs text-muted-foreground">You are all caught up.</p></div></div></SectionCard> :
-        <div className="space-y-3">{rows.map((item) => <article key={item.id} className={cn('flex min-w-0 items-start gap-3 rounded-2xl border p-4 transition-colors', item.readAt ? 'border-border bg-card' : 'border-primary/25 bg-primary/[0.035] shadow-sm')}>
-          <span className="mt-0.5 grid size-10 shrink-0 place-items-center rounded-xl bg-muted">{severityIcon(item.severity)}</span>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2"><h2 className="break-words text-sm font-semibold">{item.title}</h2>{!item.readAt ? <Badge variant="secondary">New</Badge> : null}</div>
-            <p className="mt-1 break-words text-sm text-muted-foreground">{item.message}</p>
-            <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-              <time dateTime={new Date(item.createdAt).toISOString()}>{new Date(item.createdAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' })} UTC</time>
-              {item.credentialId ? <a className="font-mono underline underline-offset-2" href={`/vault/credentials/${item.credentialId}`}>{item.credentialName || 'Open credential'}</a> : null}
-            </div>
-          </div>
-          <div className="shrink-0"><MarkNotificationRead id={item.id} read={Boolean(item.readAt)} /></div>
-        </article>)}</div>}
-    </div>
-  })
+
 
   .page('/vault/validation', async ({ request }) => {
     await requirePageSession(request)
-    const rows = await listCredentialsForOwner(getDb())
+    const db = getDb()
+    const rows = await listCredentialsForOwner(db)
+    const history = await listCredentialValidationHistory(db, 80)
     const statuses = ['valid', 'invalid', 'expired', 'unavailable', 'insufficient_permissions', 'unsupported', 'not_tested']
     const counts = Object.fromEntries(statuses.map((status) => [status, rows.filter((row) => row.validationStatus === status).length]))
     const labels: Record<string, string> = { valid: 'Valid', invalid: 'Invalid', expired: 'Expired', unavailable: 'Unreachable', insufficient_permissions: 'Insufficient access', unsupported: 'Unsupported', not_tested: 'Not tested' }
     const badge = (status: string) => <Badge variant={status === 'valid' ? 'secondary' : status === 'invalid' || status === 'expired' ? 'destructive' : 'outline'}>{labels[status] ?? status}</Badge>
     return <div className="mx-auto w-full max-w-5xl space-y-6">
-      <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Credential health</p><h1 className="mt-1 text-2xl font-bold tracking-tight">Validation</h1><p className="mt-1 text-sm text-muted-foreground">Scheduled checks run every 15 minutes and process only credentials whose configured validation interval is due.</p></div>
+      <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Credential health</p><h1 className="mt-1 text-2xl font-bold tracking-tight">Validation</h1><p className="mt-1 text-sm text-muted-foreground">Scheduled checks run every 15 minutes. Repeated failures use exponential backoff; manual checks are available per credential.</p></div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">{statuses.map((status) => <div key={status} className="rounded-2xl border border-border bg-card p-3 shadow-sm"><p className="text-2xl font-bold tabular-nums">{counts[status]}</p><p className="mt-1 text-xs text-muted-foreground">{labels[status]}</p></div>)}</div>
-      <SectionCard title="Credential checks" description="A timeout or rate limit never turns a token into Invalid.">
+      <SectionCard title="Credential checks" description="A timeout or rate limit never turns a token into Invalid. Consecutive failures are tracked separately from provider status.">
         {rows.length === 0 ? <p className="text-sm text-muted-foreground">No credentials have been registered yet.</p> : <div className="divide-y divide-border">{rows.map((row) => {
           const status = row.validationStatus || 'not_tested'
-          return <a key={row.id} href={`/vault/credentials/${row.id}`} className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0 hover:bg-muted/30">
-            <span className="min-w-0 flex-1"><span className="block break-all font-mono text-sm font-semibold">{row.name}</span><span className="mt-1 block text-xs text-muted-foreground">{row.service}</span></span>
-            <span className="flex items-center gap-3"><span className="hidden text-right text-xs text-muted-foreground sm:block">{row.lastValidatedAt ? <>Last checked<br/><TimeAgo ts={row.lastValidatedAt}/></> : 'Never checked'}</span>{badge(status)}<ChevronRight className="size-4 text-muted-foreground"/></span>
-          </a>
+          return <div key={row.id} className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
+            <a href={`/vault/credentials/${row.id}`} className="min-w-0 flex-1 rounded-lg py-1 hover:text-primary">
+              <span className="block break-all font-mono text-sm font-semibold">{row.name}</span>
+              <span className="mt-1 block text-xs text-muted-foreground">{row.service}</span>
+            </a>
+            <div className="flex min-w-[11rem] flex-col items-end gap-1.5">
+              <div className="flex items-center gap-2">{badge(status)}{row.validationFailureCount > 0 && <Badge variant="outline">{row.validationFailureCount} failed</Badge>}</div>
+              <span className="text-right text-xs text-muted-foreground">{row.lastValidatedAt ? <>Last checked <TimeAgo ts={row.lastValidatedAt}/></> : 'Never checked'}</span>
+              <span className="text-right text-xs text-muted-foreground">{row.nextValidationAt ? <>Next check <TimeAgo ts={row.nextValidationAt}/></> : 'No next check scheduled'}</span>
+              {row.firstValidationFailureAt && <span className="text-right text-xs text-destructive">First failure <TimeAgo ts={row.firstValidationFailureAt}/></span>}
+              {row.status === 'active' && row.hasValue && <RunCredentialValidationButton id={row.id}/>}
+            </div>
+          </div>
         })}</div>}
+      </SectionCard>
+      <SectionCard title="Recent validation history" description="Each scheduled or manual attempt is recorded with status, permissions metadata and duration. Secret values are never included.">
+        {history.length === 0 ? <p className="text-sm text-muted-foreground">No validation attempts have been recorded yet.</p> : <div className="divide-y divide-border">
+          {history.map((item) => <article key={item.id} className="flex flex-wrap items-start justify-between gap-3 py-3 first:pt-0 last:pb-0">
+            <div className="min-w-0 flex-1">
+              <a href={`/vault/credentials/${item.credentialId}`} className="break-all font-mono text-sm font-semibold hover:text-primary">{item.credentialName}</a>
+              <p className="mt-1 text-xs text-muted-foreground">{item.provider} · {item.source === 'manual' ? 'Manual check' : 'Scheduled check'} · {item.durationMs} ms</p>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{item.message}</p>
+            </div>
+            <div className="flex shrink-0 flex-col items-end gap-1">{badge(item.status)}<TimeAgo ts={item.checkedAt}/></div>
+          </article>)}
+        </div>}
       </SectionCard>
     </div>
   })
@@ -643,6 +641,7 @@ export const app = new Spiceflow()
     const analytics = await getUsageAnalytics(getDb())
     const maxHourly = Math.max(1, ...analytics.series.map((row) => row.requests))
     const successRate = analytics.totals.requests ? Math.round(analytics.totals.successes / analytics.totals.requests * 100) : 0
+    const consumerRate = (successes: number, requests: number) => requests ? Math.round(successes / requests * 100) : 0
     const number = new Intl.NumberFormat('en-GB')
     return <div className="mx-auto w-full max-w-5xl space-y-6">
       <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Runtime insights</p><h1 className="mt-1 text-2xl font-bold tracking-tight">Usage analytics</h1><p className="mt-1 text-sm text-muted-foreground">Aggregated proxy activity over the last 30 days. Request headers, bodies and token values are never recorded.</p></div>
@@ -652,14 +651,27 @@ export const app = new Spiceflow()
           { label: 'Success rate', value: `${successRate}%`, icon: CheckCircle2 },
           { label: 'Average latency', value: analytics.totals.requests ? `${analytics.totals.averageLatencyMs} ms` : '—', icon: Clock3 },
           { label: 'Failed requests', value: number.format(analytics.totals.errors), icon: AlertTriangle },
+          { label: 'Peak latency', value: analytics.totals.requests ? String(analytics.totals.maxLatencyMs) + ' ms' : '—', icon: Clock3 },
         ].map((metric) => { const Icon = metric.icon; return <div key={metric.label} className="rounded-2xl border border-border bg-card p-4 shadow-sm"><span className="grid size-9 place-items-center rounded-xl bg-primary/10 text-primary"><Icon className="size-4"/></span><p className="mt-4 text-2xl font-bold tabular-nums">{metric.value}</p><p className="mt-1 text-xs text-muted-foreground">{metric.label}</p></div>})}
       </div>
       <SectionCard title="Request volume" description="Hourly usage during the last 24 hours">
         {analytics.series.length === 0 ? <div className="grid min-h-36 place-items-center text-center"><div><ChartNoAxesCombined className="mx-auto size-8 text-muted-foreground"/><p className="mt-2 text-sm font-medium">No usage recorded yet</p><p className="mt-1 text-xs text-muted-foreground">The chart fills as the Runner and supported CLI tools make requests.</p></div></div> :
           <div className="space-y-2">{analytics.series.map((row) => <div key={row.windowStart} className="grid grid-cols-[4.5rem_minmax(0,1fr)_3rem] items-center gap-3 text-xs"><span className="text-muted-foreground">{new Date(row.windowStart).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })}</span><div className="h-2.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(2, row.requests / maxHourly * 100)}%` }} /></div><span className="text-right tabular-nums text-muted-foreground">{row.requests}</span></div>)}</div>}
       </SectionCard>
+      <SectionCard title="Usage by tool" description="Requests are attributed to the Runner or the CLI integration that initiated them. No request payloads or secrets are retained.">
+        {analytics.consumers.length === 0 ? <p className="text-sm text-muted-foreground">No consumer usage recorded yet. CLI attribution appears after a tool makes its first proxy request.</p> : <div className="grid gap-3 sm:grid-cols-2">
+          {analytics.consumers.map((row) => <article key={row.consumer} className="rounded-xl border border-border p-3">
+            <div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="break-all font-mono text-sm font-semibold">{row.consumer === 'runner' ? 'Runner' : row.consumer.replace(/^cli:/, '')}</p><p className="mt-1 text-xs text-muted-foreground">{row.consumer === 'runner' ? 'Direct Runner proxy use' : 'CLI integration'}</p></div><Badge variant="outline">{consumerRate(row.successes, row.requests)}% success</Badge></div>
+            <div className="mt-3 grid grid-cols-3 gap-2 border-t border-border pt-3">
+              <div><p className="text-lg font-semibold tabular-nums">{number.format(row.requests)}</p><p className="text-[11px] text-muted-foreground">Requests</p></div>
+              <div><p className="text-lg font-semibold tabular-nums">{number.format(row.errors)}</p><p className="text-[11px] text-muted-foreground">Errors</p></div>
+              <div><p className="text-lg font-semibold tabular-nums">{row.averageLatencyMs} ms</p><p className="text-[11px] text-muted-foreground">Avg. latency</p></div>
+            </div>
+          </article>)}
+        </div>}
+      </SectionCard>
       <SectionCard title="Top credentials" description="Ranked by proxy request count over the last 30 days">
-        {analytics.credentials.length === 0 ? <p className="text-sm text-muted-foreground">No credential usage to report.</p> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Credential</TableHead><TableHead>Service</TableHead><TableHead>Requests</TableHead><TableHead>Errors</TableHead><TableHead>Avg. latency</TableHead></TableRow></TableHeader><TableBody>{analytics.credentials.map((row) => <TableRow key={row.credentialId}><TableCell><a href={`/vault/credentials/${row.credentialId}`} className="font-mono text-xs underline">{row.credentialName}</a></TableCell><TableCell>{row.service}</TableCell><TableCell className="tabular-nums">{number.format(row.requests)}</TableCell><TableCell className="tabular-nums">{number.format(row.errors)}</TableCell><TableCell className="tabular-nums">{row.averageLatencyMs} ms</TableCell></TableRow>)}</TableBody></Table></div>}
+        {analytics.credentials.length === 0 ? <p className="text-sm text-muted-foreground">No credential usage to report.</p> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Credential</TableHead><TableHead>Service</TableHead><TableHead>Requests</TableHead><TableHead>Success</TableHead><TableHead>Errors</TableHead><TableHead>Avg. latency</TableHead></TableRow></TableHeader><TableBody>{analytics.credentials.map((row) => <TableRow key={row.credentialId}><TableCell><a href={'/vault/credentials/' + row.credentialId} className="font-mono text-xs underline">{row.credentialName}</a></TableCell><TableCell>{row.service}</TableCell><TableCell className="tabular-nums">{number.format(row.requests)}</TableCell><TableCell className="tabular-nums">{consumerRate(row.successes, row.requests)}%</TableCell><TableCell className="tabular-nums">{number.format(row.errors)}</TableCell><TableCell className="tabular-nums">{row.averageLatencyMs} ms</TableCell></TableRow>)}</TableBody></Table></div>}
       </SectionCard>
     </div>
   })
