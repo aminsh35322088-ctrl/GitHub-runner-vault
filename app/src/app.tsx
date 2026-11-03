@@ -28,7 +28,7 @@ import { availability } from './lib/credential-policy.ts'
 import { getCredentialForOwner, listAudit, listCredentialsForOwner } from './lib/credential-service.ts'
 import { peekEnrollmentLink } from './lib/enrollment.ts'
 import { linkHost, readStoredDoc, type CredentialDoc } from './lib/credential-docs.ts'
-import { KeyRound, LayoutDashboard, Plus, ChartNoAxesCombined, ShieldCheck, Settings as SettingsIcon, ClipboardList, Workflow, LogOut, Activity, Clock3, CheckCircle2, AlertTriangle, ChevronRight, LockKeyhole, ArrowUpRight, Fingerprint, Search } from 'lucide-react'
+import { KeyRound, LayoutDashboard, Plus, ChartNoAxesCombined, ShieldCheck, Settings as SettingsIcon, ClipboardList, Workflow, LogOut, Activity, Clock3, CheckCircle2, AlertTriangle, ChevronRight, LockKeyhole, ArrowUpRight, Fingerprint, Search, Gauge, Globe } from 'lucide-react'
 import { getUsageAnalytics, listCredentialIntegrationMetadata, listNotifications, listCredentialValidationHistory, loadVaultPreferences, runScheduledCredentialValidation, unreadNotificationCount } from './lib/vault-observability.ts'
 import { SectionCard } from './components/ui/section-card.tsx'
 import { NotificationBell } from './components/notification-actions.tsx'
@@ -874,44 +874,156 @@ export const app = new Spiceflow()
     const db = getDb()
     const rows = await listCredentialsForOwner(db)
     const history = await listCredentialValidationHistory(db, 80)
-    const statuses = ['valid', 'invalid', 'expired', 'unavailable', 'insufficient_permissions', 'unsupported', 'not_tested']
-    const counts = Object.fromEntries(statuses.map((status) => [status, rows.filter((row) => row.validationStatus === status).length]))
-    const labels: Record<string, string> = { valid: 'Valid', invalid: 'Invalid', expired: 'Expired', unavailable: 'Unreachable', insufficient_permissions: 'Insufficient access', unsupported: 'Unsupported', not_tested: 'Not tested' }
-    const badge = (status: string) => <Badge variant={status === 'valid' ? 'secondary' : status === 'invalid' || status === 'expired' ? 'destructive' : 'outline'}>{labels[status] ?? status}</Badge>
-    return <div className="mx-auto w-full max-w-5xl space-y-6">
-      <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Credential health</p><h1 className="mt-1 text-2xl font-bold tracking-tight">Validation</h1><p className="mt-1 text-sm text-muted-foreground">Scheduled checks run every 15 minutes. Repeated failures use exponential backoff; manual checks are available per credential.</p></div>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">{statuses.map((status) => <div key={status} className="rounded-2xl border border-border bg-card p-3 shadow-sm"><p className="text-2xl font-bold tabular-nums">{counts[status]}</p><p className="mt-1 text-xs text-muted-foreground">{labels[status]}</p></div>)}</div>
-      <SectionCard title="Credential checks" description="A timeout or rate limit never turns a token into Invalid. Consecutive failures are tracked separately from provider status.">
-        {rows.length === 0 ? <p className="text-sm text-muted-foreground">No credentials have been registered yet.</p> : <div className="divide-y divide-border">{rows.map((row) => {
-          const status = row.validationStatus || 'not_tested'
-          return <div key={row.id} className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
-            <a href={`/vault/credentials/${row.id}`} className="min-w-0 flex-1 rounded-lg py-1 hover:text-primary">
-              <span className="block break-all font-mono text-sm font-semibold">{row.name}</span>
-              <span className="mt-1 block text-xs text-muted-foreground">{row.service}</span>
-            </a>
-            <div className="flex min-w-[11rem] flex-col items-end gap-1.5">
-              <div className="flex items-center gap-2">{badge(status)}{row.validationFailureCount > 0 && <Badge variant="outline">{row.validationFailureCount} failed</Badge>}</div>
-              <span className="text-right text-xs text-muted-foreground">{row.lastValidatedAt ? <>Last checked <TimeAgo ts={row.lastValidatedAt}/></> : 'Never checked'}</span>
-              <span className="text-right text-xs text-muted-foreground">{row.nextValidationAt ? <>Next check <TimeAgo ts={row.nextValidationAt}/></> : 'No next check scheduled'}</span>
-              {row.firstValidationFailureAt && <span className="text-right text-xs text-destructive">First failure <TimeAgo ts={row.firstValidationFailureAt}/></span>}
-              {row.status === 'active' && row.hasValue && <RunCredentialValidationButton id={row.id}/>}
-            </div>
+    const params = new URL(request.url).searchParams
+    const query = params.get('q')?.trim().slice(0, 100) ?? ''
+    const selectedStatus = params.get('status') ?? 'all'
+    const searchable = (value: string) => !query || value.toLowerCase().includes(query.toLowerCase())
+    const filteredRows = rows.filter((row) =>
+      searchable(row.name + ' ' + row.service)
+      && (selectedStatus === 'all' || row.validationStatus === selectedStatus),
+    )
+    const filteredHistory = history.filter((item) =>
+      searchable(item.credentialName + ' ' + item.provider + ' ' + item.message)
+      && (selectedStatus === 'all' || item.status === selectedStatus),
+    )
+    const counts = {
+      valid: rows.filter((row) => row.validationStatus === 'valid').length,
+      attention: rows.filter((row) => ['invalid', 'expired', 'insufficient_permissions'].includes(row.validationStatus ?? '')).length,
+      unreachable: rows.filter((row) => row.validationStatus === 'unavailable').length,
+      review: rows.filter((row) => ['unsupported', 'not_tested'].includes(row.validationStatus ?? '') || !row.validationStatus).length,
+    }
+    const now = Date.now()
+    return (
+      <div className="mx-auto w-full min-w-0 max-w-[1360px] space-y-7">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="min-w-0">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Security & insights <span className="mx-1.5 text-muted-foreground/50">/</span> Health</p>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-[2rem]">Credential health</h1>
+            <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-muted-foreground">Verification state, retry schedule and provider-reported access for every stored credential.</p>
           </div>
-        })}</div>}
-      </SectionCard>
-      <SectionCard title="Recent validation history" description="Each scheduled or manual attempt is recorded with status, permissions metadata and duration. Secret values are never included.">
-        {history.length === 0 ? <p className="text-sm text-muted-foreground">No validation attempts have been recorded yet.</p> : <div className="divide-y divide-border">
-          {history.map((item) => <article key={item.id} className="flex flex-wrap items-start justify-between gap-3 py-3 first:pt-0 last:pb-0">
-            <div className="min-w-0 flex-1">
-              <a href={`/vault/credentials/${item.credentialId}`} className="break-all font-mono text-sm font-semibold hover:text-primary">{item.credentialName}</a>
-              <p className="mt-1 text-xs text-muted-foreground">{item.provider} · {item.source === 'manual' ? 'Manual check' : 'Scheduled check'} · {item.durationMs} ms</p>
-              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{item.message}</p>
+          <Badge variant="outline" className="min-h-8 px-3">Scheduled checks · every 15 minutes</Badge>
+        </div>
+
+        <section aria-label="Verification summary" className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+          {[
+            { label: 'Verified', value: counts.valid, note: 'Provider confirmed', icon: CheckCircle2, tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' },
+            { label: 'Needs attention', value: counts.attention, note: 'Invalid, expired or limited', icon: AlertTriangle, tone: 'bg-rose-500/10 text-rose-700 dark:text-rose-300' },
+            { label: 'Unreachable', value: counts.unreachable, note: 'Temporary or network issue', icon: Activity, tone: 'bg-amber-500/10 text-amber-700 dark:text-amber-300' },
+            { label: 'To review', value: counts.review, note: 'Unsupported or not checked', icon: Clock3, tone: 'bg-slate-500/10 text-slate-600 dark:text-slate-300' },
+          ].map((metric) => {
+            const Icon = metric.icon
+            return <article key={metric.label} className="rounded-2xl border border-border bg-card p-4 sm:p-5">
+              <div className="flex items-center justify-between gap-2"><p className="text-xs font-medium text-muted-foreground">{metric.label}</p><span className={cn('grid size-9 place-items-center rounded-xl', metric.tone)}><Icon className="size-[17px]" /></span></div>
+              <p className="mt-3 text-3xl font-semibold tracking-tight tabular-nums">{metric.value}</p>
+              <p className="mt-1.5 text-[11px] text-muted-foreground">{metric.note}</p>
+            </article>
+          })}
+        </section>
+
+        <SectionCard
+          title="Credential checks"
+          description="A timeout or rate limit never turns a token into Invalid. Consecutive failures are tracked separately from provider status."
+          icon={<ShieldCheck className="size-[18px]" />}
+        >
+          {rows.length > 0 && <form method="get" action="/vault/validation" className="mb-4 flex flex-col gap-2 sm:flex-row">
+            <label className="flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-xl border border-input bg-background px-3">
+              <Search className="size-4 shrink-0 text-muted-foreground" />
+              <input type="search" name="q" defaultValue={query} placeholder="Search credential or provider…" className="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/70" />
+            </label>
+            <div className="flex gap-2">
+              <select name="status" defaultValue={selectedStatus} aria-label="Filter by validation status" className="h-10 min-w-0 flex-1 rounded-xl border border-input bg-background px-3 text-xs sm:w-48 sm:flex-none">
+                <option value="all">All statuses</option>
+                <option value="valid">Verified</option>
+                <option value="invalid">Invalid</option>
+                <option value="expired">Expired</option>
+                <option value="insufficient_permissions">Limited access</option>
+                <option value="unavailable">Unreachable</option>
+                <option value="unsupported">Unsupported</option>
+                <option value="not_tested">Not checked</option>
+              </select>
+              <Button type="submit" variant="outline" size="lg">Filter</Button>
+              {(query || selectedStatus !== 'all') && <a href="/vault/validation" className="inline-flex min-h-10 items-center rounded-xl px-3 text-xs font-medium text-muted-foreground hover:bg-muted">Clear</a>}
             </div>
-            <div className="flex shrink-0 flex-col items-end gap-1">{badge(item.status)}<TimeAgo ts={item.checkedAt}/></div>
-          </article>)}
-        </div>}
-      </SectionCard>
-    </div>
+          </form>}
+
+          {rows.length === 0 ? (
+            <div className="grid justify-items-center rounded-xl border border-dashed border-border bg-muted/15 px-5 py-10 text-center">
+              <span className="grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary"><ShieldCheck className="size-5" /></span>
+              <h3 className="mt-4 text-sm font-semibold">Nothing to verify yet</h3>
+              <p className="mt-1.5 max-w-sm text-xs leading-relaxed text-muted-foreground">Add a provider credential to begin scheduled checks and permission discovery.</p>
+              <a href="/vault/services" className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-xl bg-primary px-4 text-xs font-semibold text-primary-foreground"><Plus className="size-3.5" /> Add credential</a>
+            </div>
+          ) : filteredRows.length === 0 ? (
+            <div className="grid justify-items-center rounded-xl border border-dashed border-border bg-muted/15 px-5 py-10 text-center">
+              <Search className="size-5 text-muted-foreground" />
+              <p className="mt-3 text-sm font-semibold">No matching credentials</p>
+              <p className="mt-1 text-xs text-muted-foreground">Try another search term or validation status.</p>
+              <a href="/vault/validation" className="mt-3 inline-flex min-h-8 items-center rounded-lg px-3 text-xs font-semibold text-primary hover:bg-primary/5">Clear filters</a>
+            </div>
+          ) : (
+            <>
+              <div className="mb-3 text-[11px] text-muted-foreground">{filteredRows.length} of {rows.length} credentials</div>
+              <div className="hidden overflow-x-auto sm:block">
+                <Table>
+                  <TableHeader><TableRow><TableHead>Credential</TableHead><TableHead>Status</TableHead><TableHead>Failures</TableHead><TableHead>Last checked</TableHead><TableHead>Next check</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader>
+                  <TableBody>
+                    {filteredRows.map((row) => <TableRow key={row.id}>
+                      <TableCell><a href={'/vault/credentials/' + row.id} className="font-mono text-xs font-semibold text-foreground underline-offset-4 hover:text-primary hover:underline">{row.name}</a><p className="mt-1 text-[11px] text-muted-foreground">{row.service}</p></TableCell>
+                      <TableCell>{validationBadge(row.validationStatus)}</TableCell>
+                      <TableCell>{row.validationFailureCount > 0 ? <span className="text-xs font-medium tabular-nums text-destructive">{row.validationFailureCount} consecutive</span> : <span className="text-xs text-muted-foreground">—</span>}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{row.lastValidatedAt ? <TimeAgo ts={row.lastValidatedAt} /> : 'Never'}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{row.nextValidationAt ? <TimeAgo ts={row.nextValidationAt} /> : 'Not scheduled'}</TableCell>
+                      <TableCell><div className="flex justify-end">{row.status === 'active' && row.hasValue ? <RunCredentialValidationButton id={row.id} /> : <span className="text-[11px] text-muted-foreground">Unavailable</span>}</div></TableCell>
+                    </TableRow>)}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="grid gap-2.5 sm:hidden">
+                {filteredRows.map((row) => <article key={row.id} className="min-w-0 rounded-xl border border-border bg-background p-3.5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0"><a href={'/vault/credentials/' + row.id} className="break-all font-mono text-xs font-semibold hover:text-primary">{row.name}</a><p className="mt-1 text-xs text-muted-foreground">{row.service}</p></div>
+                    {validationBadge(row.validationStatus)}
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-3 border-t border-border/70 pt-3 text-[11px]">
+                    <div><p className="text-muted-foreground">Last checked</p><p className="mt-1">{row.lastValidatedAt ? <TimeAgo ts={row.lastValidatedAt} /> : 'Never'}</p></div>
+                    <div><p className="text-muted-foreground">Next check</p><p className="mt-1">{row.nextValidationAt ? <TimeAgo ts={row.nextValidationAt} /> : 'Not scheduled'}</p></div>
+                    {row.validationFailureCount > 0 && <div className="col-span-2 text-destructive">{row.validationFailureCount} consecutive failures · first <TimeAgo ts={row.firstValidationFailureAt ?? now} /></div>}
+                  </div>
+                  {row.status === 'active' && row.hasValue && <div className="mt-3 border-t border-border/70 pt-3"><RunCredentialValidationButton id={row.id} /></div>}
+                </article>)}
+              </div>
+            </>
+          )}
+        </SectionCard>
+
+        <SectionCard
+          title="Validation history"
+          description="The latest 80 scheduled and manual attempts. Only verification metadata is retained; secret values are never recorded."
+          icon={<Activity className="size-[18px]" />}
+          action={<Badge variant="outline">{filteredHistory.length} events</Badge>}
+        >
+          {filteredHistory.length === 0 ? (
+            <div className="flex items-center gap-3 rounded-xl bg-muted/25 px-4 py-5">
+              <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-background text-muted-foreground"><Activity className="size-4" /></span>
+              <div><p className="text-xs font-semibold">{history.length ? 'No history matches these filters' : 'No validation events yet'}</p><p className="mt-1 text-xs text-muted-foreground">Every scheduled or manual check will appear here.</p></div>
+            </div>
+          ) : (
+            <div className="divide-y divide-border/70">
+              {filteredHistory.map((item) => <article key={item.id} className="flex min-w-0 items-start gap-3 py-3 first:pt-0 last:pb-0">
+                <span className={cn('mt-0.5 grid size-8 shrink-0 place-items-center rounded-lg', item.status === 'valid' ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' : item.status === 'invalid' || item.status === 'expired' ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300' : 'bg-amber-500/10 text-amber-700 dark:text-amber-300')}>
+                  {item.status === 'valid' ? <CheckCircle2 className="size-4" /> : item.status === 'invalid' || item.status === 'expired' ? <AlertTriangle className="size-4" /> : <Clock3 className="size-4" />}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center justify-between gap-2"><a href={'/vault/credentials/' + item.credentialId} className="break-all text-xs font-semibold hover:text-primary">{item.credentialName}</a>{validationBadge(item.status)}</div>
+                  <p className="mt-1 text-[11px] text-muted-foreground">{item.provider} · {item.source === 'manual' ? 'Manual check' : 'Scheduled check'} · {item.durationMs} ms · <TimeAgo ts={item.checkedAt} /></p>
+                  <p className="mt-1 break-words text-xs leading-relaxed text-muted-foreground">{item.message}</p>
+                </div>
+              </article>)}
+            </div>
+          )}
+        </SectionCard>
+      </div>
+    )
   })
 
   .page('/vault/analytics', async ({ request }) => {
@@ -921,56 +1033,214 @@ export const app = new Spiceflow()
     const successRate = analytics.totals.requests ? Math.round(analytics.totals.successes / analytics.totals.requests * 100) : 0
     const consumerRate = (successes: number, requests: number) => requests ? Math.round(successes / requests * 100) : 0
     const number = new Intl.NumberFormat('en-GB')
-    return <div className="mx-auto w-full max-w-5xl space-y-6">
-      <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Runtime insights</p><h1 className="mt-1 text-2xl font-bold tracking-tight">Usage analytics</h1><p className="mt-1 text-sm text-muted-foreground">Aggregated proxy activity over the last 30 days. Request headers, bodies and token values are never recorded.</p></div>
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        {[
-          { label: 'Requests', value: number.format(analytics.totals.requests), icon: Activity },
-          { label: 'Success rate', value: `${successRate}%`, icon: CheckCircle2 },
-          { label: 'Average latency', value: analytics.totals.requests ? `${analytics.totals.averageLatencyMs} ms` : '—', icon: Clock3 },
-          { label: 'Failed requests', value: number.format(analytics.totals.errors), icon: AlertTriangle },
-          { label: 'Peak latency', value: analytics.totals.requests ? String(analytics.totals.maxLatencyMs) + ' ms' : '—', icon: Clock3 },
-        ].map((metric) => { const Icon = metric.icon; return <div key={metric.label} className="rounded-2xl border border-border bg-card p-4 shadow-sm"><span className="grid size-9 place-items-center rounded-xl bg-primary/10 text-primary"><Icon className="size-4"/></span><p className="mt-4 text-2xl font-bold tabular-nums">{metric.value}</p><p className="mt-1 text-xs text-muted-foreground">{metric.label}</p></div>})}
-      </div>
-      <SectionCard title="Request volume" description="Hourly usage during the last 24 hours">
-        {analytics.series.length === 0 ? <div className="grid min-h-36 place-items-center text-center"><div><ChartNoAxesCombined className="mx-auto size-8 text-muted-foreground"/><p className="mt-2 text-sm font-medium">No usage recorded yet</p><p className="mt-1 text-xs text-muted-foreground">The chart fills as the Runner and supported CLI tools make requests.</p></div></div> :
-          <div className="space-y-2">{analytics.series.map((row) => <div key={row.windowStart} className="grid grid-cols-[4.5rem_minmax(0,1fr)_3rem] items-center gap-3 text-xs"><span className="text-muted-foreground">{new Date(row.windowStart).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })}</span><div className="h-2.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(2, row.requests / maxHourly * 100)}%` }} /></div><span className="text-right tabular-nums text-muted-foreground">{row.requests}</span></div>)}</div>}
-      </SectionCard>
-      <SectionCard title="Usage by tool" description="Requests are attributed to the Runner or the CLI integration that initiated them. No request payloads or secrets are retained.">
-        {analytics.consumers.length === 0 ? <p className="text-sm text-muted-foreground">No consumer usage recorded yet. CLI attribution appears after a tool makes its first proxy request.</p> : <div className="grid gap-3 sm:grid-cols-2">
-          {analytics.consumers.map((row) => <article key={row.consumer} className="rounded-xl border border-border p-3">
-            <div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="break-all font-mono text-sm font-semibold">{row.consumer === 'runner' ? 'Runner' : row.consumer.replace(/^cli:/, '')}</p><p className="mt-1 text-xs text-muted-foreground">{row.consumer === 'runner' ? 'Direct Runner proxy use' : 'CLI integration'}</p></div><Badge variant="outline">{consumerRate(row.successes, row.requests)}% success</Badge></div>
-            <div className="mt-3 grid grid-cols-3 gap-2 border-t border-border pt-3">
-              <div><p className="text-lg font-semibold tabular-nums">{number.format(row.requests)}</p><p className="text-[11px] text-muted-foreground">Requests</p></div>
-              <div><p className="text-lg font-semibold tabular-nums">{number.format(row.errors)}</p><p className="text-[11px] text-muted-foreground">Errors</p></div>
-              <div><p className="text-lg font-semibold tabular-nums">{row.averageLatencyMs} ms</p><p className="text-[11px] text-muted-foreground">Avg. latency</p></div>
+    const firstHour = analytics.series[0]
+    const lastHour = analytics.series[analytics.series.length - 1]
+    return (
+      <div className="mx-auto w-full min-w-0 max-w-[1360px] space-y-7">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="min-w-0">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Security & insights <span className="mx-1.5 text-muted-foreground/50">/</span> Runtime</p>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-[2rem]">Usage analytics</h1>
+            <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-muted-foreground">Aggregated proxy activity across the last 30 days. Request headers, bodies and token values are never recorded.</p>
+          </div>
+          <Badge variant="outline" className="min-h-8 px-3">30-day window</Badge>
+        </div>
+
+        <section aria-label="Usage summary" className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+          {[
+            { label: 'Requests', value: number.format(analytics.totals.requests), note: 'Proxy calls', icon: Activity, tone: 'bg-slate-500/10 text-slate-600 dark:text-slate-300' },
+            { label: 'Success rate', value: successRate + '%', note: number.format(analytics.totals.successes) + ' successful', icon: CheckCircle2, tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' },
+            { label: 'Failed requests', value: number.format(analytics.totals.errors), note: 'Upstream failures', icon: AlertTriangle, tone: analytics.totals.errors ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300' : 'bg-slate-500/10 text-slate-500 dark:text-slate-300' },
+            { label: 'Average latency', value: analytics.totals.requests ? analytics.totals.averageLatencyMs + ' ms' : '—', note: 'Per request', icon: Clock3, tone: 'bg-sky-500/10 text-sky-700 dark:text-sky-300' },
+            { label: 'Peak latency', value: analytics.totals.requests ? analytics.totals.maxLatencyMs + ' ms' : '—', note: 'Highest observed', icon: Gauge, tone: 'bg-violet-500/10 text-violet-700 dark:text-violet-300' },
+          ].map((metric) => {
+            const Icon = metric.icon
+            return <article key={metric.label} className="min-w-0 rounded-2xl border border-border bg-card p-4 sm:p-5">
+              <div className="flex items-center justify-between gap-2"><p className="text-xs font-medium text-muted-foreground">{metric.label}</p><span className={cn('grid size-9 shrink-0 place-items-center rounded-xl', metric.tone)}><Icon className="size-[17px]" /></span></div>
+              <p className="mt-3 truncate text-[1.65rem] font-semibold tracking-tight tabular-nums sm:text-2xl">{metric.value}</p>
+              <p className="mt-1.5 text-[11px] text-muted-foreground">{metric.note}</p>
+            </article>
+          })}
+        </section>
+
+        <SectionCard
+          title="Request volume"
+          description="Hourly request totals over the most recent 24-hour window."
+          icon={<ChartNoAxesCombined className="size-[18px]" />}
+          action={analytics.series.length > 0 ? <span className="text-[11px] text-muted-foreground">Peak · {number.format(maxHourly)} requests/hour</span> : null}
+        >
+          {analytics.series.length === 0 ? (
+            <div className="grid min-h-44 justify-items-center content-center rounded-xl border border-dashed border-border bg-muted/15 px-5 py-8 text-center">
+              <ChartNoAxesCombined className="size-8 text-muted-foreground" />
+              <p className="mt-3 text-sm font-semibold">No usage recorded yet</p>
+              <p className="mt-1 max-w-sm text-xs leading-relaxed text-muted-foreground">The chart fills as the Runner and supported CLI tools make requests through the Vault proxy.</p>
             </div>
-          </article>)}
-        </div>}
-      </SectionCard>
-      <SectionCard title="Top credentials" description="Ranked by proxy request count over the last 30 days">
-        {analytics.credentials.length === 0 ? <p className="text-sm text-muted-foreground">No credential usage to report.</p> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Credential</TableHead><TableHead>Service</TableHead><TableHead>Requests</TableHead><TableHead>Success</TableHead><TableHead>Errors</TableHead><TableHead>Avg. latency</TableHead></TableRow></TableHeader><TableBody>{analytics.credentials.map((row) => <TableRow key={row.credentialId}><TableCell><a href={'/vault/credentials/' + row.credentialId} className="font-mono text-xs underline">{row.credentialName}</a></TableCell><TableCell>{row.service}</TableCell><TableCell className="tabular-nums">{number.format(row.requests)}</TableCell><TableCell className="tabular-nums">{consumerRate(row.successes, row.requests)}%</TableCell><TableCell className="tabular-nums">{number.format(row.errors)}</TableCell><TableCell className="tabular-nums">{row.averageLatencyMs} ms</TableCell></TableRow>)}</TableBody></Table></div>}
-      </SectionCard>
-    </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex h-44 items-end gap-1.5 rounded-xl border border-border/70 bg-muted/15 px-3 pb-3 pt-4 sm:gap-2 sm:px-4" role="img" aria-label="Hourly request volume chart for the last 24 hours">
+                {analytics.series.map((row) => {
+                  const height = row.requests ? Math.max(5, row.requests / maxHourly * 100) : 2
+                  return <div key={row.windowStart} title={new Date(row.windowStart).toLocaleString('en-GB', { dateStyle: 'medium', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }) + ' UTC · ' + row.requests + ' requests'} className="group flex h-full min-w-0 flex-1 flex-col justify-end">
+                    <span className="mb-1 hidden text-center text-[9px] tabular-nums text-muted-foreground group-hover:block">{row.requests || ''}</span>
+                    <span className={cn('block w-full rounded-t-[4px] transition-opacity group-hover:opacity-100', row.requests ? 'bg-primary/75 group-hover:bg-primary' : 'bg-border/70')} style={{ height: height + '%' }} />
+                  </div>
+                })}
+              </div>
+              <div className="flex items-center justify-between text-[11px] text-muted-foreground"><span>{firstHour ? new Date(firstHour.windowStart).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }) + ' UTC' : ''}</span><span>Hourly buckets</span><span>{lastHour ? new Date(lastHour.windowStart).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }) + ' UTC' : ''}</span></div>
+            </div>
+          )}
+        </SectionCard>
+
+        <div className="grid gap-4 xl:grid-cols-2">
+          <SectionCard title="Usage by tool" description="Requests are attributed to the Runner or the CLI integration that initiated them." icon={<Workflow className="size-[18px]" />}>
+            {analytics.consumers.length === 0 ? (
+              <div className="flex items-center gap-3 rounded-xl bg-muted/25 px-4 py-5"><span className="grid size-9 shrink-0 place-items-center rounded-xl bg-background text-muted-foreground"><Workflow className="size-4" /></span><div><p className="text-xs font-semibold">No consumer usage recorded yet</p><p className="mt-1 text-xs text-muted-foreground">CLI attribution appears after a supported tool makes its first proxy request.</p></div></div>
+            ) : (
+              <div className="space-y-3">
+                {analytics.consumers.map((row) => <article key={row.consumer} className="rounded-xl border border-border p-3.5">
+                  <div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="break-all font-mono text-sm font-semibold">{row.consumer === 'runner' ? 'Runner' : row.consumer.replace(/^cli:/, '')}</p><p className="mt-1 text-xs text-muted-foreground">{row.consumer === 'runner' ? 'Direct Runner proxy use' : 'CLI integration'}</p></div><Badge variant="outline">{consumerRate(row.successes, row.requests)}% success</Badge></div>
+                  <div className="mt-3 grid grid-cols-2 gap-3 border-t border-border pt-3 sm:grid-cols-4">
+                    <div><p className="text-lg font-semibold tabular-nums">{number.format(row.requests)}</p><p className="text-[11px] text-muted-foreground">Requests</p></div>
+                    <div><p className="text-lg font-semibold tabular-nums">{number.format(row.errors)}</p><p className="text-[11px] text-muted-foreground">Errors</p></div>
+                    <div><p className="text-lg font-semibold tabular-nums">{row.averageLatencyMs} ms</p><p className="text-[11px] text-muted-foreground">Average</p></div>
+                    <div><p className="text-lg font-semibold tabular-nums">{row.maxLatencyMs} ms</p><p className="text-[11px] text-muted-foreground">Peak</p></div>
+                  </div>
+                </article>)}
+              </div>
+            )}
+          </SectionCard>
+
+          <SectionCard title="Top credentials" description="Ranked by proxy request count during the last 30 days." icon={<KeyRound className="size-[18px]" />}>
+            {analytics.credentials.length === 0 ? (
+              <div className="flex items-center gap-3 rounded-xl bg-muted/25 px-4 py-5"><span className="grid size-9 shrink-0 place-items-center rounded-xl bg-background text-muted-foreground"><KeyRound className="size-4" /></span><div><p className="text-xs font-semibold">No credential usage to report</p><p className="mt-1 text-xs text-muted-foreground">Usage is aggregated without retaining request data.</p></div></div>
+            ) : (
+              <div className="overflow-x-auto">
+                <Table><TableHeader><TableRow><TableHead>Credential</TableHead><TableHead>Requests</TableHead><TableHead>Success</TableHead><TableHead>Avg. latency</TableHead></TableRow></TableHeader>
+                  <TableBody>{analytics.credentials.map((row) => <TableRow key={row.credentialId}>
+                    <TableCell><a href={'/vault/credentials/' + row.credentialId} className="font-mono text-xs font-semibold underline-offset-4 hover:text-primary hover:underline">{row.credentialName}</a><p className="mt-1 text-[11px] text-muted-foreground">{row.service}</p></TableCell>
+                    <TableCell className="tabular-nums">{number.format(row.requests)}</TableCell><TableCell className="tabular-nums">{consumerRate(row.successes, row.requests)}%</TableCell><TableCell className="tabular-nums">{row.averageLatencyMs} ms</TableCell>
+                  </TableRow>)}</TableBody>
+                </Table>
+              </div>
+            )}
+          </SectionCard>
+        </div>
+        <p className="text-[11px] leading-relaxed text-muted-foreground">Analytics contain hourly aggregate counts and latency only. No API request headers, bodies or credential values are collected.</p>
+      </div>
+    )
   })
 
   .page('/vault/integrations', async ({ request }) => {
     await requirePageSession(request)
     const rows = await listCredentialIntegrationMetadata(getDb())
-    return <div className="mx-auto w-full max-w-4xl space-y-6">
-      <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Tool connectivity</p><h1 className="mt-1 text-2xl font-bold tracking-tight">Integrations</h1><p className="mt-1 text-sm text-muted-foreground">See which command-line tools can consume each credential through the Vault proxy. Raw tokens are never passed to CLI arguments or environment variables.</p></div>
-      {rows.length === 0 ? <SectionCard title="No integrations yet" description="Add a credential or register one from your Runner."/> : <div className="grid gap-3 lg:grid-cols-2">{rows.map((row) => <article key={row.id} className="min-w-0 rounded-2xl border border-border bg-card p-4 shadow-sm"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="break-all font-mono text-sm font-semibold">{row.name}</p><p className="mt-1 text-sm text-muted-foreground">{row.service}</p></div><Badge variant={row.status === 'active' ? 'secondary' : 'outline'}>{row.status}</Badge></div><div className="mt-3 rounded-xl bg-muted/60 p-3"><p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">API host</p><p className="mt-1 break-all font-mono text-xs">{row.host ?? 'Not detected'}</p></div><div className="mt-3 space-y-2">{row.tools.length ? row.tools.map((tool) => <div key={tool.id} className="rounded-xl border border-border p-3"><div className="flex items-center gap-2"><Workflow className="size-4 text-primary"/><p className="text-sm font-semibold">{tool.label}</p><code className="ml-auto rounded-md bg-muted px-2 py-1 text-xs">{tool.binary}</code></div><p className="mt-2 text-xs leading-relaxed text-muted-foreground">{tool.setupHint}</p></div>) : <p className="text-xs text-muted-foreground">No CLI consumer has been verified for this service yet. It remains available through the Runner proxy API.</p>}</div></article>)}</div>}
-    </div>
+    const toolCount = rows.reduce((total, row) => total + row.tools.length, 0)
+    const configuredCount = rows.filter((row) => row.tools.length > 0).length
+    const activeCount = rows.filter((row) => row.status === 'active').length
+    return (
+      <div className="mx-auto w-full min-w-0 max-w-[1360px] space-y-7">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="min-w-0">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Workspace <span className="mx-1.5 text-muted-foreground/50">/</span> Connectivity</p>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-[2rem]">Integrations</h1>
+            <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-muted-foreground">Reviewed command-line adapters route API traffic through the Vault proxy. Provider tokens are injected upstream and are not exposed as CLI arguments.</p>
+          </div>
+          <a href="/vault/services" className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90"><Plus className="size-4" /> Add credential</a>
+        </div>
+
+        <section className="grid grid-cols-2 gap-3 xl:grid-cols-3" aria-label="Integration summary">
+          {[
+            { label: 'Credentials', value: rows.length, note: 'With provider metadata', icon: KeyRound },
+            { label: 'Active credentials', value: activeCount, note: 'Currently enabled', icon: CheckCircle2 },
+            { label: 'CLI adapters', value: toolCount, note: configuredCount + ' credentials with a supported tool', icon: Workflow },
+          ].map((metric) => {
+            const Icon = metric.icon
+            return <article key={metric.label} className="rounded-2xl border border-border bg-card p-4 sm:p-5">
+              <div className="flex items-center justify-between gap-2"><p className="text-xs font-medium text-muted-foreground">{metric.label}</p><span className="grid size-9 place-items-center rounded-xl bg-primary/10 text-primary"><Icon className="size-[17px]" /></span></div>
+              <p className="mt-3 text-3xl font-semibold tracking-tight tabular-nums">{metric.value}</p>
+              <p className="mt-1.5 text-[11px] text-muted-foreground">{metric.note}</p>
+            </article>
+          })}
+        </section>
+
+        {rows.length === 0 ? (
+          <SectionCard title="No credential integrations yet" description="Add a reviewed provider preset or approve a registration request from your Runner." icon={<Workflow className="size-[18px]" />}>
+            <div className="grid justify-items-center rounded-xl border border-dashed border-border bg-muted/15 px-5 py-10 text-center">
+              <span className="grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary"><Workflow className="size-5" /></span>
+              <p className="mt-4 text-sm font-semibold">Connect your first provider</p>
+              <p className="mt-1.5 max-w-sm text-xs leading-relaxed text-muted-foreground">A credential becomes a CLI integration only when the provider has a reviewed adapter and matching allowed host.</p>
+              <a href="/vault/services" className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-xl bg-primary px-4 text-xs font-semibold text-primary-foreground"><Plus className="size-3.5" /> Browse providers</a>
+            </div>
+          </SectionCard>
+        ) : (
+          <SectionCard title="Credential integrations" description="Provider origin, credential state and the tools supported by each adapter." icon={<Workflow className="size-[18px]" />}>
+            <div className="grid gap-3 lg:grid-cols-2">
+              {rows.map((row) => <article key={row.id} className="min-w-0 rounded-xl border border-border bg-background p-4">
+                <div className="flex min-w-0 items-start justify-between gap-3">
+                  <div className="min-w-0"><a href={'/vault/credentials/' + row.id} className="break-all font-mono text-sm font-semibold underline-offset-4 hover:text-primary hover:underline">{row.name}</a><p className="mt-1 text-xs text-muted-foreground">{row.service}</p></div>
+                  <Badge variant={row.status === 'active' ? 'secondary' : 'outline'}>{row.status}</Badge>
+                </div>
+                <div className="mt-3 flex items-start gap-2 rounded-lg bg-muted/35 p-3">
+                  <Globe className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0"><p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Allowed API host</p><p className="mt-1 break-all font-mono text-xs">{row.host ?? 'Not detected'}</p></div>
+                </div>
+                <div className="mt-3">
+                  {row.tools.length ? (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2"><p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Supported CLI tools</p><Badge variant="outline">{row.tools.length}</Badge></div>
+                      {row.tools.map((tool) => <div key={tool.id} className="rounded-lg border border-border/80 p-3">
+                        <div className="flex flex-wrap items-center gap-2"><span className="grid size-7 place-items-center rounded-lg bg-primary/10 text-primary"><Workflow className="size-3.5" /></span><p className="text-xs font-semibold">{tool.label}</p><code className="ml-auto rounded-md bg-muted px-2 py-1 text-[10px]">{tool.binary}</code></div>
+                        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{tool.setupHint}</p>
+                        <p className="mt-2 break-all font-mono text-[10px] text-muted-foreground">{tool.variable ?? tool.flag ?? tool.integration}</p>
+                      </div>)}
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-border px-3 py-3">
+                      <p className="text-xs font-medium">Runner proxy available</p>
+                      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">No CLI adapter is verified for this provider. Requests can still use the authenticated Runner proxy API.</p>
+                    </div>
+                  )}
+                </div>
+              </article>)}
+            </div>
+          </SectionCard>
+        )}
+      </div>
+    )
   })
 
   .page('/vault/audit', async ({ request }) => {
     await requirePageSession(request)
     const rows = await listAudit(getDb(), { limit: 200 })
+    const actors = new Set(rows.map((row) => row.actor).filter(Boolean)).size
+    const credentials = new Set(rows.map((row) => row.credentialName).filter(Boolean)).size
     return (
-      <div className="mx-auto w-full min-w-0 max-w-4xl space-y-4">
-        <h1 className="text-xl font-semibold tracking-tight">Audit log</h1>
-        <p className="text-sm text-muted-foreground">Append-only. Results are what the vault observed; no secret values are ever recorded.</p>
-        <AuditTable rows={rows} />
+      <div className="mx-auto w-full min-w-0 max-w-[1360px] space-y-7">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="min-w-0">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Security & insights <span className="mx-1.5 text-muted-foreground/50">/</span> Accountability</p>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-[2rem]">Audit log</h1>
+            <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-muted-foreground">Append-only history of owner and Runner actions observed by the Vault. Secret values are never included.</p>
+          </div>
+          <Badge variant="outline" className="min-h-8 px-3">Latest {rows.length} events</Badge>
+        </div>
+
+        <section className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          {[
+            { label: 'Recorded events', value: rows.length, icon: ClipboardList },
+            { label: 'Actors', value: actors, icon: Fingerprint },
+            { label: 'Credentials touched', value: credentials, icon: KeyRound },
+          ].map((metric) => {
+            const Icon = metric.icon
+            return <article key={metric.label} className="rounded-2xl border border-border bg-card p-4 sm:p-5">
+              <div className="flex items-center justify-between gap-2"><p className="text-xs font-medium text-muted-foreground">{metric.label}</p><span className="grid size-9 place-items-center rounded-xl bg-primary/10 text-primary"><Icon className="size-[17px]" /></span></div>
+              <p className="mt-3 text-3xl font-semibold tracking-tight tabular-nums">{metric.value}</p>
+            </article>
+          })}
+        </section>
+
+        <SectionCard title="Recent events" description="The latest 200 append-only audit records. Details are metadata-only and exclude credential contents." icon={<ClipboardList className="size-[18px]" />}>
+          <AuditTable rows={rows} />
+        </SectionCard>
       </div>
     )
   })
