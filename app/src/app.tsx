@@ -28,7 +28,7 @@ import { availability } from './lib/credential-policy.ts'
 import { getCredentialForOwner, listAudit, listCredentialsForOwner } from './lib/credential-service.ts'
 import { peekEnrollmentLink } from './lib/enrollment.ts'
 import { linkHost, readStoredDoc, type CredentialDoc } from './lib/credential-docs.ts'
-import { KeyRound, LayoutDashboard, Plus, ChartNoAxesCombined, ShieldCheck, Settings as SettingsIcon, ClipboardList, Workflow, LogOut, Activity, Clock3, CheckCircle2, AlertTriangle, ChevronRight } from 'lucide-react'
+import { KeyRound, LayoutDashboard, Plus, ChartNoAxesCombined, ShieldCheck, Settings as SettingsIcon, ClipboardList, Workflow, LogOut, Activity, Clock3, CheckCircle2, AlertTriangle, ChevronRight, LockKeyhole, ArrowUpRight, Fingerprint, Search } from 'lucide-react'
 import { getUsageAnalytics, listCredentialIntegrationMetadata, listNotifications, listCredentialValidationHistory, loadVaultPreferences, runScheduledCredentialValidation, unreadNotificationCount } from './lib/vault-observability.ts'
 import { SectionCard } from './components/ui/section-card.tsx'
 import { NotificationBell } from './components/notification-actions.tsx'
@@ -48,14 +48,40 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
   const current = new URL(request.url).pathname
   const unread = signedIn ? await unreadNotificationCount(getDb()) : 0
   const notifications = signedIn ? await listNotifications(getDb(), 8) : []
-  const navItems = [
+  const navGroups = [
+    {
+      label: 'Workspace',
+      items: [
+        { href: '/vault', label: 'Overview', icon: LayoutDashboard },
+        { href: '/vault/services', label: 'Provider catalog', icon: Plus },
+        { href: '/vault/integrations', label: 'Integrations', icon: Workflow },
+      ],
+    },
+    {
+      label: 'Security & insights',
+      items: [
+        { href: '/vault/validation', label: 'Credential health', icon: ShieldCheck },
+        { href: '/vault/analytics', label: 'Usage analytics', icon: ChartNoAxesCombined },
+        { href: '/vault/audit', label: 'Audit log', icon: ClipboardList },
+      ],
+    },
+  ]
+  const mobileItems = [
     { href: '/vault', label: 'Overview', icon: LayoutDashboard },
     { href: '/vault/services', label: 'Add', icon: Plus },
     { href: '/vault/validation', label: 'Health', icon: ShieldCheck },
-    { href: '/vault/analytics', label: 'Analytics', icon: ChartNoAxesCombined },
+    { href: '/vault/analytics', label: 'Usage', icon: ChartNoAxesCombined },
     { href: '/vault/settings', label: 'Settings', icon: SettingsIcon },
   ]
-  const isActive = (href: string) => href === '/vault' ? current === href : current === href || current.startsWith(href + '/')
+  const isActive = (href: string) => href === '/vault'
+    ? current === href || current.startsWith('/vault/credentials/')
+    : href === '/vault/services'
+      ? current === href || current.startsWith('/vault/new') || current.startsWith('/vault/register/')
+      : current === href || current.startsWith(href + '/')
+  const currentItem = [...navGroups.flatMap((group) => group.items), { href: '/vault/settings', label: 'Settings', icon: SettingsIcon }]
+    .find((item) => isActive(item.href))
+  const pageTitle = current.startsWith('/vault/new') ? 'Add credential' : current.startsWith('/vault/register/') ? 'Registration' : currentItem?.label ?? 'Vault'
+
   return (
     <html lang="en" className={cn('h-dvh', dark ? 'dark' : undefined)} suppressHydrationWarning>
       <Head>
@@ -64,68 +90,143 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
         <Head.Meta name="robots" content="noindex, nofollow" />
         <Head.Title>Runner Credential Vault</Head.Title>
       </Head>
-      <body className="flex h-dvh flex-col bg-background font-sans antialiased">
+      <body className="h-dvh overflow-hidden bg-background font-sans antialiased">
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
-        <header className="sticky top-0 z-30 shrink-0 border-b border-border/80 bg-background/90 backdrop-blur-xl">
-          <div className="mx-auto flex h-[4.25rem] max-w-(--content-max-width) items-center justify-between gap-4 px-3 sm:px-6">
-            <a href="/vault" className="group flex min-w-0 items-center gap-3">
-              <span className="grid size-10 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-700 text-white shadow-lg shadow-emerald-900/15 transition-transform group-hover:rotate-[-4deg]">
-                <KeyRound className="size-5" aria-hidden />
-              </span>
-              <span className="min-w-0">
-                <span className="block truncate text-sm font-bold tracking-tight sm:text-base">Runner Vault</span>
-                <span className="hidden text-[11px] font-medium tracking-[0.12em] text-muted-foreground sm:block">CREDENTIAL CONTROL PLANE</span>
-              </span>
-            </a>
-            {signedIn && (
-              <>
-                <nav aria-label="Primary navigation" className="hidden items-center gap-1 lg:flex">
-                  {navItems.map((item) => {
+        <a href="#main-content" className="sr-only z-[100] rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground focus:not-sr-only focus:fixed focus:left-3 focus:top-3">Skip to main content</a>
+        {signedIn ? (
+          <div className="flex h-full min-h-0 w-full">
+            <aside className="relative hidden h-full w-[258px] shrink-0 flex-col border-r border-white/[0.07] bg-[#111a16] text-slate-100 lg:flex">
+              <div className="flex h-[4.5rem] shrink-0 items-center gap-3 border-b border-white/[0.07] px-5">
+                <span className="grid size-10 place-items-center rounded-[13px] bg-emerald-400 text-[#102018] shadow-lg shadow-emerald-950/20">
+                  <KeyRound className="size-[19px]" strokeWidth={2.5} aria-hidden />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-[15px] font-semibold tracking-tight">Runner Vault</span>
+                  <span className="mt-0.5 block text-[9px] font-semibold tracking-[0.19em] text-emerald-300/75">CREDENTIAL CONTROL</span>
+                </span>
+              </div>
+
+              <div className="px-4 pt-5">
+                <a href="/vault/services" className="group flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-400 px-3 text-sm font-semibold text-[#102018] shadow-lg shadow-emerald-950/20 transition hover:bg-emerald-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200">
+                  <Plus className="size-4 transition-transform group-hover:rotate-90" />
+                  Add credential
+                </a>
+              </div>
+
+              <nav aria-label="Main navigation" className="min-h-0 flex-1 space-y-7 overflow-y-auto px-3 pb-5 pt-7">
+                {navGroups.map((group) => (
+                  <div key={group.label}>
+                    <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">{group.label}</p>
+                    <div className="space-y-1">
+                      {group.items.map((item) => {
+                        const Icon = item.icon
+                        const active = isActive(item.href)
+                        return (
+                          <a
+                            key={item.href}
+                            href={item.href}
+                            aria-current={active ? 'page' : undefined}
+                            className={cn(
+                              'group flex min-h-10 items-center gap-3 rounded-lg px-3 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70',
+                              active
+                                ? 'bg-emerald-400/[0.13] text-emerald-200 ring-1 ring-inset ring-emerald-300/15'
+                                : 'text-slate-400 hover:bg-white/[0.055] hover:text-slate-100',
+                            )}
+                          >
+                            <Icon className={cn('size-[17px] shrink-0', active ? 'text-emerald-300' : 'text-slate-500 group-hover:text-slate-300')} aria-hidden />
+                            <span className="flex-1">{item.label}</span>
+                            {active && <span className="size-1.5 rounded-full bg-emerald-300" />}
+                          </a>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </nav>
+
+              <div className="shrink-0 border-t border-white/[0.07] p-3">
+                <div className="rounded-xl border border-white/[0.08] bg-white/[0.035] p-3">
+                  <div className="flex items-center gap-2">
+                    <span className="grid size-7 place-items-center rounded-lg bg-emerald-400/10 text-emerald-300"><LockKeyhole className="size-3.5" /></span>
+                    <span className="text-xs font-semibold text-slate-200">Protected workspace</span>
+                    <span className="ml-auto size-1.5 rounded-full bg-emerald-400 shadow-[0_0_0_3px_rgba(52,211,153,.12)]" />
+                  </div>
+                  <p className="mt-2 text-[11px] leading-relaxed text-slate-500">Secrets stay encrypted and masked. Access is mediated by the Vault runtime.</p>
+                </div>
+                <a href="/vault/settings" aria-current={isActive('/vault/settings') ? 'page' : undefined} className={cn('mt-2 flex min-h-10 items-center gap-3 rounded-lg px-3 text-[13px] font-medium transition-colors', isActive('/vault/settings') ? 'bg-white/[0.08] text-white' : 'text-slate-400 hover:bg-white/[0.055] hover:text-slate-100')}>
+                  <SettingsIcon className="size-[17px] text-slate-500" />
+                  Workspace settings
+                </a>
+              </div>
+            </aside>
+
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+              <header className="sticky top-0 z-30 flex h-[4.25rem] shrink-0 items-center border-b border-border/80 bg-background/90 backdrop-blur-xl">
+                <div className="mx-auto flex w-full max-w-[1480px] items-center justify-between gap-3 px-4 sm:px-6 lg:px-8">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <a href="/vault" className="flex shrink-0 items-center gap-2 lg:hidden">
+                      <span className="grid size-8 place-items-center rounded-[10px] bg-emerald-500 text-white"><KeyRound className="size-4" /></span>
+                      <span className="text-sm font-semibold tracking-tight">Runner Vault</span>
+                    </a>
+                    <div className="hidden min-w-0 items-center gap-2 text-sm lg:flex">
+                      <span className="text-muted-foreground">Workspace</span>
+                      <ChevronRight className="size-3.5 text-muted-foreground/60" />
+                      <span className="truncate font-semibold text-foreground">{pageTitle}</span>
+                    </div>
+                    <div className="min-w-0 lg:hidden">
+                      <p className="truncate text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">{pageTitle}</p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <NotificationBell unread={unread} notifications={notifications} />
+                    <span className="mx-0.5 hidden h-6 w-px bg-border sm:block" />
+                    <a href="/vault/settings" aria-label="Settings" title="Settings" className="grid size-9 place-items-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+                      <SettingsIcon className="size-[17px]" aria-hidden />
+                    </a>
+                    <a href="/logout" aria-label="Sign out" title="Sign out" className="grid size-9 place-items-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:border-destructive/30 hover:bg-destructive/5 hover:text-destructive">
+                      <LogOut className="size-[17px]" aria-hidden />
+                    </a>
+                  </div>
+                </div>
+              </header>
+
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <main id="main-content" className="mx-auto min-h-full w-full max-w-[1480px] px-4 pb-28 pt-6 sm:px-6 sm:pt-7 sm:pb-10 lg:px-8 lg:pt-8">
+                  {children}
+                </main>
+              </div>
+
+              <nav aria-label="Mobile navigation" className="fixed inset-x-0 bottom-0 z-30 border-t border-border/80 bg-background/95 pb-[env(safe-area-inset-bottom)] shadow-[0_-10px_30px_-22px_rgba(0,0,0,.35)] backdrop-blur-xl lg:hidden">
+                <div className="mx-auto grid max-w-xl grid-cols-5 gap-1 px-2 pt-1.5">
+                  {mobileItems.map((item) => {
                     const Icon = item.icon
                     const active = isActive(item.href)
-                    return <a key={item.href} href={item.href} aria-current={active ? 'page' : undefined} className={cn('inline-flex min-h-10 items-center gap-2 rounded-xl px-3 text-sm font-medium transition-colors', active ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground')}>
-                      <Icon className="size-4" aria-hidden />{item.label}
-                    </a>
+                    return (
+                      <a key={item.href} href={item.href} aria-current={active ? 'page' : undefined} className={cn('flex min-h-[3.35rem] flex-col items-center justify-center gap-1 rounded-xl px-1 text-[10px] font-semibold transition-colors', active ? 'text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground hover:bg-muted')}>
+                        <span className={cn('grid size-7 place-items-center rounded-lg transition-colors', active ? 'bg-emerald-500/10' : '')}><Icon className="size-[18px]" aria-hidden /></span>
+                        <span>{item.label}</span>
+                      </a>
+                    )
                   })}
-                  <a href="/vault/audit" className={cn('inline-flex min-h-10 items-center gap-2 rounded-xl px-3 text-sm font-medium transition-colors', isActive('/vault/audit') ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground')}>
-                    <ClipboardList className="size-4" aria-hidden />Audit
-                  </a>
-                </nav>
-                <div className="flex shrink-0 items-center gap-2">
-<NotificationBell unread={unread} notifications={notifications} />
-                  <a href="/vault/settings" aria-label="Settings" className="hidden size-10 place-items-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:grid lg:hidden">
-                    <SettingsIcon className="size-[18px]" aria-hidden />
-                  </a>
-                  <a href="/logout" aria-label="Sign out" className="grid size-10 place-items-center rounded-xl border border-border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
-                    <LogOut className="size-[18px]" aria-hidden />
-                  </a>
                 </div>
-              </>
-            )}
-          </div>
-        </header>
-        <div className="min-h-0 grow overflow-y-auto">
-          <main className="mx-auto min-h-full max-w-(--content-max-width) px-3 pb-28 pt-5 sm:border-x sm:px-6 sm:pb-10 sm:pt-7">{children}</main>
-        </div>
-        {signedIn && (
-          <nav aria-label="Mobile navigation" className="fixed inset-x-0 bottom-0 z-30 border-t border-border/80 bg-background/90 pb-[env(safe-area-inset-bottom)] shadow-[0_-8px_28px_-18px_rgba(0,0,0,.45)] backdrop-blur-xl lg:hidden">
-            <div className="mx-auto grid max-w-xl grid-cols-5 gap-1 px-2 pt-2">
-              {navItems.map((item) => {
-                const Icon = item.icon
-                const active = isActive(item.href)
-                return <a key={item.href} href={item.href} aria-current={active ? 'page' : undefined} className={cn('flex min-h-14 flex-col items-center justify-center gap-1 rounded-xl px-1 text-[10px] font-semibold transition-colors', active ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted')}>
-                  <Icon className={cn('size-[19px]', active && 'stroke-[2.4]')} aria-hidden />
-                  <span>{item.label}</span>
-                </a>
-              })}
+              </nav>
             </div>
-          </nav>
+          </div>
+        ) : (
+          <div className="flex h-full min-h-0 flex-col overflow-y-auto">
+            <header className="flex h-16 shrink-0 items-center border-b border-border/70 px-5 sm:px-8">
+              <a href="/" className="flex items-center gap-2.5">
+                <span className="grid size-9 place-items-center rounded-xl bg-emerald-500 text-white"><KeyRound className="size-[18px]" /></span>
+                <span className="text-sm font-semibold tracking-tight">Runner Vault</span>
+              </a>
+            </header>
+            <main id="main-content" className="mx-auto flex w-full max-w-5xl flex-1 items-start justify-center px-4 py-10 sm:px-6 sm:py-16">{children}</main>
+          </div>
         )}
       </body>
     </html>
   )
 }
-
 function CredentialValidationSummary({ value }: { value: string | null }) {
   if (!value) return null
   let report: {
@@ -179,6 +280,20 @@ function CredentialValidationSummary({ value }: { value: string | null }) {
       ) : null}
     </section>
   )
+}
+
+function validationBadge(status: string | null | undefined) {
+  const value = status || 'not_tested'
+  const labels: Record<string, string> = {
+    valid: 'Verified', invalid: 'Invalid', expired: 'Expired',
+    unavailable: 'Unreachable', insufficient_permissions: 'Limited access',
+    unsupported: 'Unsupported', not_tested: 'Not checked',
+  }
+  const variant = value === 'invalid' || value === 'expired' ? 'destructive'
+    : value === 'valid' ? 'secondary' : 'outline'
+  const tone = value === 'valid' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+    : value === 'unsupported' || value === 'not_tested' ? 'text-muted-foreground' : ''
+  return <Badge variant={variant} className={cn('font-medium', tone)}>{labels[value] ?? value.replaceAll('_', ' ')}</Badge>
 }
 
 function statusBadge(c: { status: 'active' | 'disabled' | 'pending'; visible: boolean; expiresAt: number | null; externallyManaged: boolean; hasValue: boolean }, now: number) {
@@ -405,97 +520,234 @@ export const app = new Spiceflow()
   // ── Registry ──────────────────────────────────────────────────────
   .page('/vault', async ({ request }) => {
     await requirePageSession(request)
-    const rows = await listCredentialsForOwner(getDb())
+    const db = getDb()
+    const rows = await listCredentialsForOwner(db)
+    const searchQuery = new URL(request.url).searchParams.get('q')?.trim().slice(0, 100) ?? ''
+    const healthFilter = new URL(request.url).searchParams.get('health') ?? 'all'
+    const registryRows = rows.filter((row) => {
+      const query = searchQuery.toLowerCase()
+      const matchesQuery = !query || row.name.toLowerCase().includes(query) || row.service.toLowerCase().includes(query)
+      const matchesHealth = healthFilter === 'all'
+        || (healthFilter === 'verified' && row.validationStatus === 'valid')
+        || (healthFilter === 'attention' && ['invalid', 'expired', 'insufficient_permissions'].includes(row.validationStatus ?? ''))
+        || (healthFilter === 'review' && row.validationStatus !== 'valid' && !['invalid', 'expired', 'insufficient_permissions'].includes(row.validationStatus ?? ''))
+      return matchesQuery && matchesHealth
+    })
     const now = Date.now()
-    const runnerPolicy = await loadRunnerPolicyInput(getDb())
+    const runnerPolicy = await loadRunnerPolicyInput(db)
     const runnerConfigured = runnerPolicy !== null || Boolean((env as unknown as VaultEnv).RUNNER_REPOSITORY)
-    const runnerOwnerReady = Boolean(await loadOwnerId(getDb(), vaultEnv()))
+    const runnerOwnerReady = Boolean(await loadOwnerId(db, vaultEnv()))
     const validCount = rows.filter((row) => row.validationStatus === 'valid').length
-    const invalidCount = rows.filter((row) => row.validationStatus === 'invalid' || row.validationStatus === 'expired').length
-    const pendingCount = rows.filter((row) => !row.lastValidatedAt || row.validationStatus === 'unavailable' || row.validationStatus === 'unsupported').length
-    const preferences = await loadVaultPreferences(getDb())
+    const attentionCount = rows.filter((row) => ['invalid', 'expired', 'insufficient_permissions'].includes(row.validationStatus ?? '')).length
+    const reviewCount = Math.max(0, rows.length - validCount - attentionCount)
+    const preferences = await loadVaultPreferences(db)
+    const recentChecks = await listCredentialValidationHistory(db, 6)
+    const percent = (count: number) => rows.length ? Math.round(count / rows.length * 100) : 0
+    const segmentPercent = (count: number) => rows.length ? count / rows.length * 100 : 0
+
     return (
-      <div className="mx-auto w-full min-w-0 max-w-5xl space-y-6">
-        <section className="relative isolate overflow-hidden rounded-[1.75rem] bg-gradient-to-br from-slate-950 via-emerald-950 to-teal-900 px-5 py-6 text-white shadow-xl shadow-emerald-950/10 sm:px-7 sm:py-8">
-          <div className="pointer-events-none absolute -right-12 -top-20 -z-10 size-72 rounded-full bg-emerald-400/15 blur-3xl"/>
-          <div className="pointer-events-none absolute -bottom-24 left-1/3 -z-10 size-60 rounded-full bg-cyan-400/10 blur-3xl"/>
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="max-w-2xl"><p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-200">Credential control plane</p><h1 className="mt-2 text-2xl font-bold tracking-tight sm:text-3xl">Your secrets, under control.</h1><p className="mt-2 max-w-xl text-sm leading-relaxed text-slate-200/80">One secure access layer for runners, integrations and every API credential your infrastructure depends on.</p></div>
-            <a href="/vault/services" className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-white px-4 text-sm font-semibold text-slate-950 shadow-lg transition-transform hover:-translate-y-0.5"><Plus className="size-4"/> Add credential</a>
+      <div className="mx-auto w-full min-w-0 max-w-[1360px] space-y-7 sm:space-y-8">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="min-w-0">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Control center <span className="mx-1.5 text-muted-foreground/50">/</span> Overview</p>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-[2rem]">Workspace overview</h1>
+            <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-muted-foreground">A live view of your credentials, verification health and connected runtime.</p>
           </div>
-          <div className="mt-7 flex flex-wrap items-center gap-3 text-xs text-slate-200/80">
-            <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1.5"><span className={cn('size-1.5 rounded-full', runnerOwnerReady ? 'bg-emerald-300' : 'bg-amber-300')}/>{runnerOwnerReady ? 'Owner identity verified' : 'Runner identity pending'}</span>
-            <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1.5">Scheduled checks · every {preferences.validationIntervalHours}h</span>
-            <a href="/vault/integrations" className="inline-flex items-center gap-1 underline underline-offset-4">View integrations <ChevronRight className="size-3"/></a>
+          <div className="flex w-full flex-wrap gap-2 sm:w-auto">
+            <a href="/vault/validation" className="inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-xl border border-border bg-card px-3.5 text-sm font-medium text-foreground transition-colors hover:bg-muted sm:flex-none">
+              <ShieldCheck className="size-4 text-muted-foreground" /> Health center
+            </a>
+            <a href="/vault/services" className="inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 sm:flex-none">
+              <Plus className="size-4" /> Add credential
+            </a>
           </div>
-        </section>
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
-          {[
-            { label: 'Total credentials', value: rows.length, icon: KeyRound, tone: 'bg-slate-500/10 text-slate-600 dark:text-slate-300' },
-            { label: 'Verified', value: validCount, icon: CheckCircle2, tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' },
-            { label: 'Need attention', value: invalidCount, icon: AlertTriangle, tone: 'bg-rose-500/10 text-rose-700 dark:text-rose-300' },
-            { label: 'Not yet confirmed', value: pendingCount, icon: Clock3, tone: 'bg-amber-500/10 text-amber-700 dark:text-amber-300' },
-          ].map((metric) => { const Icon = metric.icon; return <div key={metric.label} className="rounded-2xl border border-border bg-card p-4 shadow-sm"><span className={cn('grid size-9 place-items-center rounded-xl', metric.tone)}><Icon className="size-[18px]"/></span><p className="mt-4 text-2xl font-bold tabular-nums tracking-tight">{metric.value}</p><p className="mt-1 text-xs text-muted-foreground">{metric.label}</p></div> })}
         </div>
-        <div className="flex flex-wrap items-center justify-between gap-2"><div><h2 className="text-lg font-semibold tracking-tight">Credential registry</h2><p className="mt-1 text-sm text-muted-foreground">Encrypted values stay write-only. Runners receive access through the proxy.</p></div><div className="flex gap-2"><a href="/vault/validation" className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-border bg-card px-3 text-sm font-medium hover:bg-muted"><ShieldCheck className="size-4"/> Health</a><a href="/vault/analytics" className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-border bg-card px-3 text-sm font-medium hover:bg-muted"><ChartNoAxesCombined className="size-4"/> Analytics</a></div></div>
-        {!runnerConfigured && runnerOwnerReady && (
-          <div role="status" className="rounded-lg border border-border bg-muted/40 p-4 space-y-1">
-            <p className="text-sm font-medium">Automatic runner connection is ready</p>
-            <p className="text-sm text-muted-foreground">
-              The first valid run of the owner’s main/.github/workflows/rdc-lab.yml workflow
-              will bind its immutable repository and owner IDs automatically. No repository ID or manual policy setup is needed.
-            </p>
-          </div>
-        )}
-        {!runnerConfigured && !runnerOwnerReady && (
-          <div role="alert" className="rounded-lg border border-border bg-muted/40 p-4 space-y-1">
-            <p className="text-sm font-medium">Runner auto-connection is unavailable</p>
-            <p className="text-sm text-muted-foreground">This deployment has no pinned GitHub owner identity, so OIDC bootstrap fails closed.</p>
-          </div>
-        )}
-        {rows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Nothing registered yet. Add a credential here, or let a model on the runner request one.</p>
-        ) : (
-          <>
-            <div className="hidden overflow-x-auto sm:block">
-              <Table>
-                <TableHeader>
-                  <TableRow><TableHead>Name</TableHead><TableHead>Service</TableHead><TableHead>Status</TableHead><TableHead>Use</TableHead><TableHead>Expires</TableHead><TableHead>Last used</TableHead></TableRow>
-                </TableHeader>
-                <TableBody>
-                  {rows.map((c) => (
-                    <TableRow key={c.id}>
-                      <TableCell><a className="font-mono underline" href={`/vault/credentials/${c.id}`}>{c.name}</a></TableCell>
-                      <TableCell>{c.service}</TableCell>
-                      <TableCell>{statusBadge(c, now)}</TableCell>
-                      <TableCell>{c.externallyManaged ? 'external' : c.delivery}</TableCell>
-                      <TableCell>{c.expiresAt ? <TimeAgo ts={c.expiresAt} /> : c.lifetime === 'permanent' ? 'never' : '—'}</TableCell>
-                      <TableCell>{c.lastUsedAt ? <TimeAgo ts={c.lastUsedAt} /> : '—'}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+
+        <section aria-label="Credential summary" className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+          {[
+            { label: 'Total credentials', value: rows.length, note: rows.filter((row) => row.status === 'active').length + ' active', icon: KeyRound, tone: 'bg-slate-500/10 text-slate-600 dark:text-slate-300' },
+            { label: 'Verified', value: validCount, note: rows.length ? percent(validCount) + '% of your registry' : 'No credentials yet', icon: CheckCircle2, tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' },
+            { label: 'Needs attention', value: attentionCount, note: attentionCount ? 'Review required' : 'No blocking issues', icon: AlertTriangle, tone: attentionCount ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300' : 'bg-slate-500/10 text-slate-500 dark:text-slate-300' },
+            { label: 'To review', value: reviewCount, note: 'Unverified or inconclusive', icon: Clock3, tone: 'bg-amber-500/10 text-amber-700 dark:text-amber-300' },
+          ].map((metric) => {
+            const Icon = metric.icon
+            return (
+              <article key={metric.label} className="group relative min-w-0 overflow-hidden rounded-2xl border border-border bg-card p-4 transition-colors hover:border-border/80 sm:p-5">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-medium text-muted-foreground sm:text-[13px]">{metric.label}</p>
+                  <span className={cn('grid size-9 shrink-0 place-items-center rounded-xl', metric.tone)}><Icon className="size-[17px]" /></span>
+                </div>
+                <p className="mt-3 text-[1.85rem] font-semibold leading-none tracking-tight tabular-nums sm:text-3xl">{metric.value}</p>
+                <p className="mt-2 text-[11px] text-muted-foreground sm:text-xs">{metric.note}</p>
+              </article>
+            )
+          })}
+        </section>
+
+        <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
+          <SectionCard
+            title="Credential health"
+            description="Current verification state across the registry."
+            icon={<ShieldCheck className="size-[18px]" />}
+            action={<a href="/vault/validation" className="inline-flex min-h-8 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-primary transition hover:bg-primary/5">View details <ArrowUpRight className="size-3.5" /></a>}
+          >
+            <div className="space-y-5">
+              <div className="flex items-end justify-between gap-3">
+                <div><p className="text-3xl font-semibold tracking-tight tabular-nums">{percent(validCount)}<span className="ml-0.5 text-base font-medium text-muted-foreground">%</span></p><p className="mt-1 text-xs text-muted-foreground">Verified credentials</p></div>
+                <p className="text-xs text-muted-foreground">{validCount} of {rows.length}</p>
+              </div>
+              <div className="flex h-2.5 overflow-hidden rounded-full bg-muted" role="img" aria-label={validCount + ' verified, ' + attentionCount + ' need attention, ' + reviewCount + ' to review'}>
+                {validCount > 0 && <span className="h-full bg-emerald-500 transition-all" style={{ width: segmentPercent(validCount) + '%' }} />}
+                {attentionCount > 0 && <span className="h-full bg-rose-500 transition-all" style={{ width: segmentPercent(attentionCount) + '%' }} />}
+                {reviewCount > 0 && <span className="h-full bg-amber-400 transition-all" style={{ width: segmentPercent(reviewCount) + '%' }} />}
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="min-w-0"><div className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-emerald-500" /><span className="truncate text-[11px] text-muted-foreground">Verified</span></div><p className="mt-1.5 text-lg font-semibold tabular-nums">{validCount}</p></div>
+                <div className="min-w-0"><div className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-rose-500" /><span className="truncate text-[11px] text-muted-foreground">Attention</span></div><p className="mt-1.5 text-lg font-semibold tabular-nums">{attentionCount}</p></div>
+                <div className="min-w-0"><div className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-amber-400" /><span className="truncate text-[11px] text-muted-foreground">To review</span></div><p className="mt-1.5 text-lg font-semibold tabular-nums">{reviewCount}</p></div>
+              </div>
+              <div className="flex items-start gap-2.5 rounded-xl border border-border/70 bg-muted/30 p-3">
+                <Clock3 className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                <p className="text-xs leading-relaxed text-muted-foreground">Scheduled validation runs every <strong className="font-semibold text-foreground">{preferences.validationIntervalHours} hours</strong>. Repeated failures back off automatically; temporary network errors never invalidate a token.</p>
+              </div>
             </div>
-            <div className="grid gap-3 sm:hidden">
-              {rows.map((c) => (
-                <a key={c.id} href={`/vault/credentials/${c.id}`} className="block min-w-0 rounded-xl border border-border bg-card p-4 active:bg-muted/50">
-                  <div className="flex min-w-0 items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="break-all font-mono text-sm font-semibold">{c.name}</p>
-                      <p className="mt-1 text-sm text-muted-foreground">{c.service}</p>
+          </SectionCard>
+
+          <SectionCard
+            title="Runner connection"
+            description="Trust relationship and runtime readiness."
+            icon={<Workflow className="size-[18px]" />}
+            action={<Badge variant={runnerConfigured ? 'secondary' : 'outline'}>{runnerConfigured ? 'Configured' : 'Pending'}</Badge>}
+          >
+            <div className="flex items-start gap-3">
+              <span className={cn('grid size-11 shrink-0 place-items-center rounded-xl', runnerConfigured ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300' : 'bg-amber-500/10 text-amber-700 dark:text-amber-300')}>
+                {runnerConfigured ? <Fingerprint className="size-5" /> : <Clock3 className="size-5" />}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold">{runnerConfigured ? 'Runner trust policy is configured' : runnerOwnerReady ? 'Waiting for the first trusted run' : 'Owner identity is not configured'}</p>
+                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  {runnerConfigured
+                    ? 'The Vault has a runner trust policy and can issue short-lived sessions to approved workflows.'
+                    : runnerOwnerReady
+                      ? 'The first valid workflow from the owner’s main branch will bind its immutable repository and owner IDs automatically.'
+                      : 'OIDC bootstrap stays locked until this deployment has a pinned GitHub owner identity.'}
+                </p>
+              </div>
+            </div>
+            <div className="mt-4 space-y-2 rounded-xl border border-border/70 bg-muted/25 p-3.5">
+              <div className="flex items-center justify-between gap-3 text-xs"><span className="text-muted-foreground">Owner identity</span><span className="inline-flex items-center gap-1.5 font-medium">{runnerOwnerReady ? <><CheckCircle2 className="size-3.5 text-success" /> Verified</> : <><AlertTriangle className="size-3.5 text-warning" /> Pending</>}</span></div>
+              <div className="flex items-center justify-between gap-3 text-xs"><span className="text-muted-foreground">Credential delivery</span><span className="font-medium">Vault proxy</span></div>
+              {runnerPolicy?.repository && <div className="border-t border-border/70 pt-2"><p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Trusted repository</p><p className="mt-1 break-all font-mono text-xs">{runnerPolicy.repository}</p></div>}
+            </div>
+            <a href="/vault/integrations" className="mt-3 inline-flex min-h-9 w-full items-center justify-center gap-2 rounded-lg border border-border bg-background px-3 text-xs font-semibold transition-colors hover:bg-muted">View integrations <ArrowUpRight className="size-3.5" /></a>
+          </SectionCard>
+        </div>
+
+        <SectionCard
+          title="Credential registry"
+          description="Encrypted values stay write-only. Runners receive access through the Vault proxy."
+          icon={<KeyRound className="size-[18px]" />}
+          action={<a href="/vault/services" className="inline-flex min-h-8 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-primary transition hover:bg-primary/5"><Plus className="size-3.5" /> Add new</a>}
+        >
+          {rows.length > 0 && (
+            <form method="get" action="/vault" className="mb-4 flex flex-col gap-2 sm:flex-row">
+              <label className="flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-xl border border-input bg-background px-3">
+                <Search className="size-4 shrink-0 text-muted-foreground" />
+                <input type="search" name="q" value={searchQuery} placeholder="Search credentials or providers…" defaultValue={searchQuery} className="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/70" />
+              </label>
+              <div className="flex gap-2">
+                <select name="health" defaultValue={healthFilter} aria-label="Filter credentials by verification state" className="h-10 min-w-0 flex-1 rounded-xl border border-input bg-background px-3 text-xs sm:w-44 sm:flex-none">
+                  <option value="all">All states</option>
+                  <option value="verified">Verified</option>
+                  <option value="attention">Needs attention</option>
+                  <option value="review">To review</option>
+                </select>
+                <Button type="submit" variant="outline" size="lg">Filter</Button>
+                {(searchQuery || healthFilter !== 'all') && <a href="/vault" className="inline-flex min-h-10 items-center rounded-xl px-3 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground">Clear</a>}
+              </div>
+            </form>
+          )}
+          {rows.length === 0 ? (
+            <div className="grid justify-items-center rounded-xl border border-dashed border-border bg-muted/15 px-5 py-10 text-center">
+              <span className="grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary"><KeyRound className="size-5" /></span>
+              <h3 className="mt-4 text-sm font-semibold">Your credential registry is empty</h3>
+              <p className="mt-1.5 max-w-sm text-xs leading-relaxed text-muted-foreground">Add your first provider credential, or approve a one-time registration request from a trusted Runner.</p>
+              <a href="/vault/services" className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-xl bg-primary px-4 text-xs font-semibold text-primary-foreground transition hover:bg-primary/90"><Plus className="size-3.5" /> Add your first credential</a>
+            </div>
+          ) : registryRows.length === 0 ? (
+            <div className="grid justify-items-center rounded-xl border border-dashed border-border bg-muted/15 px-5 py-10 text-center">
+              <span className="grid size-10 place-items-center rounded-xl bg-muted text-muted-foreground"><Search className="size-4" /></span>
+              <p className="mt-3 text-sm font-semibold">No matching credentials</p>
+              <p className="mt-1 text-xs text-muted-foreground">Try a different name, provider or verification filter.</p>
+              <a href="/vault" className="mt-3 inline-flex min-h-8 items-center gap-1 rounded-lg px-3 text-xs font-semibold text-primary hover:bg-primary/5">Clear filters <ChevronRight className="size-3" /></a>
+            </div>
+          ) : (
+            <>
+              <div className="mb-3 text-[11px] text-muted-foreground">{registryRows.length} of {rows.length} credentials</div>
+              <div className="hidden overflow-x-auto sm:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Credential</TableHead><TableHead>Provider</TableHead><TableHead>Availability</TableHead><TableHead>Verification</TableHead><TableHead>Expires</TableHead><TableHead>Last used</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {registryRows.map((credential) => (
+                      <TableRow key={credential.id}>
+                        <TableCell><a className="font-mono text-xs font-semibold text-foreground decoration-border underline-offset-4 hover:text-primary hover:underline" href={'/vault/credentials/' + credential.id}>{credential.name}</a></TableCell>
+                        <TableCell className="text-sm">{credential.service}</TableCell>
+                        <TableCell>{statusBadge(credential, now)}</TableCell>
+                        <TableCell>{validationBadge(credential.validationStatus)}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{credential.expiresAt ? <TimeAgo ts={credential.expiresAt} /> : credential.lifetime === 'permanent' ? 'Never' : '—'}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{credential.lastUsedAt ? <TimeAgo ts={credential.lastUsedAt} /> : 'Never'}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="grid gap-2.5 sm:hidden">
+                {registryRows.map((credential) => (
+                  <a key={credential.id} href={'/vault/credentials/' + credential.id} className="block min-w-0 rounded-xl border border-border bg-background p-3.5 transition-colors active:bg-muted/50">
+                    <div className="flex min-w-0 items-start justify-between gap-3">
+                      <div className="min-w-0"><p className="break-all font-mono text-xs font-semibold">{credential.name}</p><p className="mt-1 text-xs text-muted-foreground">{credential.service}</p></div>
+                      {validationBadge(credential.validationStatus)}
                     </div>
-                    {statusBadge(c, now)}
-                  </div>
-                  <div className="mt-3 grid grid-cols-2 gap-3 border-t border-border pt-3 text-sm">
-                    <div><p className="text-xs text-muted-foreground">Delivery</p><p>{c.externallyManaged ? 'External' : c.delivery}</p></div>
-                    <div><p className="text-xs text-muted-foreground">Expires</p><p>{c.expiresAt ? <TimeAgo ts={c.expiresAt} /> : c.lifetime === 'permanent' ? 'Never' : '—'}</p></div>
-                    <div className="col-span-2"><p className="text-xs text-muted-foreground">Last used</p><p>{c.lastUsedAt ? <TimeAgo ts={c.lastUsedAt} /> : 'Never'}</p></div>
-                  </div>
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border/70 pt-3">
+                      {statusBadge(credential, now)}
+                      <span className="text-[11px] text-muted-foreground">{credential.lastUsedAt ? <>Last used <TimeAgo ts={credential.lastUsedAt} /></> : 'Not used yet'}</span>
+                    </div>
+                  </a>
+                ))}
+              </div>
+            </>
+          )}
+        </SectionCard>
+
+        <SectionCard
+          title="Recent validation activity"
+          description="The latest scheduled and manual checks across your credentials."
+          icon={<Activity className="size-[18px]" />}
+          action={<a href="/vault/validation" className="inline-flex min-h-8 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-primary transition hover:bg-primary/5">Full history <ArrowUpRight className="size-3.5" /></a>}
+        >
+          {recentChecks.length === 0 ? (
+            <div className="flex items-center gap-3 rounded-xl bg-muted/25 px-4 py-5">
+              <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-background text-muted-foreground"><Activity className="size-4" /></span>
+              <div><p className="text-xs font-semibold">No validation events yet</p><p className="mt-1 text-xs text-muted-foreground">Checks will appear here after a credential is added and verified.</p></div>
+            </div>
+          ) : (
+            <div className="divide-y divide-border/70">
+              {recentChecks.map((item) => (
+                <a key={item.id} href={'/vault/credentials/' + item.credentialId} className="flex min-w-0 items-center gap-3 py-3 first:pt-0 last:pb-0 hover:bg-muted/20">
+                  <span className={cn('grid size-8 shrink-0 place-items-center rounded-lg', item.status === 'valid' ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300' : item.status === 'invalid' || item.status === 'expired' ? 'bg-rose-500/10 text-rose-600 dark:text-rose-300' : 'bg-amber-500/10 text-amber-700 dark:text-amber-300')}>
+                    {item.status === 'valid' ? <CheckCircle2 className="size-4" /> : item.status === 'invalid' || item.status === 'expired' ? <AlertTriangle className="size-4" /> : <Clock3 className="size-4" />}
+                  </span>
+                  <span className="min-w-0 flex-1"><span className="block truncate text-xs font-semibold">{item.credentialName}</span><span className="mt-1 block truncate text-[11px] text-muted-foreground">{item.provider} · {item.source === 'manual' ? 'Manual check' : 'Scheduled check'} · {item.durationMs} ms</span></span>
+                  <span className="flex shrink-0 flex-col items-end gap-1">{validationBadge(item.status)}<TimeAgo ts={item.checkedAt} className="text-[10px] text-muted-foreground" /></span>
                 </a>
               ))}
             </div>
-          </>
-        )}
+          )}
+        </SectionCard>
       </div>
     )
   })
@@ -504,7 +756,7 @@ export const app = new Spiceflow()
   .page('/vault/services', async ({ request }) => {
     await requirePageSession(request)
     const { ServiceCatalog } = await import('./components/service-catalog.tsx')
-    return <div className="mx-auto w-full min-w-0 max-w-4xl space-y-5"><div><h1 className="text-xl font-semibold tracking-tight">Add a credential</h1><p className="mt-1 text-sm text-muted-foreground">Choose a provider to prefill its API host and authentication style, or configure a custom service.</p></div><ServiceCatalog /></div>
+    return <div className="mx-auto w-full min-w-0 max-w-[1180px] space-y-6"><div><p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Credential setup</p><h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-[2rem]">Choose a provider</h1><p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-muted-foreground">Start with a curated provider preset. The Vault derives the API destination and authentication rules where a reviewed adapter is available; you only supply the secret.</p></div><ServiceCatalog /></div>
   })
 
   .page('/vault/new', async ({ request }) => {
@@ -555,36 +807,62 @@ export const app = new Spiceflow()
     const { CredentialControls } = await import('./components/credential-actions.tsx')
     const { CredentialForm } = await import('./components/credential-form.tsx')
     return (
-      <div className="mx-auto w-full min-w-0 max-w-3xl space-y-5 sm:space-y-6">
-        <div className="space-y-2">
-          <div className="flex min-w-0 flex-wrap items-start gap-2"><h1 className="min-w-0 break-all font-mono text-base font-semibold tracking-tight sm:text-lg">{c.name}</h1>{statusBadge(c, now)}</div>
-          <p className="break-words text-sm text-muted-foreground">{c.service}</p>
+      <div className="mx-auto w-full min-w-0 max-w-[1120px] space-y-6">
+        <div className="space-y-4">
+          <a href="/vault" className="inline-flex min-h-9 items-center gap-2 rounded-lg px-2 text-xs font-medium text-muted-foreground transition hover:bg-muted hover:text-foreground">
+            <ChevronRight className="size-3.5 rotate-180" /> Back to overview
+          </a>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Credential details</p>
+              <h1 className="mt-2 break-all font-mono text-xl font-semibold tracking-tight sm:text-2xl">{c.name}</h1>
+              <p className="mt-1.5 text-sm text-muted-foreground">{c.service} <span className="mx-1.5 text-muted-foreground/50">·</span> Updated <TimeAgo ts={c.updatedAt} /></p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {statusBadge(c, now)}
+              {validationBadge(c.validationStatus)}
+            </div>
+          </div>
         </div>
-        <dl className="grid min-w-0 grid-cols-[7.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 rounded-xl border border-border p-3 text-sm sm:grid-cols-[10rem_minmax(0,1fr)] sm:p-4">
-          <dt className="text-muted-foreground">Delivery</dt><dd className="break-words">{c.externallyManaged ? 'managed elsewhere (metadata only)' : c.delivery}</dd>
-          <dt className="text-muted-foreground">Allowed hosts</dt><dd className="break-all font-mono">{c.allowedHosts.join(', ') || '—'}</dd>
-          <dt className="text-muted-foreground">Auth header</dt><dd className="break-words font-mono">{c.authHeader}: {c.authScheme}</dd>
-          <dt className="text-muted-foreground">Lifetime</dt><dd className="break-words">{c.lifetime}{c.expiresAt ? <> · expires <TimeAgo ts={c.expiresAt} /></> : null}</dd>
-          <dt className="text-muted-foreground">Value stored</dt><dd>{c.hasValue ? 'yes (write-only)' : 'no'}</dd>
-          <dt className="text-muted-foreground">Last checked</dt><dd>{c.lastValidatedAt ? <TimeAgo ts={c.lastValidatedAt}/> : 'Never'}</dd>
-          <dt className="text-muted-foreground">Next check</dt><dd>{c.nextValidationAt ? <TimeAgo ts={c.nextValidationAt}/> : 'Not scheduled'}</dd>
-          {c.firstValidationFailureAt && <><dt className="text-muted-foreground">First failure</dt><dd><TimeAgo ts={c.firstValidationFailureAt}/> · {c.validationFailureCount} consecutive failures</dd></>}
-        </dl>
-        <CredentialValidationSummary value={c.validationDetails} />
-        <section className="rounded-xl border border-border p-4 sm:p-5">
+
+        <div className="grid min-w-0 gap-4 xl:grid-cols-[0.95fr_1.05fr]">
+          <SectionCard title="Configuration" description="Read-only security and delivery metadata." icon={<KeyRound className="size-[18px]" />}>
+            <dl className="grid min-w-0 grid-cols-[7.25rem_minmax(0,1fr)] gap-x-3 text-xs sm:grid-cols-[9rem_minmax(0,1fr)]">
+              <dt className="border-b border-border/70 py-2.5 text-muted-foreground">Delivery</dt><dd className="min-w-0 border-b border-border/70 py-2.5 font-medium">{c.externallyManaged ? 'Managed elsewhere' : c.delivery}</dd>
+              <dt className="border-b border-border/70 py-2.5 text-muted-foreground">Allowed hosts</dt><dd className="min-w-0 break-all border-b border-border/70 py-2.5 font-mono text-[11px]">{c.allowedHosts.join(', ') || '—'}</dd>
+              <dt className="border-b border-border/70 py-2.5 text-muted-foreground">Authentication</dt><dd className="min-w-0 break-words border-b border-border/70 py-2.5 font-mono text-[11px]">{c.authHeader}: {c.authScheme}</dd>
+              <dt className="border-b border-border/70 py-2.5 text-muted-foreground">Lifetime</dt><dd className="min-w-0 border-b border-border/70 py-2.5">{c.lifetime}{c.expiresAt ? <> · <TimeAgo ts={c.expiresAt} /></> : null}</dd>
+              <dt className="border-b border-border/70 py-2.5 text-muted-foreground">Secret value</dt><dd className="min-w-0 border-b border-border/70 py-2.5 font-medium">{c.hasValue ? 'Stored · write only' : 'Not stored'}</dd>
+              <dt className="border-b border-border/70 py-2.5 text-muted-foreground">Visibility</dt><dd className="min-w-0 border-b border-border/70 py-2.5">{c.visible ? 'Available to approved runners' : 'Hidden from runners'}</dd>
+              <dt className="border-b border-border/70 py-2.5 text-muted-foreground">Last checked</dt><dd className="min-w-0 border-b border-border/70 py-2.5">{c.lastValidatedAt ? <TimeAgo ts={c.lastValidatedAt}/> : 'Never'}</dd>
+              <dt className="border-b border-border/70 py-2.5 text-muted-foreground">Next check</dt><dd className="min-w-0 border-b border-border/70 py-2.5">{c.nextValidationAt ? <TimeAgo ts={c.nextValidationAt}/> : 'Not scheduled'}</dd>
+              {c.firstValidationFailureAt && <><dt className="py-2.5 text-muted-foreground">First failure</dt><dd className="min-w-0 py-2.5 text-destructive"><TimeAgo ts={c.firstValidationFailureAt}/> · {c.validationFailureCount} consecutive failures</dd></>}
+            </dl>
+          </SectionCard>
+          <div className="min-w-0 space-y-3">
+            <div className="flex items-center justify-between gap-3 px-1">
+              <div><h2 className="text-sm font-semibold">Verification & permissions</h2><p className="mt-0.5 text-xs text-muted-foreground">Provider-reported identity and granted access.</p></div>
+              <Badge variant="outline">Secret masked</Badge>
+            </div>
+            <CredentialValidationSummary value={c.validationDetails} />
+          </div>
+        </div>
+
+        <SectionCard title="Access controls" description="Enable or disable availability and control whether approved Runners can discover this credential." icon={<ShieldCheck className="size-[18px]" />}>
           <CredentialControls id={c.id} name={c.name} enabled={c.status === 'active'} visible={c.visible} canEnable={c.hasValue || c.externallyManaged} />
-        </section>
-        {c.doc && <DocView doc={c.doc} />}
+        </SectionCard>
+
+        {c.doc && <SectionCard title="Provider setup notes" description="Original registration guidance and reviewed service-adapter details." icon={<Workflow className="size-[18px]" />}><DocView doc={c.doc} /></SectionCard>}
+
         {!c.externallyManaged && (
-          <section className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
-            <h2 className="text-base font-semibold">Replace value or change rules</h2>
+          <SectionCard title="Replace secret value" description="Submit a replacement token. The previous value is not displayed and cannot be recovered from the dashboard." icon={<LockKeyhole className="size-[18px]" />}>
             <CredentialForm mode="replace" id={c.id} credentialId={c.id} serviceName={c.service} apiBaseUrl={serviceAdapterFromDocument(c.doc)?.apiBaseUrl ?? serviceAdapterFor(c.service)?.apiBaseUrl} defaults={{ visible: c.visible, lifetime: c.lifetime }} />
-          </section>
+          </SectionCard>
         )}
-        <section className="space-y-3 rounded-xl border border-border p-4 sm:p-5">
-          <h2 className="text-sm font-semibold">Recent activity</h2>
+
+        <SectionCard title="Recent activity" description="Owner and Runner actions associated with this credential." icon={<Activity className="size-[18px]" />}>
           <AuditTable rows={log} />
-        </section>
+        </SectionCard>
       </div>
     )
   })

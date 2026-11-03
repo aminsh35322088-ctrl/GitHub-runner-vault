@@ -227,8 +227,8 @@ export function CredentialForm({
       >
         {mode === 'create' && (
           <div className="grid min-w-0 gap-4 sm:grid-cols-2">
-            <Field label="Credential name">
-              <Input name="name" required maxLength={120} defaultValue={preset?.label ? `${preset.label} API token` : ''} placeholder="e.g. PRODUCTION_CLOUDFLARE" className="w-full font-mono" />
+            <Field label="Credential name" hint="Use a unique uppercase name. This is the identifier shown to your Runner.">
+              <Input name="name" required maxLength={64} defaultValue={preset?.label ? preset.label.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') + '_API_TOKEN' : ''} placeholder="CLOUDFLARE_API_TOKEN" className="w-full font-mono" />
             </Field>
             <Field label="Service / provider">
               <Input name="service" required maxLength={80} value={service} onChange={(event) => {
