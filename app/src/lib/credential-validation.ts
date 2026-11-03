@@ -5,7 +5,7 @@ export type TokenPermission = {
   resources?: string[]
 }
 
-export type CredentialValidationStatus = 'valid' | 'invalid' | 'unavailable' | 'unsupported'
+export type CredentialValidationStatus = 'valid' | 'invalid' | 'insufficient_permissions' | 'unavailable' | 'unsupported' | 'expired'
 
 export type CredentialValidationReport = {
   provider: string
@@ -14,12 +14,15 @@ export type CredentialValidationReport = {
   tokenType?: string
   permissions: TokenPermission[]
   permissionsComplete: boolean
-  permissionSource: 'oauth-scopes' | 'cloudflare-token-policy' | 'capability-probe' | 'not-readable' | 'not-exposed' | 'not-supported'
+  permissionSource: 'oauth-scopes' | 'cloudflare-token-policy' | 'capability-probe' | 'service-adapter' | 'not-readable' | 'not-exposed' | 'not-supported'
   message: string
   checkedAt: number
 }
 
 type Fetch = typeof fetch
+
+import type { ServiceAdapter } from './service-adapter.ts'
+import { validateWithServiceAdapter } from './service-adapter-validation.ts'
 
 function report(
   provider: string,
@@ -471,6 +474,8 @@ export async function validateProviderToken(
   fetchFn: Fetch = fetch,
   checkedAt = Date.now(),
   cloudflareAccountId?: string,
+  adapter?: ServiceAdapter | null,
+  allowedHosts?: string[],
 ): Promise<CredentialValidationReport> {
   const value = token.trim()
   if (!value || new TextEncoder().encode(value).byteLength > 10_000 || /[\r\n\u0000]/.test(value)) {
@@ -488,8 +493,11 @@ export async function validateProviderToken(
     }
     return validateCloudflare(value, fetchFn, checkedAt, cloudflareAccountId)
   }
+  if (adapter && allowedHosts) {
+    return validateWithServiceAdapter(provider, value, adapter, allowedHosts, fetchFn, checkedAt)
+  }
   return report(provider, 'unsupported', 'not-supported', checkedAt, {
     tokenType: 'unknown',
-    message: 'برای این سرویس اعتبارسنجی خودکار پیاده‌سازی نشده است؛ مقدار فقط به‌صورت رمزنگاری‌شده ذخیره می‌شود.',
+    message: 'برای این سرویس Adapter اعتبارسنجی مستند وجود ندارد؛ توکن بدون تأیید معتبر تلقی نمی‌شود.',
   })
 }

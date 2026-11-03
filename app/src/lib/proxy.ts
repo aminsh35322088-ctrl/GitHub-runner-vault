@@ -116,7 +116,7 @@ async function readCapped(response: Response, max: number): Promise<{ bytes: Uin
   return { bytes, truncated }
 }
 
-export async function runProxy(input: ProxyInput, fetchFn: typeof fetch = fetch): Promise<ProxyResult> {
+export async function runProxy(input: ProxyInput, fetchFn: typeof fetch = fetch, timeoutMs = UPSTREAM_TIMEOUT_MS): Promise<ProxyResult> {
   const method = String(input.method ?? '').toUpperCase()
   if (!METHODS.has(method)) return { ok: false, error: 'bad_method' }
   const target = validateTarget(input.url, input.credential.allowedHosts)
@@ -148,7 +148,7 @@ export async function runProxy(input: ProxyInput, fetchFn: typeof fetch = fetch)
       headers,
       body,
       redirect: 'manual',
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      signal: AbortSignal.timeout(Math.min(30_000, Math.max(5_000, timeoutMs))),
     })
   } catch (error) {
     const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')

@@ -10,7 +10,7 @@ import {
   normalizeAllowedHosts, normalizeHost, readAllowedHosts, reservedName, validCredentialName,
 } from './credential-input.ts'
 import {
-  consumeEnrollmentLink, createEnrollmentLink, hashLinkToken, peekEnrollmentLink, releaseEnrollmentLink, MAX_LINK_TTL_MS,
+  consumeEnrollmentLink, createEnrollmentLink, discardEnrollmentLink, hashLinkToken, peekEnrollmentLink, releaseEnrollmentLink, MAX_LINK_TTL_MS,
 } from './enrollment.ts'
 
 const KEY_B64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
@@ -175,6 +175,96 @@ describe('credential documentation', () => {
     expect(parsed.ok).toBe(true)
   })
 
+  test('accepts a service adapter whose API hostname is owned by the official documentation host', () => {
+    const parsed = parseCredentialDoc({
+      ...goodDoc,
+      official_documentation_links: [{ title: 'Provider docs', url: 'https://northflank.com/docs/v1/api/use-the-api' }],
+      service_adapter: {
+        api_base_url: 'https://api.northflank.com/v1',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        validation: { method: 'GET', path: '/projects' },
+        cli_tools: [{
+          id: 'northflank', label: 'Northflank CLI', binary: 'nf',
+          integration: 'base-url-env', variable: 'NF_API_BASE_URL', token_variable: 'NF_API_TOKEN',
+          setup_hint: 'Use the local credential proxy.',
+        }],
+      },
+    })
+    expect(parsed.ok).toBe(true)
+  })
+
+  test('does not treat unrelated public-suffix tenants as the same provider domain', () => {
+    const parsed = parseCredentialDoc({
+      ...goodDoc,
+      official_documentation_links: [{ title: 'Docs', url: 'https://docs.evil.co.uk/api' }],
+      service_adapter: {
+        api_base_url: 'https://api.victim.co.uk',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        validation: { method: 'GET', path: '/me' },
+        cli_tools: [],
+      },
+    })
+    expect(parsed.ok).toBe(false)
+  })
+
+  test('rejects a CLI adapter that tries to overwrite a reserved process variable', () => {
+    const parsed = parseCredentialDoc({
+      ...goodDoc,
+      service_adapter: {
+        api_base_url: 'https://api.northflank.com/v1',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        cli_tools: [{
+          id: 'northflank', label: 'Northflank CLI', binary: 'nf',
+          integration: 'base-url-env', variable: 'NF_API_BASE_URL',
+          token_variable: 'PATH', setup_hint: 'Use the local bridge.',
+        }],
+      },
+    })
+    expect(parsed.ok).toBe(false)
+  })
+
+  test('rejects adapters that reuse one environment variable for the URL and token', () => {
+    const parsed = parseCredentialDoc({
+      ...goodDoc,
+      official_documentation_links: [{ title: 'Provider docs', url: 'https://northflank.com/docs/v1/api/use-the-cli' }],
+      service_adapter: {
+        api_base_url: 'https://api.northflank.com/v1',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        cli_tools: [{
+          id: 'northflank', label: 'Northflank CLI', binary: 'nf',
+          integration: 'base-url-env', variable: 'NF_API_BASE_URL',
+          token_variable: 'NF_API_BASE_URL', setup_hint: 'Use the local bridge.',
+        }],
+      },
+    })
+    expect(parsed.ok).toBe(false)
+  })
+
+  test('requires a verifiable success marker and forbids it on HEAD checks', () => {
+    const base = {
+      ...goodDoc,
+      service_adapter: {
+        api_base_url: 'https://slack.com',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        validation: { method: 'GET', path: '/api/auth.test', success_pointer: '/ok' },
+        cli_tools: [],
+      },
+    }
+    expect(parseCredentialDoc(base).ok).toBe(false)
+    expect(parseCredentialDoc({
+      ...base,
+      service_adapter: {
+        ...base.service_adapter,
+        validation: { method: 'HEAD', path: '/api/auth.test', success_pointer: '/ok', success_value: true },
+      },
+    }).ok).toBe(false)
+  })
+
   test.each([
     'http://docs.railway.com/x',
     'javascript:alert(1)',
@@ -286,6 +376,16 @@ describe('enrollment links', () => {
     const b = await createEnrollmentLink(db, { credentialId: id, kind: 'register', requestedBy: '', now })
     expect(await peekEnrollmentLink(db, a.token, now)).toBeNull()
     expect(await peekEnrollmentLink(db, b.token, now)).not.toBeNull()
+  })
+
+  test('a stale just-issued link can be discarded without leaving its token hash behind', async () => {
+    const { db, id } = await makeCredential()
+    const now = Date.now()
+    const { token } = await createEnrollmentLink(db, { credentialId: id, kind: 'register', requestedBy: 'runner', now })
+    expect(await peekEnrollmentLink(db, token, now)).not.toBeNull()
+    await discardEnrollmentLink(db, token)
+    expect(await peekEnrollmentLink(db, token, now)).toBeNull()
+    expect(await db.select().from(schema.enrollmentLink).where(orm.eq(schema.enrollmentLink.credentialId, id))).toHaveLength(0)
   })
 
   test('only the hash of the token is stored', async () => {

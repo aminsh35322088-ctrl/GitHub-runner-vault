@@ -6,7 +6,7 @@ import { useState } from 'react'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import {
-  addExternalAction, deleteCredentialAction, revokeRunnerSessionsAction, saveRunnerPolicyAction, setEnabledAction, setVisibleAction,
+  addExternalAction, deleteCredentialAction, dismissRegistrationRequestAction, renewRegistrationLinkAction, revokeRunnerSessionsAction, saveRunnerPolicyAction, setEnabledAction, setVisibleAction,
 } from '../vault-actions.ts'
 
 function useRun() {
@@ -21,6 +21,58 @@ function useRun() {
     }
   }
   return { error, run }
+}
+
+export function RenewRegistrationLinkButton({ id, hasActiveLink }: { id: string; hasActiveLink: boolean }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  async function openFreshLink() {
+    setBusy(true)
+    setError('')
+    try {
+      const result = await renewRegistrationLinkAction(id)
+      window.location.assign(result.url)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not create a new registration link.')
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="space-y-2">
+      <Button type="button" disabled={busy} loading={busy} onClick={() => void openFreshLink()}>
+        {busy ? 'Preparing secure form…' : hasActiveLink ? 'Open a fresh owner form' : 'Generate a new owner form'}
+      </Button>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        Creates a new 15-minute, single-use link and invalidates any earlier unused link.
+      </p>
+      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+    </div>
+  )
+}
+
+export function DismissRunnerRequestButton({ id, name }: { id: string; name: string }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  async function dismiss() {
+    if (!window.confirm(`Dismiss the pending request for ${name}? This permanently removes its metadata and invalidates every registration link. This cannot be undone.`)) return
+    setBusy(true)
+    setError('')
+    try {
+      await dismissRegistrationRequestAction(id)
+      window.location.assign('/vault/requests')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not dismiss this request.')
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="space-y-2">
+      <Button type="button" size="sm" variant="destructive" disabled={busy} loading={busy} onClick={() => void dismiss()}>
+        {busy ? 'Dismissing…' : 'Dismiss request'}
+      </Button>
+      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+    </div>
+  )
 }
 
 export function CredentialControls({ id, name, enabled, visible, canEnable }: { id: string; name: string; enabled: boolean; visible: boolean; canEnable: boolean }) {

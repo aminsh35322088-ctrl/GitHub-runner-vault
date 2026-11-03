@@ -38,11 +38,26 @@ export VAULT_URL=https://<vault-origin>
 node vault.mjs list
 node vault.mjs use CF_API_TOKEN GET https://api.cloudflare.com/client/v4/user/tokens/verify --purpose "verify token"
 node vault.mjs request --name RAILWAY_TOKEN --service Railway --doc doc.json
+
+# Run the reviewed local CLI adapter (Northflank example)
+# Run the reviewed Cloudflare Wrangler adapter:
+node vault.mjs serve CLOUDFLARE_API_TOKEN --tool wrangler
+# Export the exact loopback URL and non-secret placeholder printed by serve:
+# CLOUDFLARE_API_BASE_URL=http://127.0.0.1:<ephemeral-port>/client/v4
+# CLOUDFLARE_API_TOKEN=vault-local-placeholder
+# wrangler whoami
+
+node vault.mjs serve NORTHFLANK_API_TOKEN
+# In another terminal, export the exact loopback URL and placeholder printed by serve:
+# NF_API_BASE_URL=http://127.0.0.1:<ephemeral-port>/v1
+# NF_API_TOKEN=vault-local-placeholder
+# nf list projects --quiet --output json --noDefaults
 ```
 
 `request` prints a one-time link for the owner and nothing secret. The model never
 receives a token. `use` prints the upstream response body; the exit code is 3 for an
-upstream HTTP error and 2 if the vault refused the call.
+upstream HTTP error and 2 if the vault refused the call. `serve` supports only reviewed
+CLI adapters, binds to loopback and does not expose or execute a command.
 
 ## `doc.json`
 
@@ -67,8 +82,35 @@ Strict schema; unknown keys are rejected and everything is shown to the owner as
 If the model did not check official documentation it must say `"verification": "unverified"`
 and give an `unverified_note`.
 
+For a custom service with a documented API origin, the model must attach a strict
+`service_adapter` object. For example, the Northflank adapter includes the official
+API host, its read-only token check and the supported headless CLI integration:
+
+```json
+{
+  "api_base_url": "https://api.northflank.com/v1",
+  "auth_header": "Authorization",
+  "auth_scheme": "Bearer",
+  "validation": { "method": "GET", "path": "/projects" },
+  "cli_tools": [{
+    "id": "northflank",
+    "label": "Northflank CLI",
+    "binary": "nf",
+    "integration": "base-url-env",
+    "variable": "NF_API_BASE_URL",
+    "setup_hint": "Use the Vault local bridge with NF_API_TOKEN set to its non-secret placeholder."
+  }]
+}
+```
+
+Place that object under `service_adapter` in the registration document. The official
+documentation links must identify the same provider domain that owns the API host.
+The Vault rejects custom hosts and unsafe schemes, ports, paths or CLI variable names.
+Do not attach an adapter unless the official provider documentation has been checked.
+The actual token must never appear in the document, model output, shell arguments or CLI environment.
+
 ## What a model should expect
 
 - A credential that is missing, hidden, disabled or expired all answer `unavailable`.
 - Calls to a host the owner did not approve are refused (`host_not_allowed`).
-- Limits: 30 calls/min per credential, 256 KiB request, 1 MiB response, 20 s timeout.
+- Limits: 30 calls/min per credential, 256 KiB request, 1 MiB response and a configurable 5–30 s upstream timeout (20 s default).

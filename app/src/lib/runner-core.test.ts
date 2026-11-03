@@ -5,7 +5,9 @@ import { importEncryptionKey } from './credential-crypto.ts'
 import { deleteCredential, requestRegistration, storeCredentialValue, setEnabled, setVisibility } from './credential-service.ts'
 import { GITHUB_OIDC_ISSUER, type OidcPolicy } from './oidc.ts'
 import { deriveSessionKey, issueRunnerSession, revokeRunnerSessions } from './runner-session.ts'
-import { bearer, createSession, registry, requestCredential, useCredential, USE_LIMIT_PER_MINUTE, type RunnerDeps } from './runner-core.ts'
+import { bearer, createSession, registry, integrations, requestCredential, useCredential, USE_LIMIT_PER_MINUTE, type RunnerDeps } from './runner-core.ts'
+import { DEFAULT_VAULT_PREFERENCES } from './vault-observability.ts'
+import { cleanupRunnerRateLimitEvents, releaseRunnerRateLimitReservation, reserveRunnerRateLimit } from './runner-rate-limit.ts'
 
 const KEY_B64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
 const SECRET = 'cfut_END_TO_END_SECRET_0123456789'
@@ -54,6 +56,36 @@ async function activeCredential(d: RunnerDeps, opts: { visible?: boolean } = {})
 
 const call = { url: 'https://api.cloudflare.com/client/v4/user/tokens/verify', method: 'GET' }
 
+function b64url(value: Uint8Array | string) {
+  const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+async function signedOidcToken(now: number) {
+  const pair = await crypto.subtle.generateKey(
+    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    true, ['sign', 'verify'],
+  ) as CryptoKeyPair
+  const publicJwk = await crypto.subtle.exportKey('jwk', pair.publicKey)
+  const seconds = Math.floor(now / 1000)
+  const header = b64url(JSON.stringify({ alg: 'RS256', kid: 'runner-core-test', typ: 'JWT' }))
+  const claims = b64url(JSON.stringify({
+    iss: 'https://token.actions.githubusercontent.com', aud: policy.audience,
+    iat: seconds, nbf: seconds - 5, exp: seconds + 300,
+    repository: 'o/r', repository_id: '1', repository_owner: 'o', repository_owner_id: '2',
+    ref: 'refs/heads/main', event_name: 'workflow_dispatch', run_id: '987654321', run_attempt: '1',
+    workflow_ref: 'o/r/.github/workflows/runner.yml@refs/heads/main', sha: 'test-sha', jti: 'runner-core-test-jti',
+  }))
+  const input = `${header}.${claims}`
+  const signature = new Uint8Array(await crypto.subtle.sign('RSASSA-PKCS1-v1_5', pair.privateKey, new TextEncoder().encode(input)))
+  return {
+    token: `${input}.${b64url(signature)}`,
+    jwks: async () => ({ keys: [{ kty: 'RSA', n: publicJwk.n!, e: publicJwk.e!, kid: 'runner-core-test', alg: 'RS256' }] }),
+  }
+}
+
 describe('bearer parsing', () => {
   test.each([[null], [''], ['Bearer'], ['Bearer short'], ['Basic abcdefghijkl'], ['bearer abcdefghijklm'], ['Bearer a b c d e f g h i j']])('rejects %j', (h) => {
     expect(bearer(h as string | null)).toBeNull()
@@ -65,6 +97,7 @@ describe('authentication', () => {
   test('every runner operation needs a valid session', async () => {
     const d = await deps()
     expect((await registry(d, null)).status).toBe(401)
+    expect((await integrations(d, null)).status).toBe(401)
     expect((await registry(d, 'Bearer rs1.not.valid.at.all')).status).toBe(401)
     expect((await useCredential(d, null, { name: 'X', ...call })).status).toBe(401)
     expect((await requestCredential(d, null, { name: 'X', service: 'y', purpose: 'z', doc })).status).toBe(401)
@@ -94,6 +127,18 @@ describe('authentication', () => {
     }
   })
 
+  test('uses the owner-configured OIDC session issuance limit', async () => {
+    const now = Date.now() + 24 * 60 * 60_000
+    const signed = await signedOidcToken(now)
+    const d = await deps({
+      now,
+      jwks: signed.jwks,
+      getVaultPreferences: async () => ({ ...DEFAULT_VAULT_PREFERENCES, runnerSessionsPerHour: 1 }),
+    })
+    expect((await createSession(d, `Bearer ${signed.token}`)).status).toBe(200)
+    expect(await createSession(d, `Bearer ${signed.token}`)).toEqual({ status: 429, body: { error: 'rate_limited' } })
+  })
+
   test('the issuer constant is the real GitHub one', () => {
     expect(GITHUB_OIDC_ISSUER).toBe('https://token.actions.githubusercontent.com')
   })
@@ -117,9 +162,33 @@ describe('registry', () => {
 describe('registration requests', () => {
   test('return an owner link, nothing else', async () => {
     const d = await deps()
-    const res = await requestCredential(d, await sessionHeader(d), { name: uname(), service: 'Cloudflare', purpose: 'Deploy', doc })
+    const name = uname()
+    const res = await requestCredential(d, await sessionHeader(d), { name, service: 'Cloudflare', purpose: 'Deploy', doc })
     expect(res.status).toBe(200)
-    expect((res.body as { link: string }).link).toMatch(/^https:\/\/vault\.test\/vault\/register\/lnk_[A-Za-z0-9_-]{43}$/)
+    const link = (res.body as { link: string }).link
+    expect(link).toMatch(/^https:\/\/vault\.test\/vault\/register\/lnk_[A-Za-z0-9_-]{43}$/)
+    const [notification] = await d.db.select().from(schema.vaultNotification)
+      .where(orm.and(
+        orm.eq(schema.vaultNotification.kind, 'credential_registration_requested'),
+        orm.eq(schema.vaultNotification.credentialName, name),
+      ))
+    expect(notification).toMatchObject({
+      severity: 'info', title: 'Runner requested a credential', credentialName: name,
+    })
+    expect(notification?.message).toContain('waiting for owner review')
+    expect(JSON.stringify(notification)).not.toContain(link)
+  })
+
+  test('uses the owner-configured registration limit', async () => {
+    const d = await deps({
+      now: Date.now() + 24 * 60 * 60_000,
+      getVaultPreferences: async () => ({ ...DEFAULT_VAULT_PREFERENCES, runnerRegistrationsPerHour: 1 }),
+    })
+    const header = await sessionHeader(d)
+    const first = await requestCredential(d, header, { name: uname(), service: 'Cloudflare', doc })
+    const second = await requestCredential(d, header, { name: uname(), service: 'GitHub', doc })
+    expect(first.status).toBe(200)
+    expect(second).toEqual({ status: 429, body: { error: 'rate_limited' } })
   })
 
   test('invalid input is rejected; existing names conflict', async () => {
@@ -133,6 +202,67 @@ describe('registration requests', () => {
 })
 
 describe('use (proxy)', () => {
+  test('loads proxy settings only after an active proxy credential is accepted', async () => {
+    let settingsReads = 0
+    const d = await deps({
+      getProxyTimeoutMs: async () => { settingsReads += 1; return 20_000 },
+    })
+    const header = await sessionHeader(d)
+
+    expect((await registry(d, header)).status).toBe(200)
+    expect(settingsReads).toBe(0)
+
+    expect((await useCredential(d, header, { name: 'MISSING_CREDENTIAL', ...call })).status).toBe(404)
+    expect(settingsReads).toBe(0)
+
+    const cred = await activeCredential(d)
+    expect((await useCredential(d, header, { name: cred.name, ...call })).status).toBe(200)
+    expect(settingsReads).toBe(1)
+  })
+
+  test('schedules audit, usage and last-used writes after returning the provider response', async () => {
+    const scheduled: Promise<unknown>[] = []
+    const d = await deps({ waitUntil: (promise) => { scheduled.push(promise) } })
+    const cred = await activeCredential(d)
+    const res = await useCredential(d, await sessionHeader(d), { name: cred.name, ...call })
+
+    expect(res.status).toBe(200)
+    expect(scheduled).toHaveLength(1)
+    await scheduled[0]
+
+    const audits = await d.db.select().from(schema.credentialAudit).where(orm.and(
+      orm.eq(schema.credentialAudit.credentialName, cred.name),
+      orm.eq(schema.credentialAudit.action, 'proxy_use'),
+    ))
+    expect(audits.some((entry) => entry.result === 'ok')).toBe(true)
+    const usage = await d.db.select().from(schema.credentialUsageHourly).where(orm.eq(schema.credentialUsageHourly.credentialId, cred.id))
+    expect(usage.reduce((total, row) => total + row.requestCount, 0)).toBe(1)
+    const [row] = await d.db.select({ lastUsedAt: schema.credential.lastUsedAt }).from(schema.credential).where(orm.eq(schema.credential.id, cred.id))
+    expect(row?.lastUsedAt).toBe(d.now)
+  })
+
+  test('schedules upstream error audit and usage without changing the provider error', async () => {
+    const scheduled: Promise<unknown>[] = []
+    const d = await deps({
+      waitUntil: (promise) => { scheduled.push(promise) },
+      fetchFn: (async () => { throw new Error('upstream unavailable') }) as unknown as typeof fetch,
+    })
+    const cred = await activeCredential(d)
+    const res = await useCredential(d, await sessionHeader(d), { name: cred.name, ...call })
+
+    expect(res).toEqual({ status: 502, body: { error: 'upstream_error' } })
+    expect(scheduled).toHaveLength(1)
+    await scheduled[0]
+
+    const audits = await d.db.select().from(schema.credentialAudit).where(orm.and(
+      orm.eq(schema.credentialAudit.credentialName, cred.name),
+      orm.eq(schema.credentialAudit.action, 'proxy_use'),
+    ))
+    expect(audits.some((entry) => entry.result === 'upstream_error')).toBe(true)
+    const usage = await d.db.select().from(schema.credentialUsageHourly).where(orm.eq(schema.credentialUsageHourly.credentialId, cred.id))
+    expect(usage.reduce((total, row) => total + row.errorCount, 0)).toBe(1)
+  })
+
   test('performs the call, returns the response, never the token, and audits it', async () => {
     const seen: Array<{ url: string; auth: string | null }> = []
     const d = await deps({
@@ -222,11 +352,88 @@ describe('use (proxy)', () => {
     }
   })
 
+  test('uses the owner-configured proxy rate limit independently for each credential', async () => {
+    const d = await deps({ getVaultPreferences: async () => ({ ...DEFAULT_VAULT_PREFERENCES, proxyRequestsPerMinute: 2 }) })
+    const first = await activeCredential(d)
+    const second = await activeCredential(d)
+    const header = await sessionHeader(d)
+
+    expect((await useCredential(d, header, { name: first.name, ...call })).status).toBe(200)
+    expect((await useCredential(d, header, { name: first.name, ...call })).status).toBe(200)
+    expect((await useCredential(d, header, { name: first.name, ...call })).status).toBe(429)
+    expect((await useCredential(d, header, { name: second.name, ...call })).status).toBe(200)
+  })
+
+  test('does not carry a deleted credential rate limit into a new credential reusing its name', async () => {
+    const d = await deps({ getVaultPreferences: async () => ({ ...DEFAULT_VAULT_PREFERENCES, proxyRequestsPerMinute: 1 }) })
+    const previous = await activeCredential(d)
+    const header = await sessionHeader(d)
+    expect((await useCredential(d, header, { name: previous.name, ...call })).status).toBe(200)
+    await deleteCredential(d.db, previous.id, d.now + 1)
+
+    const registered = await requestRegistration(d.db, {
+      name: previous.name, service: 'Cloudflare', purpose: 'Replacement credential', doc,
+      requestedBy: 'runner:replacement', now: d.now + 2,
+    })
+    if (!registered.ok) throw new Error(registered.error)
+    const stored = await storeCredentialValue(d.db, d.encryptionKey, {
+      credentialId: registered.value.credentialId, value: SECRET, lifetime: 'permanent', expiresAt: null,
+      visible: true, delivery: 'proxy', allowedHosts: ['api.cloudflare.com'], now: d.now + 2,
+    })
+    if (!stored.ok) throw new Error(stored.error)
+
+    expect((await useCredential({ ...d, now: d.now + 3 }, header, { name: previous.name, ...call })).status).toBe(200)
+  })
+
   test('is rate limited per credential', async () => {
     const d = await deps()
     const cred = await activeCredential(d)
     const header = await sessionHeader(d)
     for (let i = 0; i < USE_LIMIT_PER_MINUTE; i++) expect((await useCredential(d, header, { name: cred.name, ...call })).status).toBe(200)
     expect((await useCredential(d, header, { name: cred.name, ...call })).status).toBe(429)
+  })
+})
+
+
+describe('atomic Runner rate-limit reservations', () => {
+  test('does not over-issue slots under a concurrent burst', async () => {
+    const db = getDb()
+    const subject = `parallel-${crypto.randomUUID()}`
+    const now = Date.now() + 48 * 60 * 60_000
+    const outcomes = await Promise.all(Array.from({ length: 32 }, () => reserveRunnerRateLimit(db, {
+      scope: 'session', subject, now, windowMs: 60_000, limit: 5,
+    })))
+    const accepted = outcomes.filter((id): id is string => id !== null)
+    expect(accepted).toHaveLength(5)
+    await Promise.all(accepted.map((id) => releaseRunnerRateLimitReservation(db, id)))
+  })
+
+  test('isolates scopes and subjects and applies the sliding-window cutoff', async () => {
+    const db = getDb()
+    const subject = `scope-${crypto.randomUUID()}`
+    const now = Date.now() + 48 * 60 * 60_000
+    const first = await reserveRunnerRateLimit(db, { scope: 'registration', subject, now, windowMs: 60_000, limit: 1 })
+    expect(first).toBeTruthy()
+    expect(await reserveRunnerRateLimit(db, { scope: 'registration', subject, now: now + 1, windowMs: 60_000, limit: 1 })).toBeNull()
+    const otherScope = await reserveRunnerRateLimit(db, { scope: 'session', subject, now: now + 1, windowMs: 60_000, limit: 1 })
+    expect(otherScope).toBeTruthy()
+    const nextWindow = await reserveRunnerRateLimit(db, { scope: 'registration', subject, now: now + 60_001, windowMs: 60_000, limit: 1 })
+    expect(nextWindow).toBeTruthy()
+    await Promise.all([first, otherScope, nextWindow].filter((id): id is string => Boolean(id)).map((id) => releaseRunnerRateLimitReservation(db, id)))
+  })
+
+  test('prunes old reservations without touching active windows', async () => {
+    const db = getDb()
+    const subject = `cleanup-${crypto.randomUUID()}`
+    const now = Date.now() + 48 * 60 * 60_000
+    const old = await reserveRunnerRateLimit(db, { scope: 'session', subject, now: now - 4 * 60 * 60_000, windowMs: 60_000, limit: 1 })
+    const fresh = await reserveRunnerRateLimit(db, { scope: 'session', subject, now, windowMs: 60_000, limit: 2 })
+    expect(old).toBeTruthy()
+    expect(fresh).toBeTruthy()
+    await cleanupRunnerRateLimitEvents(db, now)
+    const rows = await db.select({ id: schema.runnerRateLimitEvent.id }).from(schema.runnerRateLimitEvent)
+      .where(orm.inArray(schema.runnerRateLimitEvent.id, [old!, fresh!]))
+    expect(rows.map((row) => row.id)).toEqual([fresh])
+    await releaseRunnerRateLimitReservation(db, fresh!)
   })
 })

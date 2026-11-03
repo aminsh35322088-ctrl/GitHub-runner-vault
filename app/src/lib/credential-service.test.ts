@@ -3,11 +3,12 @@ import { getDb, schema } from 'db'
 import * as orm from 'drizzle-orm'
 import { importEncryptionKey } from './credential-crypto.ts'
 import {
-  createCredential, deleteCredential, getCredentialForOwner, listCredentialsForOwner, listRegistryForRunner,
-  readCredentialValue, registerExternallyManaged, requestRegistration, setEnabled, setVisibility,
+  createCredential, deleteCredential, dismissPendingRegistrationRequest, getCredentialForOwner, listCredentialsForOwner, listPendingRegistrationRequestsForOwner, listRegistryForRunner,
+  readCredentialValue, registerExternallyManaged, renewRegistrationLink, requestRegistration, setEnabled, setVisibility,
   storeCredentialValue, MAX_TEMPORARY_MS,
 } from './credential-service.ts'
-import { consumeEnrollmentLink, peekEnrollmentLink } from './enrollment.ts'
+import { consumeEnrollmentLink, listLatestRegistrationLinks, peekEnrollmentLink } from './enrollment.ts'
+import { createNotification, DEFAULT_VAULT_PREFERENCES, getUsageAnalytics, listCredentialValidationHistory, listNotifications, listRunnerIntegrationMetadata, listUnreadRegistrationNotificationIds, loadVaultPreferences, markNotificationIdsRead, markRegistrationNotificationsRead, recordCredentialUsage, resetVaultPreferencesCache, runScheduledCredentialValidation, saveVaultPreferences, validateStoredCredentialNow } from './vault-observability.ts'
 
 const KEY_B64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
 const SECRET = 'cfut_SUPERSECRETVALUE_123456789'
@@ -52,7 +53,67 @@ async function activeCredential(opts: Partial<Parameters<typeof storeCredentialV
   return { db, key, now, name, id: req.value.credentialId }
 }
 
+describe('Vault preferences', () => {
+  test('loads safe defaults and atomically persists all tunable traffic limits', async () => {
+    const { db, now } = await setup()
+    resetVaultPreferencesCache()
+    try {
+      expect(await loadVaultPreferences(db, now)).toMatchObject(DEFAULT_VAULT_PREFERENCES)
+      const next = {
+        ...DEFAULT_VAULT_PREFERENCES,
+        proxyTimeoutMs: 15_000,
+        proxyRequestsPerMinute: 240,
+        runnerSessionsPerHour: 80,
+        runnerRegistrationsPerHour: 40,
+        validationIntervalHours: 3,
+        analyticsRetentionDays: 30,
+        notificationRetentionDays: 60,
+        defaultVisible: false,
+        defaultLifetime: 'temporary' as const,
+      }
+      await saveVaultPreferences(db, next, now + 1)
+      expect(await loadVaultPreferences(db, now + 2)).toEqual(next)
+
+      resetVaultPreferencesCache()
+      expect(await loadVaultPreferences(db, now + 3)).toEqual(next)
+    } finally {
+      resetVaultPreferencesCache()
+    }
+  })
+})
+
 describe('registration requests', () => {
+  test('resolving a request marks only that request notification as read', async () => {
+    const { db, now } = await setup()
+    const first = await requestRegistration(db, { name: uniqueName(), service: 'Cloudflare', doc, requestedBy: 'runner:first', now })
+    const second = await requestRegistration(db, { name: uniqueName(), service: 'Cloudflare', doc, requestedBy: 'runner:second', now })
+    if (!first.ok || !second.ok) throw new Error('unexpected registration failure')
+    const credentialId = first.value.credentialId
+    await createNotification(db, {
+      dedupeKey: 'registration:resolved:' + credentialId,
+      kind: 'credential_registration_requested', severity: 'info',
+      title: 'Runner requested a credential', message: 'Waiting for owner.',
+      credentialId, credentialName: 'REQUEST_TOKEN', now,
+    })
+    await createNotification(db, {
+      dedupeKey: 'other-event:' + credentialId,
+      kind: 'credential_validation_failed', severity: 'warning',
+      title: 'Validation failed', message: 'Review the token.',
+      credentialId, credentialName: 'REQUEST_TOKEN', now,
+    })
+    await createNotification(db, {
+      dedupeKey: 'registration:other-credential',
+      kind: 'credential_registration_requested', severity: 'info',
+      title: 'Runner requested a credential', message: 'Another request.',
+      credentialId: second.value.credentialId, credentialName: 'OTHER_TOKEN', now,
+    })
+    await markRegistrationNotificationsRead(db, credentialId, now + 1)
+    const rows = await db.select().from(schema.vaultNotification)
+    expect(rows.find((row) => row.dedupeKey === 'registration:resolved:' + credentialId)?.readAt).toBe(now + 1)
+    expect(rows.find((row) => row.dedupeKey === 'other-event:' + credentialId)?.readAt).toBeNull()
+    expect(rows.find((row) => row.dedupeKey === 'registration:other-credential')?.readAt).toBeNull()
+  })
+
   test('create a pending, hidden entry with docs and a one-time link', async () => {
     const { db, now } = await setup()
     const name = uniqueName()
@@ -66,6 +127,127 @@ describe('registration requests', () => {
     expect(await peekEnrollmentLink(db, result.value.link.token, now)).not.toBeNull()
     // A model-created entry is never visible to runners until the owner activates it.
     expect((await listRegistryForRunner(db, now)).some((c) => c.name === name)).toBe(false)
+    const inbox = await listPendingRegistrationRequestsForOwner(db)
+    expect(inbox.rows.find((item) => item.id === result.value.credentialId)).toMatchObject({
+      name, status: 'pending', hasValue: false, doc: { task: 'Deploy a Worker' },
+    })
+    expect(JSON.stringify(inbox.rows.find((item) => item.id === result.value.credentialId))).not.toContain(SECRET)
+  })
+
+  test('pending request inbox is paginated, ordered and clamps out-of-range pages', async () => {
+    const { db, now } = await setup()
+    const baseline = await listPendingRegistrationRequestsForOwner(db, { page: 1, pageSize: 1 })
+    const ids: string[] = []
+    for (let index = 0; index < 3; index += 1) {
+      const result = await requestRegistration(db, {
+        name: uniqueName(), service: 'Cloudflare', doc,
+        requestedBy: `runner:page-${index}`, now: now + 1_000_000 + index,
+      })
+      if (!result.ok) throw new Error('unexpected registration failure')
+      ids.push(result.value.credentialId)
+    }
+    const first = await listPendingRegistrationRequestsForOwner(db, { page: 1, pageSize: 1 })
+    const second = await listPendingRegistrationRequestsForOwner(db, { page: 2, pageSize: 1 })
+    const third = await listPendingRegistrationRequestsForOwner(db, { page: 3, pageSize: 1 })
+    const clamped = await listPendingRegistrationRequestsForOwner(db, { page: 99, pageSize: 1 })
+    expect(first.total).toBeGreaterThanOrEqual(baseline.total + 3)
+    expect(first).toMatchObject({ page: 1, pageSize: 1 })
+    expect(second).toMatchObject({ total: first.total, page: 2, pageSize: 1 })
+    expect(third).toMatchObject({ total: first.total, page: 3, pageSize: 1 })
+    expect(clamped).toMatchObject({ total: first.total, page: first.totalPages, pageSize: 1, totalPages: first.total })
+    expect(first.rows).toHaveLength(1)
+    expect(second.rows).toHaveLength(1)
+    expect(third.rows).toHaveLength(1)
+    expect([first.rows[0]?.id, second.rows[0]?.id, third.rows[0]?.id]).toEqual([...ids].reverse())
+  })
+
+  test('registration stores a value only while the credential is still pending', async () => {
+    const { db, key, now } = await setup()
+    const name = uniqueName()
+    const requested = await requestRegistration(db, { name, service: 'Cloudflare', doc, requestedBy: 'runner:atomic-store', now })
+    if (!requested.ok) throw new Error('unexpected registration failure')
+    const stored = await storeCredentialValue(db, key, {
+      credentialId: requested.value.credentialId, value: SECRET,
+      lifetime: 'permanent', expiresAt: null, visible: true, delivery: 'proxy',
+      allowedHosts: ['api.cloudflare.com'], now,
+    }, { requirePending: true })
+    expect(stored).toMatchObject({ ok: true, value: { name } })
+    expect(await getCredentialForOwner(db, requested.value.credentialId)).toMatchObject({
+      status: 'active', hasValue: true, visible: true,
+    })
+  })
+
+  test('registration cannot overwrite an active credential after its link was checked', async () => {
+    const { db, key, now, id, name } = await activeCredential()
+    const stored = await storeCredentialValue(db, key, {
+      credentialId: id, value: 'cfut_DIFFERENT_SECRET_987654321',
+      lifetime: 'permanent', expiresAt: null, visible: true, delivery: 'proxy',
+      allowedHosts: ['api.cloudflare.com'], now,
+    }, { requirePending: true })
+    expect(stored).toMatchObject({ ok: false, error: 'not_found' })
+    const current = await readCredentialValue(db, key, name, now)
+    expect(current).toMatchObject({ ok: true, value: SECRET })
+  })
+
+  test('owner can renew a pending request link without exposing stored token hashes', async () => {
+    const { db, now } = await setup()
+    const name = uniqueName()
+    const requested = await requestRegistration(db, { name, service: 'Cloudflare', doc, requestedBy: 'runner:owner/repo', now })
+    if (!requested.ok) throw new Error('unexpected registration failure')
+    const renewed = await renewRegistrationLink(db, requested.value.credentialId, 'owner:manual-reissue', now + 1)
+    expect(renewed).toMatchObject({ ok: true, value: { credentialId: requested.value.credentialId, name } })
+    if (!renewed.ok) return
+    expect(await peekEnrollmentLink(db, requested.value.link.token, now + 1)).toBeNull()
+    expect(await peekEnrollmentLink(db, renewed.value.link.token, now + 1)).not.toBeNull()
+    const latest = await listLatestRegistrationLinks(db, [requested.value.credentialId])
+    expect(latest.find((row) => row.credentialId === requested.value.credentialId)).toMatchObject({
+      requestedBy: 'runner:owner/repo', expiresAt: renewed.value.link.expiresAt, usedAt: null,
+    })
+    expect(JSON.stringify(latest)).not.toContain(renewed.value.link.token)
+    expect(JSON.stringify(latest)).not.toContain('tokenHash')
+    const events = await db.select().from(schema.credentialAudit).where(orm.eq(schema.credentialAudit.credentialId, requested.value.credentialId))
+    expect(events.map((event) => event.action)).toContain('registration_link_renewed')
+  })
+
+  test('owner can dismiss a pending request and invalidate every registration link', async () => {
+    const { db, now } = await setup()
+    const name = uniqueName()
+    const requested = await requestRegistration(db, { name, service: 'Cloudflare', doc, requestedBy: 'runner:owner/repo', now })
+    if (!requested.ok) throw new Error('unexpected registration failure')
+    await createNotification(db, {
+      dedupeKey: 'registration:dismiss-test:' + requested.value.credentialId,
+      kind: 'credential_registration_requested', severity: 'info',
+      title: 'Runner requested a credential', message: 'Waiting for owner.',
+      credentialId: requested.value.credentialId, credentialName: name, now,
+    })
+    const notificationIds = await listUnreadRegistrationNotificationIds(db, requested.value.credentialId)
+    expect(notificationIds).toHaveLength(1)
+    const dismissed = await dismissPendingRegistrationRequest(db, requested.value.credentialId, now + 1)
+    expect(dismissed).toMatchObject({ ok: true, value: { name } })
+    expect(await getCredentialForOwner(db, requested.value.credentialId)).toBeNull()
+    expect(await peekEnrollmentLink(db, requested.value.link.token, now + 1)).toBeNull()
+    expect((await listPendingRegistrationRequestsForOwner(db)).rows.some((row) => row.id === requested.value.credentialId)).toBe(false)
+    await markNotificationIdsRead(db, notificationIds, now + 1)
+    const [notification] = await db.select().from(schema.vaultNotification)
+      .where(orm.eq(schema.vaultNotification.id, notificationIds[0]!))
+    expect(notification).toMatchObject({ credentialId: null, readAt: now + 1 })
+    const events = await db.select().from(schema.credentialAudit).where(orm.eq(schema.credentialAudit.credentialId, requested.value.credentialId))
+    expect(events.map((event) => event.action)).toContain('registration_request_dismissed')
+  })
+
+  test('cannot dismiss a request after it has become an active credential', async () => {
+    const { db, now } = await setup()
+    const active = await activeCredential()
+    expect(await dismissPendingRegistrationRequest(db, active.id, now)).toMatchObject({ ok: false, error: 'not_found' })
+    expect(await getCredentialForOwner(db, active.id)).not.toBeNull()
+  })
+
+  test('cannot renew a request after it has become an active credential', async () => {
+    const { db, now } = await setup()
+    const active = await activeCredential()
+    expect(await renewRegistrationLink(db, active.id, 'owner:manual-reissue', now)).toMatchObject({ ok: false, error: 'not_found' })
+    expect((await listPendingRegistrationRequestsForOwner(db)).rows.some((row) => row.id === active.id)).toBe(false)
+    expect(await listLatestRegistrationLinks(db, [])).toEqual([])
   })
 
   test.each([['lowercase'], ['1BAD'], ['A']])('rejects invalid name %s', async (name) => {
@@ -90,17 +272,56 @@ describe('registration requests', () => {
   test('a second request for a pending entry reuses it and supersedes the old link', async () => {
     const { db, now } = await setup()
     const name = uniqueName()
-    const a = await requestRegistration(db, { name, service: 's', purpose: 'p', doc, requestedBy: 'r', now })
-    const b = await requestRegistration(db, { name, service: 's', purpose: 'p2', doc, requestedBy: 'r', now })
+    const a = await requestRegistration(db, { name, service: 's', purpose: 'p', doc, requestedBy: 'runner:first', now })
+    const b = await requestRegistration(db, { name, service: 's', purpose: 'p2', doc, requestedBy: 'runner:second', now })
     if (!a.ok || !b.ok) throw new Error('unexpected')
     expect(b.value.credentialId).toBe(a.value.credentialId)
     expect(await peekEnrollmentLink(db, a.value.link.token, now)).toBeNull()
     expect(await peekEnrollmentLink(db, b.value.link.token, now)).not.toBeNull()
+    expect(await listLatestRegistrationLinks(db, [a.value.credentialId])).toMatchObject([
+      { credentialId: a.value.credentialId, requestedBy: 'runner:second', usedAt: null },
+    ])
   })
 
-  test('a model cannot re-request an entry that already exists', async () => {
-    const { db, now, name } = await activeCredential()
-    expect(await requestRegistration(db, { name, service: 's', purpose: 'p', doc, requestedBy: 'r', now })).toMatchObject({ ok: false, error: 'exists' })
+  test('simultaneous first requests for one name never create duplicates or throw uniqueness errors', async () => {
+    const { db, now } = await setup()
+    const name = uniqueName()
+    const results = await Promise.allSettled(Array.from({ length: 8 }, (_, index) =>
+      requestRegistration(db, {
+        name, service: 'Cloudflare', purpose: 'Deploy', doc,
+        requestedBy: `runner:concurrent-${index}`, now: now + index,
+      }),
+    ))
+    expect(results.every((result) => result.status === 'fulfilled')).toBe(true)
+    const rows = await db.select().from(schema.credential).where(orm.eq(schema.credential.name, name))
+    expect(rows).toHaveLength(1)
+    const links = await db.select().from(schema.enrollmentLink)
+      .where(orm.and(orm.eq(schema.enrollmentLink.credentialId, rows[0]!.id), orm.eq(schema.enrollmentLink.kind, 'register')))
+    expect(links.filter((link) => link.usedAt === null)).toHaveLength(1)
+    const activeTokens = await Promise.all(results.flatMap((result) =>
+      result.status === 'fulfilled' && result.value.ok
+        ? [peekEnrollmentLink(db, result.value.value.link.token, now + 10)]
+        : [],
+    ))
+    expect(activeTokens.filter((link) => link !== null)).toHaveLength(1)
+  })
+
+  test('a model cannot re-request or change metadata on an active credential', async () => {
+    const { db, now, name, id } = await activeCredential()
+    const before = await getCredentialForOwner(db, id)
+    const result = await requestRegistration(db, {
+      name, service: 'Different provider', purpose: 'Different purpose',
+      doc: { ...doc, task: 'Overwrite an active credential' }, requestedBy: 'runner:late', now,
+    })
+    expect(result).toMatchObject({ ok: false, error: 'exists' })
+    const after = await getCredentialForOwner(db, id)
+    expect(after).toMatchObject({
+      service: before?.service,
+      purpose: before?.purpose,
+      doc: before?.doc,
+      status: 'active',
+      hasValue: true,
+    })
   })
 
   test('the registration request is audited by the worker', async () => {
@@ -275,6 +496,36 @@ describe('runner registry visibility rules', () => {
     expect(Object.keys(entry!).sort()).toEqual(['delivery', 'expiresAt', 'externallyManaged', 'lifetime', 'name', 'purpose', 'service', 'validation'])
   })
 
+  test('CLI adapter metadata is isolated to its own endpoint and only active visible credentials', async () => {
+    const { db, now, name, id } = await activeCredential()
+    await db.update(schema.credential).set({
+      service: 'Northflank',
+      allowedHosts: JSON.stringify(['api.northflank.com']),
+    }).where(orm.eq(schema.credential.id, id))
+    const listed = await listRunnerIntegrationMetadata(db, now)
+    const entry = listed.find((item) => item.name === name)
+    expect(entry).toMatchObject({
+      name,
+      service: 'Northflank',
+      adapter: {
+        apiBaseUrl: 'https://api.northflank.com/v1',
+        cliTools: [{ id: 'northflank', variable: 'NF_API_BASE_URL' }],
+      },
+    })
+    expect(JSON.stringify(listed)).not.toContain(SECRET)
+    await setVisibility(db, id, false, now)
+    expect((await listRunnerIntegrationMetadata(db, now)).some((item) => item.name === name)).toBe(false)
+    await setVisibility(db, id, true, now)
+    await setEnabled(db, id, false, now)
+    expect((await listRunnerIntegrationMetadata(db, now)).some((item) => item.name === name)).toBe(false)
+  })
+
+  test('expired temporary credentials are excluded from the CLI integration query', async () => {
+    const { db, now, name } = await activeCredential({ lifetime: 'temporary', expiresAt: Date.now() + 1_000 })
+    expect((await listRunnerIntegrationMetadata(db, now)).some((item) => item.name === name)).toBe(true)
+    expect((await listRunnerIntegrationMetadata(db, now + 1_001)).some((item) => item.name === name)).toBe(false)
+  })
+
   test('permanent and temporary credentials both appear when active and visible', async () => {
     const { db, now } = await setup()
     const permanent = await activeCredential()
@@ -346,5 +597,200 @@ describe('reading a value for use', () => {
     const req = await requestRegistration(db, { name: uniqueName(), service: 's', purpose: 'p', doc, requestedBy: 'r', now })
     if (!req.ok) throw new Error('unexpected')
     expect(await setEnabled(db, req.value.credentialId, true, now)).toMatchObject({ ok: false })
+  })
+
+  test('scheduled validation updates credential health and emits a deduplicated notification', async () => {
+    const { db, key, now } = await setup()
+    const name = uniqueName('ADAPTER')
+    const adapterDoc = {
+      ...doc,
+      official_documentation_links: [{ title: 'Example API', url: 'https://example.com/docs' }],
+      service_adapter: {
+        api_base_url: 'https://api.example.com/v1',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        validation: {
+          method: 'GET',
+          path: '/me',
+          identity_pointer: '/user',
+          permissions_pointer: '/permissions',
+        },
+        cli_tools: [],
+      },
+    }
+    const request = await requestRegistration(db, {
+      name, service: 'Example Service', doc: adapterDoc, requestedBy: 'runner:test', now,
+    })
+    if (!request.ok) throw new Error(request.error)
+    const stored = await storeCredentialValue(db, key, {
+      credentialId: request.value.credentialId,
+      value: SECRET,
+      lifetime: 'permanent',
+      expiresAt: null,
+      visible: true,
+      delivery: 'proxy',
+      allowedHosts: ['api.example.com'],
+      validationIntervalHours: 1,
+      now,
+    })
+    expect(stored.ok).toBe(true)
+
+    // Keep a second due credential behind the first one to verify that the
+    // batch summary counts the whole queue, not just the selected page.
+    const backlogName = uniqueName('BACKLOG')
+    const backlogRequest = await requestRegistration(db, {
+      name: backlogName, service: 'Example Service', doc: adapterDoc, requestedBy: 'runner:test', now,
+    })
+    if (!backlogRequest.ok) throw new Error(backlogRequest.error)
+    const backlogStored = await storeCredentialValue(db, key, {
+      credentialId: backlogRequest.value.credentialId, value: SECRET, lifetime: 'permanent',
+      expiresAt: null, visible: true, delivery: 'proxy', allowedHosts: ['api.example.com'],
+      validationIntervalHours: 1, now,
+    })
+    expect(backlogStored.ok).toBe(true)
+    await db.update(schema.credential).set({ nextValidationAt: now - 1 })
+      .where(orm.eq(schema.credential.id, request.value.credentialId))
+    await db.update(schema.credential).set({ nextValidationAt: now })
+      .where(orm.eq(schema.credential.id, backlogRequest.value.credentialId))
+
+    const goodFetch = async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe('https://api.example.com/v1/me')
+      expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${SECRET}`)
+      return Response.json({ user: 'automation-user', permissions: ['read:projects'] })
+    }
+    const firstBatch = await runScheduledCredentialValidation(db, key, now, goodFetch as typeof fetch, 1)
+    expect(firstBatch).toMatchObject({ checked: 1, remainingDue: 1 })
+    await db.update(schema.credential).set({ status: 'disabled' })
+      .where(orm.eq(schema.credential.id, backlogRequest.value.credentialId))
+    let credential = await getCredentialForOwner(db, request.value.credentialId)
+    expect(credential).toMatchObject({ validationStatus: 'valid', validation: 'valid', lastValidatedAt: now })
+    expect(credential?.validationDetails).not.toContain(SECRET)
+    expect(JSON.parse(credential!.validationDetails!)).toMatchObject({
+      status: 'valid',
+      identity: 'automation-user',
+      permissions: [{ name: 'read:projects', access: 'granted' }],
+    })
+    expect(credential).toMatchObject({ validationFailureCount: 0, firstValidationFailureAt: null })
+    let history = await listCredentialValidationHistory(db, 20)
+    expect(history.filter((item) => item.credentialId === request.value.credentialId)).toHaveLength(1)
+    expect(history[0]).toMatchObject({ source: 'scheduled', status: 'valid', credentialName: name })
+    expect(JSON.stringify(history)).not.toContain(SECRET)
+
+    await db.update(schema.credential).set({ nextValidationAt: now - 1 })
+      .where(orm.eq(schema.credential.id, request.value.credentialId))
+    const badFetch = async () => new Response('', { status: 401 })
+    await runScheduledCredentialValidation(db, key, now + 1, badFetch as typeof fetch, 12)
+    credential = await getCredentialForOwner(db, request.value.credentialId)
+    expect(credential).toMatchObject({
+      validationStatus: 'invalid',
+      validation: 'invalid',
+      validationFailureCount: 1,
+      firstValidationFailureAt: now + 1,
+      nextValidationAt: now + 1 + 15 * 60_000,
+    })
+
+    // A second consecutive failure doubles the retry delay and preserves the
+    // timestamp of the first failure instead of resetting it.
+    await db.update(schema.credential).set({ nextValidationAt: now + 1 })
+      .where(orm.eq(schema.credential.id, request.value.credentialId))
+    await runScheduledCredentialValidation(db, key, now + 2, badFetch as typeof fetch, 12)
+    credential = await getCredentialForOwner(db, request.value.credentialId)
+    expect(credential).toMatchObject({
+      validationStatus: 'invalid',
+      validationFailureCount: 2,
+      firstValidationFailureAt: now + 1,
+      nextValidationAt: now + 2 + 30 * 60_000,
+    })
+
+    // Manual validation runs immediately, records its source and clears the
+    // consecutive-failure state after the provider confirms the token again.
+    const manual = await validateStoredCredentialNow(db, key, request.value.credentialId, now + 3, goodFetch as typeof fetch)
+    expect(manual.status).toBe('valid')
+    credential = await getCredentialForOwner(db, request.value.credentialId)
+    expect(credential).toMatchObject({ validationStatus: 'valid', validationFailureCount: 0, firstValidationFailureAt: null })
+    history = await listCredentialValidationHistory(db, 20)
+    expect(history.filter((item) => item.credentialId === request.value.credentialId)).toHaveLength(4)
+    expect(history.find((item) => item.source === 'manual')).toMatchObject({ status: 'valid', provider: 'Example Service' })
+    expect(JSON.stringify(history)).not.toContain(SECRET)
+
+    const notifications = await listNotifications(db, 200)
+    expect(notifications.filter((item) => item.credentialId === request.value.credentialId && item.kind === 'validation_invalid')).toHaveLength(1)
+    expect(notifications.filter((item) => item.credentialId === request.value.credentialId && item.kind === 'validation_recovered')).toHaveLength(1)
+    expect(JSON.stringify(notifications)).not.toContain(SECRET)
+
+    await db.update(schema.credential).set({ nextValidationAt: now + 4 })
+      .where(orm.eq(schema.credential.id, request.value.credentialId))
+    await db.delete(schema.credential).where(orm.eq(schema.credential.id, request.value.credentialId))
+    const retained = await listNotifications(db, 200)
+    expect(retained.find((item) => item.kind === 'validation_invalid' && item.credentialName === name)?.credentialId).toBeNull()
+    expect((await listCredentialValidationHistory(db, 20)).some((item) => item.credentialId === request.value.credentialId)).toBe(false)
+  })
+
+  test('does not let an in-flight validation overwrite a replacement credential', async () => {
+    const { db, key, now, id } = await activeCredential()
+    let markStarted!: () => void
+    let releaseFetch!: () => void
+    const started = new Promise<void>((resolve) => { markStarted = resolve })
+    const blockedFetch = new Promise<void>((resolve) => { releaseFetch = resolve })
+
+    const validation = validateStoredCredentialNow(db, key, id, now + 1_000, (async (_url, init) => {
+      expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${SECRET}`)
+      markStarted()
+      await blockedFetch
+      return new Response('', { status: 401 })
+    }) as typeof fetch)
+
+    // Wait until the old encrypted value has already been read and sent upstream.
+    await started
+    const replacement = await storeCredentialValue(db, key, {
+      credentialId: id,
+      value: 'cfut_REPLACEMENT_SECRET_987654321',
+      lifetime: 'permanent',
+      expiresAt: null,
+      visible: true,
+      delivery: 'proxy',
+      allowedHosts: ['api.cloudflare.com'],
+      validation: 'valid',
+      validationStatus: 'valid',
+      validationDetails: JSON.stringify({ status: 'valid', marker: 'replacement' }),
+      now: now + 2_000,
+    })
+    expect(replacement.ok).toBe(true)
+
+    releaseFetch()
+    const staleReport = await validation
+    expect(staleReport).toMatchObject({
+      status: 'unavailable',
+      message: 'Credential changed during validation; the stale result was discarded. Run validation again.',
+    })
+
+    const current = await getCredentialForOwner(db, id)
+    expect(current).toMatchObject({
+      validationStatus: 'valid',
+      validation: 'valid',
+      validationDetails: JSON.stringify({ status: 'valid', marker: 'replacement' }),
+      lastValidatedAt: now + 2_000,
+    })
+    expect(await listCredentialValidationHistory(db, 20).then((rows) => rows.filter((row) => row.credentialId === id))).toHaveLength(0)
+  })
+})
+
+
+describe('credential usage analytics', () => {
+  test('aggregates requests by credential and by consuming tool without storing request data', async () => {
+    const { db, now, id } = await activeCredential()
+    await recordCredentialUsage(db, { credentialId: id, consumer: 'cli:northflank', success: true, latencyMs: 80, now })
+    await recordCredentialUsage(db, { credentialId: id, consumer: 'cli:northflank', success: false, latencyMs: 160, now })
+    await recordCredentialUsage(db, { credentialId: id, consumer: 'runner', success: true, latencyMs: 40, now })
+    const analytics = await getUsageAnalytics(db, now + 1)
+    expect(analytics.totals).toMatchObject({ requests: 3, successes: 2, errors: 1, averageLatencyMs: 93, maxLatencyMs: 160 })
+    expect(analytics.credentials.find((row) => row.credentialId === id)).toMatchObject({
+      credentialName: expect.any(String), requests: 3, successes: 2, errors: 1, averageLatencyMs: 93,
+    })
+    expect(analytics.consumers).toEqual(expect.arrayContaining([
+      { consumer: 'cli:northflank', requests: 2, successes: 1, errors: 1, averageLatencyMs: 120, maxLatencyMs: 160 },
+      { consumer: 'runner', requests: 1, successes: 1, errors: 0, averageLatencyMs: 40, maxLatencyMs: 40 },
+    ]))
+    expect(JSON.stringify(analytics)).not.toContain(SECRET)
   })
 })

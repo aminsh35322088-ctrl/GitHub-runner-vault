@@ -9,12 +9,13 @@ import { loadVaultKeys, type VaultEnv } from './lib/vault-config.ts'
 import { cachedJwksSource } from './lib/oidc.ts'
 import { loadRunnerPolicy } from './lib/runner-policy.ts'
 import { deriveSessionKey } from './lib/runner-session.ts'
-import { createSession, registry, requestCredential, useCredential, type RunnerDeps } from './lib/runner-core.ts'
+import { createSession, registry, integrations, requestCredential, useCredential, type RunnerDeps } from './lib/runner-core.ts'
 import { getRequestOrigin } from './db.ts'
+import { loadVaultPreferences } from './lib/vault-observability.ts'
 
 const jwks = cachedJwksSource()
 
-async function buildDeps(request: Request): Promise<RunnerDeps> {
+async function buildDeps(request: Request, includeOidcPolicy = false, waitUntil?: RunnerDeps['waitUntil']): Promise<RunnerDeps> {
   const e = env as unknown as Record<string, unknown>
   const origin = getRequestOrigin(request)
   const db = getDb()
@@ -23,19 +24,26 @@ async function buildDeps(request: Request): Promise<RunnerDeps> {
     db,
     encryptionKey: keys.encryptionKey,
     sessionKey: await deriveSessionKey(keys.authSecret),
-    policy: await loadRunnerPolicy(db, e, origin),
+    ...(includeOidcPolicy ? { policy: await loadRunnerPolicy(db, e, origin) } : {}),
     jwks,
     origin,
     fetchFn: fetch,
     now: Date.now(),
+    getVaultPreferences: () => loadVaultPreferences(db),
+    ...(waitUntil ? { waitUntil } : {}),
   }
 }
 
 // Misconfiguration must fail closed with a generic answer, never a stack trace.
-async function run(request: Request, fn: (deps: RunnerDeps) => Promise<{ status: number; body: unknown }>) {
+async function run(
+  request: Request,
+  fn: (deps: RunnerDeps) => Promise<{ status: number; body: unknown }>,
+  options: { includeOidcPolicy?: boolean } = {},
+  waitUntil?: RunnerDeps['waitUntil'],
+) {
   let deps: RunnerDeps
   try {
-    deps = await buildDeps(request)
+    deps = await buildDeps(request, options.includeOidcPolicy === true, waitUntil)
   } catch {
     return json({ error: 'vault_not_configured' }, { status: 503, headers: { 'Cache-Control': 'no-store' } })
   }
@@ -70,7 +78,7 @@ export const runnerApp = new Spiceflow()
     path: '/api/runner/session',
     detail: { tags: ['Runner'], summary: 'Exchange a GitHub Actions OIDC token for a short session' },
     async handler({ request }) {
-      return run(request, (deps) => createSession(deps, request.headers.get('authorization')))
+      return run(request, (deps) => createSession(deps, request.headers.get('authorization')), { includeOidcPolicy: true })
     },
   })
   .route({
@@ -79,6 +87,14 @@ export const runnerApp = new Spiceflow()
     detail: { tags: ['Runner'], summary: 'List credentials this runner may use (metadata only)' },
     async handler({ request }) {
       return run(request, (deps) => registry(deps, request.headers.get('authorization')))
+    },
+  })
+  .route({
+    method: 'GET',
+    path: '/api/runner/integrations',
+    detail: { tags: ['Runner'], summary: 'List verified CLI integration adapters for credentials available to this runner' },
+    async handler({ request }) {
+      return run(request, (deps) => integrations(deps, request.headers.get('authorization')))
     },
   })
   .route({
@@ -99,11 +115,11 @@ export const runnerApp = new Spiceflow()
     path: '/api/runner/use',
     detail: { tags: ['Runner'], summary: 'Make an HTTPS call with a stored credential; the token is never returned' },
     request: anyBody,
-    async handler({ request }) {
+    async handler({ request, waitUntil }) {
       const body = await parseRunnerBody(request)
       if (!body) return invalidRequest()
       return run(request, (deps) => useCredential(deps, request.headers.get('authorization'), {
-        name: body.name, method: body.method, url: body.url, headers: body.headers, body: body.body, purpose: body.purpose,
-      }))
+        name: body.name, method: body.method, url: body.url, headers: body.headers, body: body.body, purpose: body.purpose, consumer: body.consumer,
+      }), {}, waitUntil)
     },
   })

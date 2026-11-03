@@ -29,7 +29,7 @@ Workers Builds runs the same owner-resolution code as the Deploy Button. The dep
 
 **Important — D1 permissions:** Cloudflare's automatically generated Workers Builds API token does not include D1 permissions by default. To let the helper discover/create D1 automatically, open **My Profile → API Tokens**, find the token selected in this Worker under **Settings → Builds → API token**, and add **Account → D1 Read** and **Account → D1 Edit**. (The account-generated token must stay user-scoped for Workers Builds.)
 
-Alternatively, create the D1 database in **Storage & databases → D1**, copy its UUID, and add `"database_id": "<UUID>"` to the `DB` entry in `app/wrangler.jsonc` in your repository. With a configured ID the deploy helper skips D1 list/create operations, so the default Build token does not need D1 permissions. The Deploy Button's resource provisioning path normally supplies the required D1 resource automatically.
+Alternatively, create the D1 database in **Storage & databases → D1**, then set its UUID as the `RUNNER_VAULT_D1_DATABASE_ID` Workers Builds build variable (or CLI environment variable). The deploy helper uses that deployment-specific value and skips D1 list/create operations, so the default Build token does not need D1 permissions. Keep the UUID out of the reusable repository config; without this variable, the helper discovers the named database or creates it when missing.
 
 ### 3. Wrangler CLI from a Git checkout
 
@@ -74,6 +74,7 @@ The dashboard uses compact mobile bottom navigation, responsive credential and a
 3. Set the Worker URL as the `VAULT_URL` Actions variable in the trusted runner repository and grant the workflow `id-token: write`.
 
 The Worker creates its tables on first request. The Deploy Button provisions D1 automatically; the Wrangler deploy helper also resolves and binds the configured D1 database for CLI and Git-connected deployments.
+Schema changes are embedded from `db/drizzle-app/*.sql` and applied once by the first Worker request. Runner sessions, registrations and per-credential proxy calls use atomic D1 sliding-window reservations; stale reservation rows are cleaned up by the existing 15-minute scheduled task. Do not manually run the embedded migration files against a live database while the Worker is serving traffic.
 
 For the threat model and runner integration guide, see the [upstream README](https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/blob/main/README.md), [security notes](https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/blob/main/SECURITY.md) and [runner usage guide](https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/blob/main/docs/runner-usage.md).
 

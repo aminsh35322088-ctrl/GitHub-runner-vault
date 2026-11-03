@@ -50,7 +50,7 @@ The runner is **not** a trust boundary. An agent may have elevated permissions a
 | Upstream echoes the token back | Response body and headers are scanned and the token is **redacted** (raw, URL-encoded, JSON-escaped, base64). |
 | Agent tricks the owner into a bad setup | Models only *propose* a name and setup notes. The **owner** chooses hosts, auth header, lifetime and visibility. Notes are shown as plain text with the real hostname next to each link. |
 | Someone else gets a runner session | Bootstrap requires the deployment-pinned `repository_owner_id`, exact `main` ref, `rdc-lab.yml` `workflow_ref`, and an allowed event. The first repository ID is atomically pinned in D1; later runs must match it. Pull-request events are refused. |
-| Stolen session | 30-minute sessions, rate limits, append-only audit log, and an owner-side **revoke all sessions** button. |
+| Stolen session | 30-minute sessions, atomic D1 sliding-window limits, append-only audit log, and an owner-side **revoke all sessions** button. |
 | Someone else logs in to the owner UI | Sign-in uses a **private GitHub App created by you** and is restricted to **one numeric account id** (the app's creator); cookie sessions only. |
 | Agent edits the vault code | The vault runs as a separate Cloudflare Worker. |
 
@@ -76,17 +76,18 @@ See `SECURITY.md` for the short version.
  │   ◀ one-time owner link  │ ◀───────────── │   creates pending entry + link│
  └──────────────────────────┘                └───────────────▲───────────────┘
                                                              │ GitHub OAuth (owner only)
-                                              Owner browser ─┘  /vault  list · register · detail · audit · settings
+                                              Owner browser ─┘  /vault  requests · register · detail · audit · settings
 ```
 
 Registering a new credential:
 
 1. The agent finds the name missing in `list` and runs `request` with a setup document.
 2. The vault creates a **pending, hidden** entry and returns a **one-time link** (about 15 minutes, works once).
-3. The owner opens the link (must be signed in with GitHub), reads the notes, reviews **allowed hosts, auth header/scheme,
-   lifetime, expiry and visibility**, pastes the token and saves. The link is consumed atomically.
-4. Alternatively, the owner can create the credential directly from **Add credential** in the dashboard without a runner request.
-5. The credential becomes **Active**; the agent sees it in `list` and can `use` it.
+3. The owner signs in with GitHub. A Vault notification and the Runner requests inbox show the pending request, runner identity, setup notes and read-only API destination. The owner reviews the request, then supplies only the secret token, lifetime/expiry and runner visibility. Hosts, auth header/scheme and validation behavior come from the verified provider adapter; no manual network or scope settings are exposed.
+4. If the original 15-minute link expires or is superseded, the owner can create a fresh one-time owner form from the request inbox. Reissuing invalidates every earlier unused link; the link hash remains the only value stored in the database.
+5. The owner can dismiss an unwanted pending request. Dismissal atomically removes only an unfilled pending credential, invalidates its links through the foreign-key cascade and records an append-only audit event; active credentials cannot be dismissed through this action.
+6. Known providers can also be added directly from **Add credential**. Unknown providers are requested by the runner so the model can attach official documentation and a reviewed Service Adapter.
+7. The credential becomes **Active**; the agent sees minimal metadata in `list` and can call it through `use`. CLI integration metadata is returned separately and only when requested.
 
 ## Credential model
 
@@ -108,6 +109,19 @@ One flat registry; a credential has these properties:
 (or is an externally managed entry for listing). It is re-checked against the stored row on **every** call, so disabling,
 hiding, deleting or expiry takes effect on the very next request. A missing, hidden, disabled or expired credential all
 answer the same `unavailable` (no probing for hidden names).
+
+**Supported credential formats.** The current registry stores opaque single-line text values and presents them through
+owner-approved HTTPS API requests. The upstream auth formatter supports Authorization: Bearer, Authorization: Token,
+and raw/custom API-key headers. This works for personal access tokens, OAuth access tokens, GitHub App installation
+tokens and ordinary provider API keys when the provider accepts a compatible HTTP header. Validation is provider-adapter
+based and does not itself refresh or renew credentials.
+
+**Explicit limits.** Browser GitHub OAuth is only the Vault owner's dashboard sign-in. Provider Device Authorization,
+automatic OAuth refresh-token rotation, browser-cookie/session capture, multi-line SSH private-key or certificate storage,
+SSH-agent signing, TLS client-certificate delivery, and environment/file injection are not implemented. The database
+and runner contract are proxy-only; legacy inject rows are not usable. Do not register these unsupported values under
+a token label or assume that a successful save makes their lifecycle operational. They require distinct, reviewed delivery
+and key-handling designs rather than relaxing the single-line/header validation.
 
 **Encryption.** Values are AES-256-GCM encrypted with a 32-byte key derived (HKDF) from a random master key the vault
 generates on first use. The authenticated data binds each ciphertext to `credential:{id}:v{keyVersion}`, so a ciphertext
@@ -131,7 +145,13 @@ Header: `Authorization: Bearer <GitHub OIDC JWT>` (audience = the vault origin).
 ### `GET /api/runner/registry`
 
 `200 { credentials: [{ name, service, purpose, lifetime, delivery, validation, expiresAt, externallyManaged }] }`.
-Only Active + Visible entries. Never values, hosts or ids.
+Only Active + Visible entries. This intentionally stable, minimal contract never exposes API hosts, Adapter configuration, IDs or values.
+
+### `GET /api/runner/integrations`
+
+A separate authenticated capability endpoint for CLI consumers. It returns only Active + Visible, unexpired, value-backed credentials that have a reviewed CLI Adapter:
+`200 { integrations: [{ name, service, adapter: { apiBaseUrl, cliTools } }] }`.
+It never returns the token, encrypted value, credential ID or arbitrary documentation. Do not use this endpoint for general model registry discovery.
 
 ### `POST /api/runner/registrations`
 
@@ -141,13 +161,12 @@ Body `{ name, service, doc }`, where `doc` follows the schema in `docs/runner-us
 
 ### `POST /api/runner/use`
 
-Body `{ name, method, url, headers?, body?, purpose? }`.
+Body `{ name, method, url, headers?, body?, purpose?, consumer? }`. The optional low-cardinality `consumer` field is used only to group aggregate usage (for example `cli:northflank`); it is not trusted as an identity.
 
 - Methods: `GET HEAD POST PUT PATCH DELETE`. URL: `https`, default port, no user info, host in the owner's list.
 - Request headers allowed: `accept`, `accept-language`, `content-type`, `if-match`, `if-none-match`,
   `x-github-api-version`, `x-api-version`. Anything else (including `Authorization`, `Host`, `Cookie`) is refused.
-- Limits: request body 256 KiB, response 1 MiB (then `truncated: true`), 20 s upstream timeout, 30 calls per minute per
-  credential. Redirects are **not** followed (a `3xx` is returned as is).
+- Limits: request body 256 KiB, response 1 MiB (then `truncated: true`), configurable 5–30 s upstream timeout (default 20 s), 30 calls per minute per credential. Redirects are **not** followed (a `3xx` is returned as is).
 
 `200 { status, headers, body, truncated, redacted }`: `status` is the **upstream** status; an upstream error is still a
 `200` from the vault. Vault-side errors:
@@ -177,24 +196,50 @@ export VAULT_URL=https://<your-vault-origin>
 node client/vault.mjs list
 node client/vault.mjs use CF_API_TOKEN GET https://api.cloudflare.com/client/v4/user/tokens/verify --purpose "verify token"
 node client/vault.mjs request --name RAILWAY_TOKEN --service Railway --doc doc.json
+
+# Supported CLI bridge (Northflank example): run in one terminal
+# Supported Cloudflare Wrangler bridge:
+node client/vault.mjs serve CLOUDFLARE_API_TOKEN --tool wrangler
+# Export the loopback URL and placeholder printed by serve:
+# CLOUDFLARE_API_BASE_URL=http://127.0.0.1:<ephemeral-port>/client/v4
+# CLOUDFLARE_API_TOKEN=vault-local-placeholder
+# wrangler whoami
+
+node client/vault.mjs serve NORTHFLANK_API_TOKEN
+
+# In a second terminal, use the displayed loopback-only env values:
+# NF_API_BASE_URL=http://127.0.0.1:<ephemeral-port>/v1
+# NF_API_TOKEN=vault-local-placeholder
+# nf list projects --quiet --output json --noDefaults
 ```
+
+The bridge binds only to `127.0.0.1`, maps paths to the Adapter's fixed HTTPS API origin, filters request headers and never forwards the CLI's placeholder token. The Vault Worker injects the actual credential directly upstream. Stop the bridge with Ctrl+C; it is not a general-purpose reverse proxy.
+
+Wrangler's API base URL and token overrides are documented in the [Cloudflare system environment variables reference](https://developers.cloudflare.com/workers/wrangler/system-environment-variables/). Northflank's `NF_API_BASE_URL` and `NF_API_TOKEN` behavior is documented in the [Northflank CLI package reference](https://www.npmjs.com/package/@northflank/cli).
 
 Exit codes: `0` ok, `2` vault refused, `3` upstream HTTP error. See `docs/runner-usage.md` for `doc.json` and what a model
 should expect. The trusted runner workflow must request `permissions: id-token: write` and set `VAULT_URL` to the deployed Worker origin.
 
 ## Owner UI
 
-From the dashboard, choose **Add credential** to browse the built-in provider catalog (Cloudflare, Railway, GitHub, Vercel, Netlify, DigitalOcean, OpenAI, Anthropic, Groq, Mistral, Hugging Face, Stripe, Sentry, Supabase, Pinecone and Slack), search by provider/category, or add a custom service. Known providers prefill their documented API host and auth header; the owner can inspect and edit these values before creating a credential. This path works independently of any runner/model registration request. Purpose is generated from the selected service; no purpose field is required. On supported providers, entering a token triggers server-side verification and saving repeats the check before encryption. GitHub classic OAuth scopes and Cloudflare User/Account Token policies are shown where the provider API exposes them. GitHub does not expose a complete Fine-grained PAT permission list through its general authentication endpoint. New Cloudflare `cfat_` Account Tokens are routed directly to the Account Token verification endpoint and show an Account ID field next to the token input. The runner registration flow uses the same provider catalog for its defaults.
+The dashboard has a searchable provider catalog and a guided three-step credential form (Service/Request → Secret → Access). Runner-created credentials appear in a dedicated request inbox with automatic in-panel notifications, runner identity, requested task, setup documentation, API destination and explicit link state (active, expired, used/replaced or not issued). The inbox uses a bounded metadata-only query rather than fetching each request separately. The owner can reissue an expired one-time form without creating a duplicate credential, or dismiss an unwanted pending request with explicit confirmation and an audit record. When a request is approved or dismissed, its request notifications are marked read. The owner supplies only the secret, lifetime/expiry and visibility. The UI displays the verified API destination as read-only; hosts, auth header/scheme and validation behavior are derived from reviewed provider adapters and cannot be manually broadened from the form. For model-requested credentials, the read-only API origin and supported CLI consumer are shown in the setup notes. On supported providers, the UI can test a token and inspect identity/permissions where the provider exposes them. A timeout, rate limit or missing permission is never silently labelled an invalid token.
 
 Sign in at `https://<origin>/login` with the owner GitHub account.
 
 | Page | What it does |
 | --- | --- |
-| `/vault` | Credential list: status, delivery, expiry, last used. |
-| `/vault/register/<link>` | The one-time registration page: the agent's setup notes above a write-only secret field, automatic token verification and permission inspection, plus advanced host, auth, lifetime, expiry and visibility controls. |
-| `/vault/credentials/<id>` | Details, enable/disable, show/hide, delete, replace value or rules, recent activity. Stored values are never displayed. |
+| `/vault` | Dashboard overview, credential registry, validation summary, pending Runner request shortcut and integration shortcuts. |
+| `/vault/requests` | Owner inbox for pending Runner requests, runner identity metadata, model-authored setup notes, API destination, explicit link state, single-use link renewal and safe dismissal. |
+| `/vault/register/<link>` | One-time registration page with model-authored setup notes, read-only API destination and write-only secret field. |
+| `/vault/credentials/<id>` | Credential details, token validation report, enable/disable, show/hide, delete, replace value and recent activity. |
+| `/vault/validation` | Validation state and history, first-failure time, next check, exponential retry backoff and manual recheck. |
+| `/vault/analytics` | 30-day aggregate request counts, success/error rate, latency and usage by CLI/Runner consumer; no request bodies, headers or token values. |
+| `/vault/integrations` | Owner view of provider destinations and supported CLI adapters. |
+| Global header bell | Unread count, recent Vault events including new Runner credential requests, mark-read and mark-all-read actions on every panel page. No separate notification page or Telegram delivery. |
 | `/vault/audit` | Append-only audit log (database triggers block updates and deletes). |
-| `/vault/settings` | Inspect the automatically pinned runner identity, **revoke all runner sessions**, review advanced-settings guidance and add metadata-only entries (for example `GITHUB_TOKEN`). |
+| `/vault/settings` | Validation interval, default lifetime/visibility, proxy timeout, per-credential proxy/session/registration throughput limits, analytics/notification retention, runner session revocation and metadata-only external entries. |
+
+Runner traffic limits are owner-configurable in **Settings → Runner traffic limits**. Defaults are 30 proxy calls per credential per minute, 20 OIDC sessions per hour and 10 credential-registration requests per hour; each has a bounded adjustable range. D1 reserves quota slots atomically before a proxy request or registration is accepted, so concurrent bursts cannot all pass a stale count. Proxy quotas use the credential's immutable database ID rather than its display name; deleting a credential cascades its old reservations. Audit, usage and last-used metadata are persisted through the Worker's background lifecycle hook after the response, while the atomic D1 reservation remains the source of truth for rate limiting.
 
 ## Deployment
 
@@ -225,7 +270,7 @@ Workers Builds runs the same build-time owner resolver. The deploy command reuse
 
 **Important — D1 permissions:** Cloudflare's automatically generated Workers Builds API token does not include D1 permissions by default. To let the helper discover/create D1 automatically, open **My Profile → API Tokens**, find the token selected in this Worker under **Settings → Builds → API token**, and add **Account → D1 Read** and **Account → D1 Edit**. Keep the user-scoped token selected for Workers Builds.
 
-Alternatively, create the D1 database in **Storage & databases → D1**, copy its UUID, and add `"database_id": "<UUID>"` to the `DB` entry in `app/wrangler.jsonc` in your repository. With a configured ID the deploy helper skips D1 list/create operations, so the default Build token does not need D1 permissions. The Deploy Button's resource provisioning path normally supplies the required D1 resource automatically.
+Alternatively, create the D1 database in **Storage & databases → D1**, then set its UUID as the `RUNNER_VAULT_D1_DATABASE_ID` Workers Builds build variable (or CLI environment variable). The deploy helper uses that deployment-specific value and skips D1 list/create operations, so the default Build token does not need D1 permissions. Keep the UUID out of the reusable repository config; without this variable, the helper discovers the named database or creates it when missing.
 
 ### 3. Wrangler CLI from a Git checkout
 
@@ -240,6 +285,10 @@ pnpm deploy
 ```
 
 `pnpm deploy` runs the Vite production build, derives the owner from GitHub `origin`, resolves or creates the configured D1 database, updates the generated Wrangler config with its ID, and finally runs `wrangler deploy`. Use this project command rather than invoking `wrangler deploy` directly, because the wrapper performs the owner and D1 bootstrap first.
+
+The Vite RSC bundle is kept at `dist/rsc/index.js` for its internal server-action and module graph imports. The build then generates a small `dist/rsc/worker.js` entry that exports only the default Worker handler and removes Wrangler's `no_bundle` setting. This is intentional: Workerd service entrypoints accept handlers, not arbitrary named RSC exports. Both Workers Builds (which reuses the prepared build) and the Wrangler CLI path run the same idempotent preparation step before deployment.
+
+The repository contains two pnpm workspaces: the root workspace used by CI and the `app` workspace used by Cloudflare Workers Builds. Both lockfiles are committed and must be kept in sync. The root workspace explicitly includes `app` and `app/db`; build output under `app/dist` is not a workspace package.
 
 When there is no GitHub origin (for example, a source archive), the build falls back to the authenticated GitHub CLI account:
 
@@ -295,7 +344,8 @@ Everything below is optional. A normal deployment sets nothing; everything is co
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | vars / secrets | Optional override for the private GitHub sign-in App created through `/setup`. |
 | `RUNNER_REPOSITORY`, `RUNNER_REPOSITORY_ID`, `RUNNER_ALLOWED_REFS`, `RUNNER_ALLOWED_EVENTS`, `RUNNER_ALLOWED_WORKFLOW_REFS` | vars | Optional explicit static policy override. When absent, owner-verified OIDC bootstrap pins the first repository automatically. |
 | `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY` | secrets | Legacy explicit keys; both must be set to be used. |
-| `DB` | D1 binding | Provisioned by Deploy Button or the deploy helper. Auto-discovery/creation needs D1 Read/Edit on the Workers Builds token or Wrangler login; a configured `database_id` skips those API calls. |
+| `RUNNER_VAULT_D1_DATABASE_ID` | build var | Optional UUID of a pre-created D1 database; skips D1 list/create API calls. Never commit this deployment-specific value. |
+| `DB` | D1 binding | Provisioned by Deploy Button or the deploy helper. Auto-discovery/creation needs D1 Read/Edit on the Workers Builds token or Wrangler login. |
 
 ## Operations
 
@@ -330,7 +380,7 @@ redaction in every encoding, timeouts) and the runner API end to end (including 
 - Runner delivery is proxy-only. Legacy `inject` rows are disabled and hidden.
 - OIDC proves the workflow run, not a single process; any process able to read the job's OIDC request variables can request a run-bound token. Keep the workflow job trusted and minimize untrusted code in it.
 - No automatic key rotation tooling.
-- No GitHub-side validation test for stored tokens (`validation` stays `not_tested`).
+- Provider validation depends on the documented read-only API. Unsupported services remain explicitly `unsupported`; unavailable endpoints remain inconclusive.
 - Suggested hardening after first deploy: a branch ruleset on `main` of this repository and Cloudflare Access in front of `/vault/*` as a second owner gate.
 - Runner integration is deployment-specific: install client/vault.mjs in the trusted repository and set its VAULT_URL Actions variable. Pin the client revision and review upgrades.
 
@@ -339,7 +389,7 @@ redaction in every encoding, timeouts) and the runner API end to end (including 
 | Path | What |
 | --- | --- |
 | `app/` | The Worker: Spiceflow (React Server Components) owner UI, runner API, BetterAuth GitHub login, first-time `/setup` |
-| `app/src/lib/` | Crypto, policy, docs schema, enrollment links, credential service, OIDC, sessions, proxy, runner core |
+| `app/src/lib/` | Crypto, provider adapters, lifecycle validation, notifications, analytics, enrollment links, OIDC, sessions, proxy, runner core |
 | `app/src/runner-api.ts` | HTTP routes for runners; logic is in `lib/runner-core.ts` |
 | `db/` | Drizzle schema (types) and the baseline SQL (`db/drizzle-app/`), embedded into the Worker |
 | `client/vault.mjs` | Zero-dependency runner client |

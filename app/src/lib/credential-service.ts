@@ -13,8 +13,9 @@ import {
 import { parseCredentialDoc, readStoredDoc } from './credential-docs.ts'
 import { normalizeAllowedHosts, normalizeAuthStyle, readAllowedHosts, reservedName, validCredentialName, type AuthScheme } from './credential-input.ts'
 import { availability, publicReason } from './credential-policy.ts'
-import { createEnrollmentLink, type CreatedLink } from './enrollment.ts'
+import { createEnrollmentLink, discardEnrollmentLink, type CreatedLink } from './enrollment.ts'
 import { defaultPurposeForService } from './presets.ts'
+import { adapterHost, serviceAdapterFor, serviceAdapterFromDocument } from './service-adapter.ts'
 
 type Db = ReturnType<typeof getDb>
 
@@ -78,28 +79,131 @@ export async function requestRegistration(db: Db, req: RegistrationRequest): Pro
   const doc = parseCredentialDoc(req.doc)
   if (!doc.ok) return { ok: false, error: 'invalid_doc', detail: doc.error }
 
-  const [existing] = await db.select({ id: schema.credential.id, status: schema.credential.status, externallyManaged: schema.credential.externallyManaged })
-    .from(schema.credential).where(orm.eq(schema.credential.name, req.name)).limit(1)
-  if (existing && existing.status !== 'pending') return { ok: false, error: 'exists' }
+  const [existing] = await db.select({
+    id: schema.credential.id,
+    status: schema.credential.status,
+    externallyManaged: schema.credential.externallyManaged,
+    hasValue: orm.sql<number>`(${schema.credential.valueEncrypted} IS NOT NULL)`,
+  }).from(schema.credential).where(orm.eq(schema.credential.name, req.name)).limit(1)
+  if (existing && (existing.status !== 'pending' || existing.externallyManaged || Boolean(existing.hasValue))) {
+    return { ok: false, error: 'exists' }
+  }
 
   const service = req.service.trim().slice(0, 80)
   const purpose = defaultPurposeForService(service)
 
-  let credentialId = existing?.id
-  if (credentialId) {
-    await db.update(schema.credential)
+  let credentialId: string
+  if (existing) {
+    // The initial read is only advisory. Enforce Pending/no-value again in the
+    // UPDATE so a concurrently approved or dismissed credential is never
+    // modified by a late Runner retry.
+    const [updated] = await db.update(schema.credential)
       .set({ service, purpose, docJson: doc.json, tokenType: doc.doc.token_type, updatedAt: req.now })
-      .where(orm.eq(schema.credential.id, credentialId))
+      .where(orm.and(
+        orm.eq(schema.credential.id, existing.id),
+        orm.eq(schema.credential.status, 'pending'),
+        orm.eq(schema.credential.externallyManaged, false),
+        orm.isNull(schema.credential.valueEncrypted),
+      ))
+      .returning({ id: schema.credential.id })
+    if (!updated) return { ok: false, error: 'exists' }
+    credentialId = updated.id
   } else {
-    credentialId = crypto.randomUUID()
-    await db.insert(schema.credential).values({
-      id: credentialId, name: req.name, service, purpose, docJson: doc.json, tokenType: doc.doc.token_type,
+    const id = crypto.randomUUID()
+    const [created] = await db.insert(schema.credential).values({
+      id, name: req.name, service, purpose, docJson: doc.json, tokenType: doc.doc.token_type,
       createdAt: req.now, updatedAt: req.now,
-    })
+    }).onConflictDoNothing({ target: schema.credential.name }).returning({ id: schema.credential.id })
+    // Another request may have created this unique name after our initial read.
+    // Treat that as a normal conflict rather than returning an unhandled D1 error.
+    if (!created) return { ok: false, error: 'exists' }
+    credentialId = created.id
   }
-  const link = await createEnrollmentLink(db, { credentialId, kind: 'register', requestedBy: req.requestedBy, now: req.now })
+
+  let link: CreatedLink
+  try {
+    link = await createEnrollmentLink(db, { credentialId, kind: 'register', requestedBy: req.requestedBy, now: req.now })
+  } catch (error) {
+    const [stillPending] = await db.select({ id: schema.credential.id }).from(schema.credential)
+      .where(orm.and(
+        orm.eq(schema.credential.id, credentialId),
+        orm.eq(schema.credential.status, 'pending'),
+        orm.eq(schema.credential.externallyManaged, false),
+        orm.isNull(schema.credential.valueEncrypted),
+      )).limit(1)
+    if (!stillPending) return { ok: false, error: 'exists' }
+    throw error
+  }
+
+  const [stillPending] = await db.select({ id: schema.credential.id }).from(schema.credential)
+    .where(orm.and(
+      orm.eq(schema.credential.id, credentialId),
+      orm.eq(schema.credential.status, 'pending'),
+      orm.eq(schema.credential.externallyManaged, false),
+      orm.isNull(schema.credential.valueEncrypted),
+    )).limit(1)
+  if (!stillPending) {
+    await discardEnrollmentLink(db, link.token)
+    return { ok: false, error: 'exists' }
+  }
+
   await audit(db, { action: 'registration_requested', actor: req.requestedBy, credentialId, credentialName: req.name, result: 'ok', now: req.now })
   return { ok: true, value: { credentialId, link } }
+}
+
+/** Dismiss only an unfilled Runner request; active credentials are never eligible. */
+export async function dismissPendingRegistrationRequest(
+  db: Db,
+  credentialId: string,
+  now: number,
+): Promise<Result<{ name: string }>> {
+  const [row] = await db.delete(schema.credential).where(orm.and(
+    orm.eq(schema.credential.id, credentialId),
+    orm.eq(schema.credential.status, 'pending'),
+    orm.eq(schema.credential.externallyManaged, false),
+    orm.isNull(schema.credential.valueEncrypted),
+  )).returning({ id: schema.credential.id, name: schema.credential.name })
+  if (!row) return { ok: false, error: 'not_found' }
+  await audit(db, {
+    action: 'registration_request_dismissed', actor: 'owner', credentialId: row.id,
+    credentialName: row.name, result: 'ok', now,
+  })
+  return { ok: true, value: { name: row.name } }
+}
+
+/** The owner can reissue a link for a still-pending request after the original expires. */
+export async function renewRegistrationLink(
+  db: Db,
+  credentialId: string,
+  requestedBy: string,
+  now: number,
+): Promise<Result<{ credentialId: string; name: string; link: CreatedLink }>> {
+  const [row] = await db.select({
+    id: schema.credential.id,
+    name: schema.credential.name,
+    status: schema.credential.status,
+    externallyManaged: schema.credential.externallyManaged,
+    hasValue: orm.sql<number>`(${schema.credential.valueEncrypted} IS NOT NULL)`,
+  }).from(schema.credential).where(orm.eq(schema.credential.id, credentialId)).limit(1)
+  if (!row || row.status !== 'pending' || row.externallyManaged || Boolean(row.hasValue)) {
+    return { ok: false, error: 'not_found' }
+  }
+  const [originalRequest] = await db.select({ actor: schema.credentialAudit.actor })
+    .from(schema.credentialAudit)
+    .where(orm.and(
+      orm.eq(schema.credentialAudit.credentialId, row.id),
+      orm.eq(schema.credentialAudit.action, 'registration_requested'),
+    ))
+    .orderBy(orm.desc(schema.credentialAudit.at))
+    .limit(1)
+  const link = await createEnrollmentLink(db, {
+    credentialId: row.id, kind: 'register', requestedBy: originalRequest?.actor ?? requestedBy, now,
+  })
+  await audit(db, {
+    action: 'registration_link_renewed', actor: requestedBy, credentialId: row.id,
+    credentialName: row.name, result: 'ok', detail: `expires_at:${link.expiresAt}`, now,
+  })
+  return { ok: true, value: { credentialId: row.id, name: row.name, link } }
 }
 
 // ── Owner: create directly from the dashboard ──────────────────────────
@@ -127,7 +231,10 @@ export async function createCredential(
     visible: input.visible, lifetime: input.lifetime, delivery: input.delivery,
     allowedHosts: JSON.stringify(validated.value.hosts),
     authHeader: validated.value.style.header, authScheme: validated.value.style.scheme,
-    externallyManaged: false, validation: input.validation ?? 'not_tested', validationDetails: input.validationDetails ?? null, docJson: '{}',
+    externallyManaged: false, validation: input.validation ?? 'not_tested', validationDetails: input.validationDetails ?? null,
+    validationStatus: input.validationStatus ?? input.validation ?? 'not_tested', lastValidatedAt: input.validationStatus ? input.now : null,
+    nextValidationAt: input.now + Math.max(1, Math.min(24, Math.trunc(input.validationIntervalHours ?? 6))) * 3600_000,
+    validationFailureCount: 0, firstValidationFailureAt: null, docJson: '{}',
     valueEncrypted: sealed.encrypted, valueIv: sealed.iv, keyVersion: KEY_VERSION,
     expiresAt: validated.value.expiresAt, createdAt: input.now, updatedAt: input.now,
   })
@@ -152,6 +259,8 @@ export type StoreInput = {
   now: number
   validation?: 'not_tested' | 'valid' | 'invalid' | 'insufficient_permissions'
   validationDetails?: string | null
+  validationStatus?: string
+  validationIntervalHours?: number
 }
 
 export type ValidatedStoreInput = {
@@ -185,7 +294,12 @@ export function validateStoreInput(input: Omit<StoreInput, 'credentialId'> & { c
   return { ok: true, value: { value, expiresAt, hosts: hosts.hosts, style: { header: style.header, scheme: style.scheme } } }
 }
 
-export async function storeCredentialValue(db: Db, key: CryptoKey, input: StoreInput): Promise<Result<{ name: string }>> {
+export async function storeCredentialValue(
+  db: Db,
+  key: CryptoKey,
+  input: StoreInput,
+  options: { requirePending?: boolean } = {},
+): Promise<Result<{ name: string }>> {
   const [row] = await db.select({ id: schema.credential.id, name: schema.credential.name, externallyManaged: schema.credential.externallyManaged })
     .from(schema.credential).where(orm.eq(schema.credential.id, input.credentialId)).limit(1)
   if (!row) return { ok: false, error: 'not_found' }
@@ -195,7 +309,20 @@ export async function storeCredentialValue(db: Db, key: CryptoKey, input: StoreI
   if (!validated.ok) return validated
   const { value, expiresAt, hosts, style } = validated.value
   const { encrypted, iv } = await encryptCredentialValue(key, row.id, KEY_VERSION, value)
-  await db.update(schema.credential).set({
+  const conditions = [
+    orm.eq(schema.credential.id, row.id),
+    orm.eq(schema.credential.externallyManaged, false),
+  ]
+  if (options.requirePending) {
+    // Registration must win or lose atomically against Dismiss. If another
+    // owner action changes/deletes the pending row after the initial read,
+    // this conditional UPDATE returns no row and no success is reported.
+    conditions.push(
+      orm.eq(schema.credential.status, 'pending'),
+      orm.isNull(schema.credential.valueEncrypted),
+    )
+  }
+  const [stored] = await db.update(schema.credential).set({
     authHeader: style.header,
     authScheme: style.scheme,
     valueEncrypted: encrypted,
@@ -209,10 +336,16 @@ export async function storeCredentialValue(db: Db, key: CryptoKey, input: StoreI
     expiresAt,
     validation: input.validation ?? 'not_tested',
     validationDetails: input.validationDetails ?? null,
+    validationStatus: input.validationStatus ?? input.validation ?? 'not_tested',
+    lastValidatedAt: input.validationStatus ? input.now : null,
+    nextValidationAt: input.now + Math.max(1, Math.min(24, Math.trunc(input.validationIntervalHours ?? 6))) * 3600_000,
+    validationFailureCount: 0,
+    firstValidationFailureAt: null,
     updatedAt: input.now,
-  }).where(orm.eq(schema.credential.id, row.id))
-  await audit(db, { action: 'value_stored', actor: 'owner', credentialId: row.id, credentialName: row.name, result: 'ok', detail: input.lifetime + '/proxy', now: input.now })
-  return { ok: true, value: { name: row.name } }
+  }).where(orm.and(...conditions)).returning({ id: schema.credential.id, name: schema.credential.name })
+  if (!stored) return { ok: false, error: 'not_found' }
+  await audit(db, { action: 'value_stored', actor: 'owner', credentialId: stored.id, credentialName: stored.name, result: 'ok', detail: input.lifetime + '/proxy', now: input.now })
+  return { ok: true, value: { name: stored.name } }
 }
 
 // ── Listings: metadata only ──────────────────────────────────────────
@@ -232,6 +365,11 @@ const METADATA_COLUMNS = {
   authScheme: schema.credential.authScheme,
   externallyManaged: schema.credential.externallyManaged,
   validation: schema.credential.validation,
+  validationStatus: schema.credential.validationStatus,
+  lastValidatedAt: schema.credential.lastValidatedAt,
+  nextValidationAt: schema.credential.nextValidationAt,
+  validationFailureCount: schema.credential.validationFailureCount,
+  firstValidationFailureAt: schema.credential.firstValidationFailureAt,
   expiresAt: schema.credential.expiresAt,
   lastUsedAt: schema.credential.lastUsedAt,
   createdAt: schema.credential.createdAt,
@@ -244,6 +382,45 @@ export async function listCredentialsForOwner(db: Db) {
   return rows.map((row) => ({ ...row, hasValue: Boolean(row.hasValue), allowedHosts: readAllowedHosts(row.allowedHosts) }))
 }
 
+const PENDING_REQUEST_PAGE_SIZE = 50
+
+/** Pending owner requests in a bounded metadata-only page; never selects encrypted values. */
+export async function listPendingRegistrationRequestsForOwner(
+  db: Db,
+  options: { page?: number; pageSize?: number } = {},
+) {
+  const conditions = orm.and(
+    orm.eq(schema.credential.status, 'pending'),
+    orm.eq(schema.credential.externallyManaged, false),
+    orm.isNull(schema.credential.valueEncrypted),
+  )
+  const [countRow] = await db.select({ count: orm.count() }).from(schema.credential).where(conditions)
+  const total = countRow?.count ?? 0
+  const pageSize = Math.max(1, Math.min(100, Math.trunc(options.pageSize ?? PENDING_REQUEST_PAGE_SIZE)))
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const page = Math.min(totalPages, Math.max(1, Math.trunc(options.page ?? 1) || 1))
+  const rows = await db.select({
+    ...METADATA_COLUMNS,
+    docJson: schema.credential.docJson,
+  }).from(schema.credential)
+    .where(conditions)
+    .orderBy(orm.desc(schema.credential.updatedAt), orm.desc(schema.credential.name))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize)
+  return {
+    rows: rows.map((row) => ({
+      ...row,
+      hasValue: Boolean(row.hasValue),
+      allowedHosts: readAllowedHosts(row.allowedHosts),
+      doc: readStoredDoc(row.docJson),
+    })),
+    total,
+    page,
+    pageSize,
+    totalPages,
+  }
+}
+
 export async function getCredentialForOwner(db: Db, id: string) {
   const [row] = await db.select({ ...METADATA_COLUMNS, docJson: schema.credential.docJson, validationDetails: schema.credential.validationDetails })
     .from(schema.credential).where(orm.eq(schema.credential.id, id)).limit(1)
@@ -253,24 +430,29 @@ export async function getCredentialForOwner(db: Db, id: string) {
 
 /** What a runner (and through it, a model) may know. Only Active + Visible entries. */
 export async function listRegistryForRunner(db: Db, now: number) {
-  const rows = await db.select(METADATA_COLUMNS).from(schema.credential)
-    .where(orm.and(orm.eq(schema.credential.status, 'active'), orm.eq(schema.credential.visible, true)))
+  // Keep the runner hot path narrow: select only fields returned by the API,
+  // filter eligibility in D1, and preserve name ordering through its index.
+  // The encrypted value is referenced only by IS NOT NULL; it is never selected.
+  return db.select({
+    name: schema.credential.name,
+    service: schema.credential.service,
+    purpose: schema.credential.purpose,
+    lifetime: schema.credential.lifetime,
+    delivery: schema.credential.delivery,
+    validation: schema.credential.validation,
+    expiresAt: schema.credential.expiresAt,
+    externallyManaged: schema.credential.externallyManaged,
+  }).from(schema.credential)
+    .where(orm.and(
+      orm.eq(schema.credential.status, 'active'),
+      orm.eq(schema.credential.visible, true),
+      orm.or(orm.isNull(schema.credential.expiresAt), orm.gt(schema.credential.expiresAt, now)),
+      orm.or(
+        orm.eq(schema.credential.externallyManaged, true),
+        orm.isNotNull(schema.credential.valueEncrypted),
+      ),
+    ))
     .orderBy(schema.credential.name)
-  return rows
-    .filter((row) => availability({
-      status: row.status, visible: row.visible, expiresAt: row.expiresAt,
-      externallyManaged: row.externallyManaged, hasValue: Boolean(row.hasValue),
-    }, now).available)
-    .map((row) => ({
-      name: row.name,
-      service: row.service,
-      purpose: row.purpose,
-      lifetime: row.lifetime,
-      delivery: row.delivery,
-      validation: row.validation,
-      expiresAt: row.expiresAt,
-      externallyManaged: row.externallyManaged,
-    }))
 }
 
 // ── Owner: lifecycle changes ───────────────────────────────────────────
@@ -330,7 +512,13 @@ export type ValueResult =
  * effect on the very next request. The caller must never return `value` to a runner
  * in `proxy` mode.
  */
-export async function readCredentialValue(db: Db, key: CryptoKey, name: string, now: number): Promise<ValueResult> {
+export async function readCredentialValue(
+  db: Db,
+  key: CryptoKey,
+  name: string,
+  now: number,
+  options: { validation?: boolean } = {},
+): Promise<ValueResult> {
   const [row] = await db.select({
     id: schema.credential.id, name: schema.credential.name, status: schema.credential.status, visible: schema.credential.visible,
     expiresAt: schema.credential.expiresAt, externallyManaged: schema.credential.externallyManaged,
@@ -340,7 +528,9 @@ export async function readCredentialValue(db: Db, key: CryptoKey, name: string, 
   }).from(schema.credential).where(orm.eq(schema.credential.name, name)).limit(1)
   if (!row) return { ok: false, reason: 'unavailable' }
   const state = availability({
-    status: row.status, visible: row.visible, expiresAt: row.expiresAt,
+    status: options.validation ? 'active' : row.status,
+    visible: options.validation ? true : row.visible,
+    expiresAt: options.validation ? null : row.expiresAt,
     externallyManaged: row.externallyManaged, hasValue: row.valueEncrypted !== null,
   }, now)
   if (!state.available) return { ok: false, reason: publicReason(state.reason) }

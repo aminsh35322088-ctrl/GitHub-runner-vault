@@ -1,7 +1,7 @@
 /// <reference types="vitest/config" />
 // Read D1 migration SQL files so they can be applied in the workerd setup file
 import { cloudflare } from '@cloudflare/vite-plugin'
-import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
+import { cloudflareTest } from '@cloudflare/vitest-plugin'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { spiceflowPlugin } from 'spiceflow/vite'
@@ -34,7 +34,7 @@ export default defineConfig(async ({ command }) => {
     server: { port, strictPort: true },
     clearScreen: false,
     plugins: [
-      // cloudflareTest() runs tests inside workerd via @cloudflare/vitest-pool-workers.
+      // cloudflareTest() runs tests inside workerd via @cloudflare/vitest-plugin.
       // cloudflare() handles dev/build/deploy but conflicts with the vitest pool
       // (both manage workerd), so only one is active at a time.
       process.env.VITEST

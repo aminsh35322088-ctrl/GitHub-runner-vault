@@ -13,6 +13,8 @@ import type { RunnerIdentity } from './oidc.ts'
 type Db = ReturnType<typeof getDb>
 
 export const SESSION_TTL_MS = 30 * 60_000
+
+let cachedSessionKey: { secret: string; key: Promise<CryptoKey> } | null = null
 const REVOKED_KEY = 'runner_revoked_before'
 
 export type RunnerSession = {
@@ -36,16 +38,31 @@ function fromB64url(value: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(padded), (c) => c.charCodeAt(0))
 }
 
-export async function deriveSessionKey(secret: unknown): Promise<CryptoKey> {
-  if (typeof secret !== 'string' || secret.length < 32) throw new Error('BETTER_AUTH_SECRET must be at least 32 characters')
-  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), 'HKDF', false, ['deriveKey'])
-  return crypto.subtle.deriveKey(
-    { name: 'HKDF', hash: 'SHA-256', salt: new TextEncoder().encode('runner-vault'), info: new TextEncoder().encode('runner-session-v1') },
-    base,
-    { name: 'HMAC', hash: 'SHA-256', length: 256 },
-    false,
-    ['sign', 'verify'],
-  )
+export function deriveSessionKey(secret: unknown): Promise<CryptoKey> {
+  if (typeof secret !== 'string' || secret.length < 32) return Promise.reject(new Error('BETTER_AUTH_SECRET must be at least 32 characters'))
+  if (cachedSessionKey?.secret === secret) return cachedSessionKey.key
+
+  const key = (async () => {
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), 'HKDF', false, ['deriveKey'])
+    return crypto.subtle.deriveKey(
+      { name: 'HKDF', hash: 'SHA-256', salt: new TextEncoder().encode('runner-vault'), info: new TextEncoder().encode('runner-session-v1') },
+      base,
+      { name: 'HMAC', hash: 'SHA-256', length: 256 },
+      false,
+      ['sign', 'verify'],
+    )
+  })()
+  const entry = { secret, key }
+  cachedSessionKey = entry
+  key.catch(() => {
+    if (cachedSessionKey === entry) cachedSessionKey = null
+  })
+  return key
+}
+
+/** Test helper for deterministic key-rotation and cache-isolation tests. */
+export function resetRunnerSessionKeyCache() {
+  cachedSessionKey = null
 }
 
 export async function issueRunnerSession(
@@ -69,7 +86,8 @@ export async function issueRunnerSession(
 
 export type SessionResult = { ok: true; session: RunnerSession } | { ok: false; error: string }
 
-export async function verifyRunnerSession(key: CryptoKey, token: string, nowMs: number, revokedBeforeMs: number): Promise<SessionResult> {
+/** Verify signature, payload shape and expiry without a D1 lookup. */
+export async function verifyRunnerSessionSignature(key: CryptoKey, token: string, nowMs: number): Promise<SessionResult> {
   const parts = token.split('.')
   if (parts.length !== 3 || parts[0] !== 'rs1' || token.length > 2048) return { ok: false, error: 'invalid session' }
   let valid = false
@@ -87,8 +105,14 @@ export async function verifyRunnerSession(key: CryptoKey, token: string, nowMs: 
   }
   if (typeof session.exp !== 'number' || typeof session.iat !== 'number') return { ok: false, error: 'invalid session' }
   if (session.exp <= nowMs) return { ok: false, error: 'session expired' }
-  if (session.iat <= revokedBeforeMs) return { ok: false, error: 'session revoked' }
   return { ok: true, session }
+}
+
+export async function verifyRunnerSession(key: CryptoKey, token: string, nowMs: number, revokedBeforeMs: number): Promise<SessionResult> {
+  const result = await verifyRunnerSessionSignature(key, token, nowMs)
+  if (!result.ok) return result
+  if (result.session.iat <= revokedBeforeMs) return { ok: false, error: 'session revoked' }
+  return result
 }
 
 export async function getRunnerRevokedBefore(db: Db): Promise<number> {

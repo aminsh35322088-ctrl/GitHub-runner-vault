@@ -83,6 +83,13 @@ export async function releaseEnrollmentLink(db: Db, id: string, consumedAt: numb
 }
 
 
+/** Remove a just-issued link that lost a race with an owner state transition. */
+export async function discardEnrollmentLink(db: Db, token: string): Promise<void> {
+  if (!TOKEN_SHAPE.test(token)) return
+  const tokenHash = await hashLinkToken(token)
+  await db.delete(schema.enrollmentLink).where(orm.eq(schema.enrollmentLink.tokenHash, tokenHash))
+}
+
 /** Look at a link without using it. Returns null for unknown, expired or used links. */
 export async function peekEnrollmentLink(db: Db, token: string, now: number): Promise<LinkInfo | null> {
   if (!TOKEN_SHAPE.test(token)) return null
@@ -96,6 +103,35 @@ export async function peekEnrollmentLink(db: Db, token: string, now: number): Pr
   }).from(schema.enrollmentLink).where(orm.eq(schema.enrollmentLink.tokenHash, tokenHash)).limit(1)
   if (!row || row.usedAt !== null || row.expiresAt <= now) return null
   return { id: row.id, credentialId: row.credentialId, kind: row.kind, expiresAt: row.expiresAt }
+}
+
+/** Owner-facing link metadata only. Token hashes are never selected or returned. */
+export async function listLatestRegistrationLinks(db: Db, credentialIds: string[]) {
+  if (credentialIds.length === 0) return []
+  const latest = new Map<string, {
+    credentialId: string; requestedBy: string; expiresAt: number; usedAt: number | null; createdAt: number
+  }>()
+  // Stay below SQLite's conservative bind-variable limit while covering every
+  // pending request, rather than silently omitting older pending credentials.
+  for (let offset = 0; offset < credentialIds.length; offset += 750) {
+    const chunk = credentialIds.slice(offset, offset + 750)
+    const rows = await db.select({
+      credentialId: schema.enrollmentLink.credentialId,
+      requestedBy: schema.enrollmentLink.requestedBy,
+      expiresAt: schema.enrollmentLink.expiresAt,
+      usedAt: schema.enrollmentLink.usedAt,
+      createdAt: schema.enrollmentLink.createdAt,
+    }).from(schema.enrollmentLink)
+      .where(orm.and(
+        orm.eq(schema.enrollmentLink.kind, 'register'),
+        orm.inArray(schema.enrollmentLink.credentialId, chunk),
+      ))
+      .orderBy(orm.desc(schema.enrollmentLink.createdAt), orm.asc(schema.enrollmentLink.usedAt))
+    for (const row of rows) {
+      if (!latest.has(row.credentialId)) latest.set(row.credentialId, row)
+    }
+  }
+  return [...latest.values()]
 }
 
 /** Atomically use a link. Exactly one concurrent caller gets the link; the rest get null. */

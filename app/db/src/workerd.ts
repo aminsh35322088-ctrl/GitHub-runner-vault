@@ -16,7 +16,7 @@ function d1ToRawRows(results: Record<string, unknown>[]) {
   return results.map((row) => Object.keys(row).map((k) => row[k]))
 }
 
-export function getDb() {
+function createDb() {
   return drizzle(
     async (sql, params, method) => {
       const stmt = env.DB.prepare(sql).bind(...params)
@@ -37,4 +37,18 @@ export function getDb() {
     },
     { schema, relations: schema.relations },
   )
+}
+
+
+// D1 is a stable Worker binding for the lifetime of an isolate. Reuse the
+// lightweight Drizzle/sqlite-proxy facade instead of rebuilding its callbacks
+// and relation metadata on every HTTP request. The cache is isolate-local;
+// no request-specific data or transaction state is retained.
+type WorkerDb = ReturnType<typeof createDb>
+let cachedDb: WorkerDb | null = null
+
+export function getDb(): WorkerDb {
+  if (cachedDb) return cachedDb
+  cachedDb = createDb()
+  return cachedDb
 }

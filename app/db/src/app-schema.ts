@@ -95,6 +95,11 @@ export const credential = sqliteCore.sqliteTable('credential', {
     enum: ['not_tested', 'valid', 'invalid', 'insufficient_permissions'],
   }).notNull().default('not_tested'),
   validationDetails: sqliteCore.text('validation_details'),
+  validationStatus: sqliteCore.text('validation_status').notNull().default('not_tested'),
+  lastValidatedAt: epochMs('last_validated_at'),
+  nextValidationAt: epochMs('next_validation_at'),
+  validationFailureCount: sqliteCore.integer('validation_failure_count').notNull().default(0),
+  firstValidationFailureAt: epochMs('first_validation_failure_at'),
   docJson: sqliteCore.text('doc_json').notNull().default('{}'),
   valueEncrypted: sqliteCore.text('value_encrypted'),
   valueIv: sqliteCore.text('value_iv'),
@@ -105,6 +110,8 @@ export const credential = sqliteCore.sqliteTable('credential', {
   updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
 }, (table) => [
   sqliteCore.index('credential_status_idx').on(table.status),
+  sqliteCore.index('credential_validation_due_idx').on(table.status, table.nextValidationAt),
+  sqliteCore.index('credential_runner_registry_idx').on(table.status, table.visible, table.name),
 ])
 
 export const enrollmentLink = sqliteCore.sqliteTable('enrollment_link', {
@@ -137,6 +144,9 @@ export const credentialAudit = sqliteCore.sqliteTable('credential_audit', {
 }, (table) => [
   sqliteCore.index('credential_audit_at_idx').on(table.at),
   sqliteCore.index('credential_audit_credential_idx').on(table.credentialId),
+  sqliteCore.index('credential_audit_name_at_idx').on(table.credentialName, table.at),
+  sqliteCore.index('credential_audit_action_at_idx').on(table.action, table.at),
+  sqliteCore.index('credential_audit_action_name_at_idx').on(table.action, table.credentialName, table.at),
 ])
 
 export const vaultSetting = sqliteCore.sqliteTable('vault_setting', {
@@ -144,6 +154,71 @@ export const vaultSetting = sqliteCore.sqliteTable('vault_setting', {
   value: sqliteCore.text('value').notNull(),
   updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
 })
+
+// Atomic sliding-window reservations for Runner limits. Proxy rows reference the
+// current credential ID so deleting/replacing a credential cannot inherit its quota.
+export const runnerRateLimitEvent = sqliteCore.sqliteTable('runner_rate_limit_event', {
+  id: sqliteCore.text('id').primaryKey().notNull(),
+  scope: sqliteCore.text('scope', { enum: ['session', 'registration', 'proxy'] }).notNull(),
+  subject: sqliteCore.text('subject').notNull(),
+  credentialId: sqliteCore.text('credential_id').references(() => credential.id, { onDelete: 'cascade' }),
+  createdAt: epochMs('created_at').notNull(),
+}, (table) => [
+  sqliteCore.index('runner_rate_limit_event_scope_subject_at_idx').on(table.scope, table.subject, table.createdAt),
+  sqliteCore.index('runner_rate_limit_event_created_at_idx').on(table.createdAt),
+])
+
+export const vaultNotification = sqliteCore.sqliteTable('vault_notification', {
+  id: sqliteCore.text('id').primaryKey().notNull(),
+  dedupeKey: sqliteCore.text('dedupe_key').notNull().unique(),
+  kind: sqliteCore.text('kind').notNull(),
+  severity: sqliteCore.text('severity', { enum: ['info', 'warning', 'critical'] }).notNull(),
+  title: sqliteCore.text('title').notNull(),
+  message: sqliteCore.text('message').notNull(),
+  credentialId: sqliteCore.text('credential_id').references(() => credential.id, { onDelete: 'set null' }),
+  credentialName: sqliteCore.text('credential_name').notNull().default(''),
+  createdAt: epochMs('created_at').notNull(),
+  readAt: epochMs('read_at'),
+}, (table) => [
+  sqliteCore.index('vault_notification_created_idx').on(table.createdAt),
+  sqliteCore.index('vault_notification_unread_idx').on(table.readAt, table.createdAt),
+])
+
+export const credentialUsageHourly = sqliteCore.sqliteTable('credential_usage_hourly', {
+  id: sqliteCore.text('id').primaryKey().notNull(),
+  credentialId: sqliteCore.text('credential_id').notNull().references(() => credential.id, { onDelete: 'cascade' }),
+  windowStart: epochMs('window_start').notNull(),
+  consumer: sqliteCore.text('consumer').notNull().default('runner'),
+  requestCount: sqliteCore.integer('request_count').notNull().default(0),
+  successCount: sqliteCore.integer('success_count').notNull().default(0),
+  errorCount: sqliteCore.integer('error_count').notNull().default(0),
+  latencyTotalMs: sqliteCore.integer('latency_total_ms').notNull().default(0),
+  latencyMaxMs: sqliteCore.integer('latency_max_ms').notNull().default(0),
+}, (table) => [
+  sqliteCore.uniqueIndex('credential_usage_hourly_unique_idx').on(table.credentialId, table.windowStart, table.consumer),
+  sqliteCore.index('credential_usage_window_idx').on(table.windowStart),
+  sqliteCore.index('credential_usage_credential_idx').on(table.credentialId, table.windowStart),
+])
+
+export const credentialValidationHistory = sqliteCore.sqliteTable('credential_validation_history', {
+  id: sqliteCore.text('id').primaryKey().notNull(),
+  credentialId: sqliteCore.text('credential_id').notNull().references(() => credential.id, { onDelete: 'cascade' }),
+  credentialName: sqliteCore.text('credential_name').notNull().default(''),
+  provider: sqliteCore.text('provider').notNull(),
+  source: sqliteCore.text('source', { enum: ['scheduled', 'manual'] }).notNull(),
+  status: sqliteCore.text('status').notNull(),
+  message: sqliteCore.text('message').notNull().default(''),
+  identity: sqliteCore.text('identity'),
+  tokenType: sqliteCore.text('token_type'),
+  permissionSource: sqliteCore.text('permission_source').notNull(),
+  permissionsJson: sqliteCore.text('permissions_json').notNull().default('[]'),
+  permissionsComplete: sqliteCore.integer('permissions_complete', { mode: 'boolean' }).notNull().default(false),
+  durationMs: sqliteCore.integer('duration_ms').notNull().default(0),
+  checkedAt: epochMs('checked_at').notNull(),
+}, (table) => [
+  sqliteCore.index('credential_validation_history_credential_idx').on(table.credentialId, table.checkedAt),
+  sqliteCore.index('credential_validation_history_checked_idx').on(table.checkedAt),
+])
 
 export const relations = defineRelations(
   { user, session, account, verification },

@@ -9,7 +9,7 @@
       "DOM"
     ],
     "types": [
-      "@cloudflare/vitest-pool-workers/types"
+      "@cloudflare/vitest-plugin/types"
     ],
     "module": "esnext",
     "moduleResolution": "bundler",

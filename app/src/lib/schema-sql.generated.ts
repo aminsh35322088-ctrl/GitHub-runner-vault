@@ -28,5 +28,47 @@ export const SCHEMA_MIGRATIONS: SchemaMigration[] = [
     "statements": [
       "ALTER TABLE credential ADD COLUMN validation_details text"
     ]
+  },
+  {
+    "id": "0003_lifecycle_notifications_analytics",
+    "statements": [
+      "ALTER TABLE credential ADD COLUMN validation_status text NOT NULL DEFAULT 'not_tested'",
+      "ALTER TABLE credential ADD COLUMN last_validated_at integer",
+      "ALTER TABLE credential ADD COLUMN next_validation_at integer",
+      "CREATE INDEX credential_validation_due_idx ON credential (status, next_validation_at)",
+      "CREATE TABLE vault_notification (\n  id text PRIMARY KEY,\n  dedupe_key text NOT NULL UNIQUE,\n  kind text NOT NULL,\n  severity text NOT NULL CHECK (severity IN ('info', 'warning', 'critical')),\n  title text NOT NULL CHECK (length(title) <= 160),\n  message text NOT NULL CHECK (length(message) <= 600),\n  credential_id text,\n  credential_name text NOT NULL DEFAULT '',\n  created_at integer NOT NULL,\n  read_at integer,\n  CONSTRAINT fk_vault_notification_credential_id_credential_id_fk\n    FOREIGN KEY (credential_id) REFERENCES credential(id) ON DELETE SET NULL\n)",
+      "CREATE INDEX vault_notification_created_idx ON vault_notification (created_at)",
+      "CREATE INDEX vault_notification_unread_idx ON vault_notification (read_at, created_at)",
+      "CREATE TABLE credential_usage_hourly (\n  id text PRIMARY KEY,\n  credential_id text NOT NULL,\n  window_start integer NOT NULL,\n  consumer text NOT NULL DEFAULT 'runner',\n  request_count integer NOT NULL DEFAULT 0,\n  success_count integer NOT NULL DEFAULT 0,\n  error_count integer NOT NULL DEFAULT 0,\n  latency_total_ms integer NOT NULL DEFAULT 0,\n  latency_max_ms integer NOT NULL DEFAULT 0,\n  UNIQUE (credential_id, window_start, consumer),\n  CONSTRAINT fk_usage_credential FOREIGN KEY (credential_id) REFERENCES credential(id) ON DELETE CASCADE\n)",
+      "CREATE INDEX credential_usage_window_idx ON credential_usage_hourly (window_start)",
+      "CREATE INDEX credential_usage_credential_idx ON credential_usage_hourly (credential_id, window_start)"
+    ]
+  },
+  {
+    "id": "0004_validation_history_backoff",
+    "statements": [
+      "ALTER TABLE credential ADD COLUMN validation_failure_count integer NOT NULL DEFAULT 0 CHECK (validation_failure_count BETWEEN 0 AND 1000)",
+      "ALTER TABLE credential ADD COLUMN first_validation_failure_at integer",
+      "CREATE TABLE credential_validation_history (\n  id text PRIMARY KEY,\n  credential_id text NOT NULL,\n  credential_name text NOT NULL DEFAULT '',\n  provider text NOT NULL CHECK (length(provider) BETWEEN 1 AND 80),\n  source text NOT NULL CHECK (source IN ('scheduled', 'manual')),\n  status text NOT NULL CHECK (length(status) BETWEEN 1 AND 40),\n  message text NOT NULL DEFAULT '' CHECK (length(message) <= 600),\n  identity text,\n  token_type text,\n  permission_source text NOT NULL CHECK (length(permission_source) <= 40),\n  permissions_json text NOT NULL DEFAULT '[]',\n  permissions_complete integer NOT NULL DEFAULT 0 CHECK (permissions_complete IN (0, 1)),\n  duration_ms integer NOT NULL DEFAULT 0 CHECK (duration_ms >= 0),\n  checked_at integer NOT NULL,\n  CONSTRAINT fk_credential_validation_history_credential\n    FOREIGN KEY (credential_id) REFERENCES credential(id) ON DELETE CASCADE\n)",
+      "CREATE INDEX credential_validation_history_credential_idx ON credential_validation_history (credential_id, checked_at)",
+      "CREATE INDEX credential_validation_history_checked_idx ON credential_validation_history (checked_at)"
+    ]
+  },
+  {
+    "id": "0005_runner_hot_path_indexes",
+    "statements": [
+      "CREATE INDEX IF NOT EXISTS credential_runner_registry_idx ON credential (status, visible, name)",
+      "CREATE INDEX IF NOT EXISTS credential_audit_name_at_idx ON credential_audit (credential_name, at)",
+      "CREATE INDEX IF NOT EXISTS credential_audit_action_at_idx ON credential_audit (action, at)",
+      "CREATE INDEX IF NOT EXISTS credential_audit_action_name_at_idx ON credential_audit (action, credential_name, at)"
+    ]
+  },
+  {
+    "id": "0006_runner_rate_limit_events",
+    "statements": [
+      "CREATE TABLE runner_rate_limit_event (\n  id text PRIMARY KEY NOT NULL,\n  scope text NOT NULL CHECK (scope IN ('session', 'registration', 'proxy')),\n  subject text NOT NULL CHECK (length(subject) BETWEEN 1 AND 160),\n  credential_id text,\n  created_at integer NOT NULL,\n  CONSTRAINT fk_runner_rate_limit_event_credential\n    FOREIGN KEY (credential_id) REFERENCES credential(id) ON DELETE CASCADE\n)",
+      "CREATE INDEX runner_rate_limit_event_scope_subject_at_idx\n  ON runner_rate_limit_event (scope, subject, created_at)",
+      "CREATE INDEX runner_rate_limit_event_created_at_idx\n  ON runner_rate_limit_event (created_at)"
+    ]
   }
 ]

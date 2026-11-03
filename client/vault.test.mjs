@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
-import { parseArgs, parseHeaders } from './vault.mjs'
+import { parseArgs, parseHeaders, mapLocalProxyTarget, fetchWithTimeout } from './vault.mjs'
 
 const SECRET = 'must-never-appear-anywhere'
 
@@ -20,6 +20,10 @@ function startStub() {
       if (req.url.startsWith('/oidc')) return json(200, { value: 'oidc-token-value' })
       if (req.url === '/api/runner/session') return json(200, { token: 'rs1.session.token', expiresAt: Date.now() + 1_800_000 })
       if (req.url === '/api/runner/registry') return json(200, { credentials: [{ name: 'CF_TOKEN', service: 'Cloudflare' }] })
+      if (req.url === '/api/runner/registrations') return json(200, {
+        link: `http://localhost:${server.address().port}/vault/register/lnk_${'a'.repeat(43)}`,
+        expiresAt: Date.now() + 15 * 60_000,
+      })
       if (req.url === '/api/runner/use') {
         const body = JSON.parse(raw)
         if (body.name === 'MISSING') return json(404, { error: 'unavailable' })
@@ -44,6 +48,278 @@ function run(args, env, script = new URL('./vault.mjs', import.meta.url).pathnam
 test('parsing', () => {
   assert.deepEqual(parseArgs(['a', '--x', '1', '--header', 'A: b', 'c']), { positional: ['a', 'c'], flags: { x: '1' }, headers: ['A: b'] })
   assert.deepEqual(parseHeaders(['Accept: application/json', 'X-A:b:c']), { Accept: 'application/json', 'X-A': 'b:c' })
+})
+
+test('local API proxy preserves provider base paths without allowing an absolute target host', () => {
+  assert.equal(
+    mapLocalProxyTarget('https://api.northflank.com/v1', '/v1/projects?limit=10').toString(),
+    'https://api.northflank.com/v1/projects?limit=10',
+  )
+  assert.equal(
+    mapLocalProxyTarget('https://api.northflank.com/v1', '/projects').toString(),
+    'https://api.northflank.com/v1/projects',
+  )
+  assert.throws(() => mapLocalProxyTarget('https://api.northflank.com/v1', 'https://attacker.example/collect'))
+  assert.throws(() => mapLocalProxyTarget('http://api.northflank.com/v1', '/projects'))
+  assert.throws(() => mapLocalProxyTarget('https://user:pass@api.northflank.com/v1', '/projects'))
+  assert.throws(() => mapLocalProxyTarget('https://api.northflank.com:8443/v1', '/projects'))
+})
+
+test('request shows the owner inbox and one-time registration form', async () => {
+  const { server, seen, port } = await startStub()
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-request-e2e-'))
+  const docPath = path.join(dir, 'service-doc.json')
+  fs.writeFileSync(docPath, JSON.stringify({
+    overview: 'Deploy a Worker',
+    task: 'Deploy a Worker',
+    token_type: 'API token',
+    creation_steps: [],
+    required_permissions: [],
+    unnecessary_permissions: [],
+    security_notes: [],
+    expiration_guidance: [],
+    official_documentation_links: [],
+    verification: 'unverified',
+    unverified_note: 'Not yet checked',
+  }))
+  const env = {
+    VAULT_URL: `http://localhost:${port}`,
+    ACTIONS_ID_TOKEN_REQUEST_URL: `http://127.0.0.1:${port}/oidc`,
+    ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'req-token',
+    VAULT_SESSION_FILE: path.join(dir, 'session.json'),
+  }
+  try {
+    const result = await run(['request', '--name', 'CF_NEW_TOKEN', '--service', 'Cloudflare', '--doc', docPath], env)
+    assert.equal(result.code, 0, result.stderr)
+    assert.match(result.stdout, /Credential request created: CF_NEW_TOKEN \(Cloudflare\)/)
+    assert.match(result.stdout, new RegExp(`Owner inbox: http://localhost:${port}/vault/requests`))
+    assert.match(result.stdout, /One-time owner form .*works once/)
+    assert.match(result.stdout, new RegExp(`http://localhost:${port}/vault/register/lnk_${'a'.repeat(43)}`))
+    const request = seen.find((entry) => entry.url === '/api/runner/registrations')
+    assert.ok(request)
+    assert.equal(request.method, 'POST')
+    assert.equal(request.auth, 'Bearer rs1.session.token')
+    assert.deepEqual(JSON.parse(request.body), {
+      name: 'CF_NEW_TOKEN', service: 'Cloudflare', doc: JSON.parse(fs.readFileSync(docPath, 'utf8')),
+    })
+    assert.equal(seen.filter((entry) => entry.url === '/api/runner/session').length, 1)
+    assert.ok(!result.stdout.includes(SECRET))
+    assert.ok(!result.stderr.includes(SECRET))
+  } finally {
+    server.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('serve runs a Northflank loopback bridge without forwarding a CLI placeholder as a secret', async () => {
+  const seen = []
+  const worker = http.createServer(async (req, res) => {
+    let raw = ''
+    for await (const chunk of req) raw += chunk
+    const json = (status, body) => {
+      res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      res.end(JSON.stringify(body))
+    }
+    if (req.url.startsWith('/oidc')) return json(200, { value: 'oidc-token-value' })
+    if (req.url === '/api/runner/session') return json(200, { token: 'rs1.test.session.token', expiresAt: Date.now() + 1_800_000 })
+    if (req.url === '/api/runner/integrations') return json(200, { integrations: [{
+      name: 'NORTHFLANK_API_TOKEN',
+      service: 'Northflank',
+      adapter: {
+        apiBaseUrl: 'https://api.northflank.com/v1',
+        defaultHeaders: { 'x-api-version': '2026-01-01' },
+        cliTools: [{
+          id: 'northflank', label: 'Northflank CLI', binary: 'nf',
+          integration: 'base-url-env', variable: 'NF_API_BASE_URL',
+          setupHint: 'Use the local proxy.',
+        }],
+      },
+    }] })
+    if (req.url === '/api/runner/use') {
+      const body = JSON.parse(raw)
+      seen.push({ body, authorization: req.headers.authorization })
+      return json(200, {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projects: [{ id: 'project-1' }] }),
+        truncated: false,
+        redacted: false,
+      })
+    }
+    return json(404, { error: 'not_found' })
+  })
+  await new Promise((resolve) => worker.listen(0, '127.0.0.1', resolve))
+  const workerPort = worker.address().port
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-serve-e2e-'))
+  const child = spawn(process.execPath, [new URL('./vault.mjs', import.meta.url).pathname, 'serve', 'NORTHFLANK_API_TOKEN'], {
+    env: {
+      PATH: process.env.PATH,
+      VAULT_URL: `http://localhost:${workerPort}`,
+      ACTIONS_ID_TOKEN_REQUEST_URL: `http://127.0.0.1:${workerPort}/oidc`,
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'oidc-request-token',
+      VAULT_SESSION_FILE: path.join(dir, 'session.json'),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  let port = null
+  let resolveReady
+  let rejectReady
+  const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject })
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk.toString()
+    const match = stdout.match(/Listening only on 127\.0\.0\.1:(\d+)/)
+    if (
+      match
+      && stdout.includes('Use: export NF_API_BASE_URL=')
+      && stdout.includes('export NF_API_TOKEN="vault-local-placeholder"')
+      && stdout.includes('Then run: nf')
+      && !port
+    ) {
+      port = Number(match[1])
+      resolveReady()
+    }
+  })
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString() })
+  const close = new Promise((resolve) => child.once('close', resolve))
+  try {
+    await Promise.race([
+      ready,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`bridge did not start: ${stderr}`)), 5_000)),
+    ])
+    assert.match(stdout, /NF_API_BASE_URL=/)
+    assert.match(stdout, /NF_API_TOKEN="vault-local-placeholder"/)
+    const response = await fetch(`http://127.0.0.1:${port}/v1/projects?limit=5`, {
+      headers: {
+        Authorization: 'Bearer vault-local-placeholder',
+        Accept: 'application/json',
+        'x-api-version': 'attacker-value',
+      },
+    })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { projects: [{ id: 'project-1' }] })
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].authorization, 'Bearer rs1.test.session.token')
+    assert.deepEqual(seen[0].body, {
+      name: 'NORTHFLANK_API_TOKEN',
+      method: 'GET',
+      url: 'https://api.northflank.com/v1/projects?limit=5',
+      headers: { accept: 'application/json', 'x-api-version': '2026-01-01' },
+      consumer: 'cli:northflank',
+      purpose: 'CLI integration: Northflank CLI',
+    })
+    assert.ok(!stdout.includes(SECRET))
+    assert.ok(!stderr.includes(SECRET))
+  } finally {
+    child.kill('SIGTERM')
+    await close
+    await new Promise((resolve) => worker.close(resolve))
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('serve runs a Cloudflare Wrangler loopback bridge and keeps the real API token in Vault', async () => {
+  const seen = []
+  const worker = http.createServer(async (req, res) => {
+    let raw = ''
+    for await (const chunk of req) raw += chunk
+    const json = (status, body) => {
+      res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      res.end(JSON.stringify(body))
+    }
+    if (req.url.startsWith('/oidc')) return json(200, { value: 'oidc-token-value' })
+    if (req.url === '/api/runner/session') return json(200, { token: 'rs1.cloudflare.session.token', expiresAt: Date.now() + 1_800_000 })
+    if (req.url === '/api/runner/integrations') return json(200, { integrations: [{
+      name: 'CLOUDFLARE_API_TOKEN',
+      service: 'Cloudflare',
+      adapter: {
+        apiBaseUrl: 'https://api.cloudflare.com/client/v4',
+        cliTools: [{
+          id: 'wrangler', label: 'Wrangler CLI', binary: 'wrangler',
+          integration: 'base-url-env', variable: 'CLOUDFLARE_API_BASE_URL',
+          tokenVariable: 'CLOUDFLARE_API_TOKEN',
+          setupHint: 'Use the Cloudflare Wrangler environment overrides.',
+        }],
+      },
+    }] })
+    if (req.url === '/api/runner/use') {
+      const body = JSON.parse(raw)
+      seen.push({ body, authorization: req.headers.authorization })
+      return json(200, {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ success: true, result: { id: 'account-id' } }),
+        truncated: false,
+        redacted: false,
+      })
+    }
+    return json(404, { error: 'not_found' })
+  })
+  await new Promise((resolve) => worker.listen(0, '127.0.0.1', resolve))
+  const workerPort = worker.address().port
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-wrangler-serve-'))
+  const child = spawn(process.execPath, [new URL('./vault.mjs', import.meta.url).pathname, 'serve', 'CLOUDFLARE_API_TOKEN'], {
+    env: {
+      PATH: process.env.PATH,
+      VAULT_URL: 'http://localhost:' + workerPort,
+      ACTIONS_ID_TOKEN_REQUEST_URL: 'http://127.0.0.1:' + workerPort + '/oidc',
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'oidc-request-token',
+      VAULT_SESSION_FILE: path.join(dir, 'session.json'),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  let port = null
+  let resolveReady
+  const ready = new Promise((resolve) => { resolveReady = resolve })
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk.toString()
+    const match = stdout.match(/Listening only on 127\.0\.0\.1:(\d+)/)
+    if (
+      match
+      && stdout.includes('Use: export CLOUDFLARE_API_BASE_URL=')
+      && stdout.includes('export CLOUDFLARE_API_TOKEN="vault-local-placeholder"')
+      && stdout.includes('Then run: wrangler')
+      && !port
+    ) {
+      port = Number(match[1])
+      resolveReady()
+    }
+  })
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString() })
+  const close = new Promise((resolve) => child.once('close', resolve))
+  try {
+    await Promise.race([
+      ready,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Wrangler bridge did not start: ' + stderr)), 5_000)),
+    ])
+    assert.match(stdout, /CLOUDFLARE_API_BASE_URL=/)
+    assert.match(stdout, /CLOUDFLARE_API_TOKEN="vault-local-placeholder"/)
+    const response = await fetch('http://127.0.0.1:' + port + '/client/v4/user', {
+      headers: { Authorization: 'Bearer vault-local-placeholder', Accept: 'application/json' },
+    })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { success: true, result: { id: 'account-id' } })
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].authorization, 'Bearer rs1.cloudflare.session.token')
+    assert.deepEqual(seen[0].body, {
+      name: 'CLOUDFLARE_API_TOKEN',
+      method: 'GET',
+      url: 'https://api.cloudflare.com/client/v4/user',
+      headers: { accept: 'application/json' },
+      consumer: 'cli:wrangler',
+      purpose: 'CLI integration: Wrangler CLI',
+    })
+    assert.ok(!stdout.includes(SECRET))
+    assert.ok(!stderr.includes(SECRET))
+  } finally {
+    child.kill('SIGTERM')
+    await close
+    await new Promise((resolve) => worker.close(resolve))
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('list and use work end to end, caching one session', async () => {
@@ -115,5 +391,34 @@ test('works when invoked through a symlink (how the runner installs it)', async 
   } finally {
     server.close()
     fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+
+test('Vault HTTP client requests abort on timeout and expose no URL or token details', async () => {
+  const server = http.createServer((_req, res) => {
+    setTimeout(() => {
+      if (!res.destroyed) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{}')
+      }
+    }, 500)
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const url = 'http://127.0.0.1:' + server.address().port + '/sensitive-path?token=' + SECRET
+  const started = Date.now()
+  try {
+    await assert.rejects(
+      fetchWithTimeout(url, { headers: { Authorization: 'Bearer ' + SECRET } }, 'Vault test request', 60),
+      (error) => {
+        assert.equal(error.message, 'Vault test request timed out')
+        assert.ok(!error.message.includes(SECRET))
+        assert.ok(!error.message.includes(url))
+        return true
+      },
+    )
+    assert.ok(Date.now() - started < 400, 'request should be aborted before the delayed server responds')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
   }
 })

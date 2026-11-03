@@ -72,39 +72,80 @@ function str(claims: Record<string, unknown>, name: string): string {
   return typeof value === 'string' ? value : ''
 }
 
-/** JWKS source with a small in-memory cache. A refresh is forced at most once a minute. */
+/** JWKS source with a bounded stale cache. A refresh is forced at most once a minute. */
 export function cachedJwksSource(fetchFn: typeof fetch = fetch, now: () => number = Date.now): JwksSource {
   let cached: { jwks: Jwks; fetchedAt: number } | null = null
   const TTL_MS = 10 * 60_000
+  const MAX_CACHE_AGE_MS = 15 * 60_000
   const MIN_REFRESH_MS = 60_000
   return async (forceRefresh) => {
     const t = now()
-    const fresh = cached && t - cached.fetchedAt < TTL_MS
-    const tooSoon = cached && t - cached.fetchedAt < MIN_REFRESH_MS
+    const ageMs = cached ? Math.max(0, t - cached.fetchedAt) : Number.POSITIVE_INFINITY
+    const fresh = cached && ageMs < TTL_MS
+    const tooSoon = cached && ageMs < MIN_REFRESH_MS
     if (cached && fresh && !forceRefresh) return cached.jwks
     if (cached && forceRefresh && tooSoon) return cached.jwks
-    const res = await fetchFn(GITHUB_JWKS_URL, { headers: { Accept: 'application/json' } })
-    if (!res.ok) {
-      if (cached) return cached.jwks
+
+    try {
+      const res = await fetchFn(GITHUB_JWKS_URL, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(5_000),
+      })
+      if (!res.ok) throw new Error('GitHub JWKS endpoint returned an error')
+      const jwks = await res.json() as Jwks
+      if (!Array.isArray(jwks?.keys)) throw new Error('unexpected JWKS shape')
+      cached = { jwks, fetchedAt: t }
+      return jwks
+    } catch {
+      // Preserve availability during a short GitHub outage, but never trust an
+      // arbitrarily old signing-key set. GitHub OIDC tokens are short-lived.
+      if (cached && ageMs <= MAX_CACHE_AGE_MS) return cached.jwks
       throw new Error('could not fetch GitHub JWKS')
     }
-    const jwks = await res.json() as Jwks
-    if (!Array.isArray(jwks?.keys)) throw new Error('unexpected JWKS shape')
-    cached = { jwks, fetchedAt: t }
-    return jwks
   }
 }
 
-async function verifySignature(jwk: Jwk, signingInput: string, signature: Uint8Array<ArrayBuffer>): Promise<boolean> {
-  if (jwk.kty !== 'RSA' || typeof jwk.n !== 'string' || typeof jwk.e !== 'string') return false
-  const key = await crypto.subtle.importKey(
+const verificationKeys = new Map<string, { fingerprint: string; key: Promise<CryptoKey> }>()
+const MAX_CACHED_VERIFICATION_KEYS = 32
+
+async function importVerificationKey(jwk: Jwk): Promise<CryptoKey> {
+  const fingerprint = String(jwk.kty) + ':' + jwk.n + ':' + jwk.e
+  const cached = verificationKeys.get(jwk.kid)
+  if (cached?.fingerprint === fingerprint) {
+    verificationKeys.delete(jwk.kid)
+    verificationKeys.set(jwk.kid, cached)
+    return cached.key
+  }
+  let key: Promise<CryptoKey>
+  key = crypto.subtle.importKey(
     'jwk',
     { kty: 'RSA', n: jwk.n, e: jwk.e, alg: 'RS256', ext: true },
     { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
     false,
     ['verify'],
-  )
+  ).catch((error) => {
+    if (verificationKeys.get(jwk.kid)?.key === key) verificationKeys.delete(jwk.kid)
+    throw error
+  })
+  verificationKeys.delete(jwk.kid)
+  verificationKeys.set(jwk.kid, { fingerprint, key })
+  while (verificationKeys.size > MAX_CACHED_VERIFICATION_KEYS) {
+    const oldest = verificationKeys.keys().next().value
+    if (oldest === undefined) break
+    verificationKeys.delete(oldest)
+  }
+  return key
+}
+
+async function verifySignature(jwk: Jwk, signingInput: string, signature: Uint8Array<ArrayBuffer>): Promise<boolean> {
+  if (jwk.kty !== 'RSA' || typeof jwk.n !== 'string' || typeof jwk.e !== 'string') return false
+  const key = await importVerificationKey(jwk)
   return crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, signature, new TextEncoder().encode(signingInput))
+}
+
+/** Test helper; production key cache is naturally isolate-scoped. */
+export function resetOidcVerificationKeyCache() {
+  verificationKeys.clear()
 }
 
 export function sameRepository(a: string, b: string): boolean {
