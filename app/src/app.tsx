@@ -791,7 +791,7 @@ export const app = new Spiceflow()
           <p className="text-xs text-muted-foreground mt-1">Link expires in about {Math.max(1, Math.round((link.expiresAt - Date.now()) / 60_000))} min and works once.</p>
         </div>
         {credential.doc && <DocView doc={credential.doc} />}
-        <CredentialForm mode="register" token={params.token} credentialId={credential.id} serviceName={credential.service} preset={preset ? { label: preset.label } : null} apiBaseUrl={serviceAdapterFromDocument(credential.doc)?.apiBaseUrl ?? serviceAdapterFor(credential.service)?.apiBaseUrl} defaults={{ visible: preferences.defaultVisible, lifetime: preferences.defaultLifetime }} />
+        <CredentialForm mode="register" token={params.token} credentialId={credential.id} serviceName={credential.service} credentialName={credential.name} credentialPurpose={credential.purpose} preset={preset ? { label: preset.label } : null} apiBaseUrl={serviceAdapterFromDocument(credential.doc)?.apiBaseUrl ?? serviceAdapterFor(credential.service)?.apiBaseUrl} defaults={{ visible: preferences.defaultVisible, lifetime: preferences.defaultLifetime }} />
       </div>
     )
   })
@@ -856,7 +856,7 @@ export const app = new Spiceflow()
 
         {!c.externallyManaged && (
           <SectionCard title="Replace secret value" description="Submit a replacement token. The previous value is not displayed and cannot be recovered from the dashboard." icon={<LockKeyhole className="size-[18px]" />}>
-            <CredentialForm mode="replace" id={c.id} credentialId={c.id} serviceName={c.service} apiBaseUrl={serviceAdapterFromDocument(c.doc)?.apiBaseUrl ?? serviceAdapterFor(c.service)?.apiBaseUrl} defaults={{ visible: c.visible, lifetime: c.lifetime }} />
+            <CredentialForm mode="replace" id={c.id} credentialId={c.id} serviceName={c.service} credentialName={c.name} credentialPurpose={c.purpose} apiBaseUrl={serviceAdapterFromDocument(c.doc)?.apiBaseUrl ?? serviceAdapterFor(c.service)?.apiBaseUrl} defaults={{ visible: c.visible, lifetime: c.lifetime }} />
           </SectionCard>
         )}
 
