@@ -690,6 +690,51 @@ describe('reading a value for use', () => {
     expect(retained.find((item) => item.kind === 'validation_invalid' && item.credentialName === name)?.credentialId).toBeNull()
     expect((await listCredentialValidationHistory(db, 20)).some((item) => item.credentialId === request.value.credentialId)).toBe(false)
   })
+
+  test('does not let an in-flight validation overwrite a replacement credential', async () => {
+    const { db, key, now, id } = await activeCredential()
+    let markStarted!: () => void
+    let releaseFetch!: () => void
+    const started = new Promise<void>((resolve) => { markStarted = resolve })
+    const blockedFetch = new Promise<void>((resolve) => { releaseFetch = resolve })
+
+    const validation = validateStoredCredentialNow(db, key, id, now + 1_000, (async (_url, init) => {
+      expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${SECRET}`)
+      markStarted()
+      await blockedFetch
+      return new Response('', { status: 401 })
+    }) as typeof fetch)
+
+    // Wait until the old encrypted value has already been read and sent upstream.
+    await started
+    const replacement = await storeCredentialValue(db, key, {
+      credentialId: id,
+      value: 'cfut_REPLACEMENT_SECRET_987654321',
+      lifetime: 'permanent',
+      expiresAt: null,
+      visible: true,
+      delivery: 'proxy',
+      allowedHosts: ['api.cloudflare.com'],
+      validation: 'valid',
+      validationStatus: 'valid',
+      validationDetails: JSON.stringify({ status: 'valid', marker: 'replacement' }),
+      now: now + 2_000,
+    })
+    expect(replacement.ok).toBe(true)
+
+    releaseFetch()
+    const staleReport = await validation
+    expect(staleReport.status).toBe('invalid')
+
+    const current = await getCredentialForOwner(db, id)
+    expect(current).toMatchObject({
+      validationStatus: 'valid',
+      validation: 'valid',
+      validationDetails: JSON.stringify({ status: 'valid', marker: 'replacement' }),
+      lastValidatedAt: now + 2_000,
+    })
+    expect(await listCredentialValidationHistory(db, 20).then((rows) => rows.filter((row) => row.credentialId === id))).toHaveLength(0)
+  })
 })
 
 

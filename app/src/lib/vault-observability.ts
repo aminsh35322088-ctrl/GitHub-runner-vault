@@ -353,10 +353,11 @@ type ValidationTarget = {
   id: string
   name: string
   service: string
-  status: string
+  status: 'active' | 'disabled' | 'pending'
   visible: boolean
   expiresAt: number | null
   updatedAt: number
+  valueIv: string | null
   validationStatus: string
   validationFailureCount: number
   firstValidationFailureAt: number | null
@@ -375,6 +376,7 @@ const VALIDATION_TARGET_COLUMNS = {
   visible: schema.credential.visible,
   expiresAt: schema.credential.expiresAt,
   updatedAt: schema.credential.updatedAt,
+  valueIv: schema.credential.valueIv,
   validationStatus: schema.credential.validationStatus,
   validationFailureCount: schema.credential.validationFailureCount,
   firstValidationFailureAt: schema.credential.firstValidationFailureAt,
@@ -424,6 +426,41 @@ async function recordValidationResult(
       : report.status === 'insufficient_permissions' ? 'insufficient_permissions' : 'not_tested'
   const retry = retryState(report.status, target, now, intervalMs)
 
+  // A provider request can take seconds. Do not let its result overwrite a
+  // credential that the owner replaced or changed while validation was in flight.
+  // updatedAt protects metadata changes; the freshly randomized AES-GCM IV is a
+  // version marker for the secret itself, including same-millisecond rotations.
+  const unchanged = [
+    orm.eq(schema.credential.id, target.id),
+    orm.eq(schema.credential.updatedAt, target.updatedAt),
+    orm.eq(schema.credential.status, target.status),
+    orm.eq(schema.credential.visible, target.visible),
+    orm.eq(schema.credential.service, target.service),
+    orm.eq(schema.credential.docJson, target.docJson),
+    orm.eq(schema.credential.allowedHosts, target.allowedHosts),
+    orm.eq(schema.credential.externallyManaged, target.externallyManaged),
+    target.expiresAt === null
+      ? orm.isNull(schema.credential.expiresAt)
+      : orm.eq(schema.credential.expiresAt, target.expiresAt),
+    target.valueIv === null
+      ? orm.isNull(schema.credential.valueIv)
+      : orm.eq(schema.credential.valueIv, target.valueIv),
+    target.nextValidationAt === null
+      ? orm.isNull(schema.credential.nextValidationAt)
+      : orm.eq(schema.credential.nextValidationAt, target.nextValidationAt),
+  ]
+  const [updated] = await db.update(schema.credential).set({
+    validation: legacyStatus,
+    validationStatus: report.status,
+    validationDetails: JSON.stringify(report).slice(0, 32_000),
+    lastValidatedAt: now,
+    ...retry,
+  }).where(orm.and(...unchanged)).returning({ id: schema.credential.id })
+
+  // A stale result is not a validation event for the current credential. In
+  // particular, do not emit misleading history rows or owner notifications.
+  if (!updated) return
+
   // History deliberately stores report metadata only. The credential value is
   // never written to the history table, message, permissions, or telemetry.
   await db.insert(schema.credentialValidationHistory).values({
@@ -442,14 +479,6 @@ async function recordValidationResult(
     durationMs: Math.max(0, Math.min(120_000, Math.round(durationMs))),
     checkedAt: now,
   })
-
-  await db.update(schema.credential).set({
-    validation: legacyStatus,
-    validationStatus: report.status,
-    validationDetails: JSON.stringify(report).slice(0, 32_000),
-    lastValidatedAt: now,
-    ...retry,
-  }).where(orm.eq(schema.credential.id, target.id))
 
   const previous = target.validationStatus
   if (report.status === 'invalid' && previous !== 'invalid') {
@@ -618,13 +647,14 @@ export async function runScheduledCredentialValidation(
         ? orm.isNull(schema.credential.nextValidationAt)
         : orm.eq(schema.credential.nextValidationAt, target.nextValidationAt),
     ]
-    const claimed = await db.update(schema.credential).set({ nextValidationAt: now + 15 * 60_000 })
+    const claimUntil = now + 15 * 60_000
+    const claimed = await db.update(schema.credential).set({ nextValidationAt: claimUntil })
       .where(orm.and(...claimConditions))
       .returning({ id: schema.credential.id })
     // Another cron or a manual owner action may have moved this credential
     // while this batch was being prepared. Only the successful claimant runs it.
     if (!claimed.length) continue
-    await validateTarget(db, encryptionKey, target, now, fetchFn, 'scheduled', intervalMs)
+    await validateTarget(db, encryptionKey, { ...target, nextValidationAt: claimUntil }, now, fetchFn, 'scheduled', intervalMs)
     checked++
   }
 
