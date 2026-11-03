@@ -32,6 +32,7 @@ import { KeyRound, LayoutDashboard, Plus, ChartNoAxesCombined, ShieldCheck, Sett
 import { getUsageAnalytics, listCredentialIntegrationMetadata, listNotifications, listCredentialValidationHistory, loadVaultPreferences, runScheduledCredentialValidation, unreadNotificationCount } from './lib/vault-observability.ts'
 import { SectionCard } from './components/ui/section-card.tsx'
 import { cleanupRunnerRateLimitEvents } from './lib/runner-rate-limit.ts'
+import { MobileNavigation } from './components/mobile-navigation.tsx'
 import { NotificationBell } from './components/notification-actions.tsx'
 import { AddExternalForm, CredentialControls, DismissRunnerRequestButton, RenewRegistrationLinkButton, RevokeSessionsButton } from './components/credential-actions.tsx'
 import { RunCredentialValidationButton } from './components/validation-actions.tsx'
@@ -68,14 +69,6 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
         { href: '/vault/audit', label: 'Audit log', icon: ClipboardList },
       ],
     },
-  ]
-  const mobileItems = [
-    { href: '/vault', label: 'Overview', icon: LayoutDashboard },
-    { href: '/vault/requests', label: 'Requests', icon: ClipboardList },
-    { href: '/vault/services', label: 'Add', icon: Plus },
-    { href: '/vault/validation', label: 'Health', icon: ShieldCheck },
-    { href: '/vault/analytics', label: 'Usage', icon: ChartNoAxesCombined },
-    { href: '/vault/settings', label: 'Settings', icon: SettingsIcon },
   ]
   const isActive = (href: string) => href === '/vault'
     ? current === href || current.startsWith('/vault/credentials/')
@@ -168,9 +161,9 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
               <header className="sticky top-0 z-30 flex h-[4.25rem] shrink-0 items-center border-b border-border/80 bg-background/90 backdrop-blur-xl">
                 <div className="mx-auto flex w-full max-w-[1480px] items-center justify-between gap-3 px-4 sm:px-6 lg:px-8">
                   <div className="flex min-w-0 items-center gap-3">
-                    <a href="/vault" className="flex shrink-0 items-center gap-2 lg:hidden">
+                    <a href="/vault" aria-label="Runner Vault home" className="flex shrink-0 items-center gap-2 lg:hidden">
                       <span className="grid size-8 place-items-center rounded-[10px] bg-emerald-500 text-white"><KeyRound className="size-4" /></span>
-                      <span className="text-sm font-semibold tracking-tight">Runner Vault</span>
+                      <span className="text-sm font-semibold tracking-tight max-[390px]:hidden">Runner Vault</span>
                     </a>
                     <div className="hidden min-w-0 items-center gap-2 text-sm lg:flex">
                       <span className="text-muted-foreground">Workspace</span>
@@ -184,7 +177,7 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
                   <div className="flex shrink-0 items-center gap-2">
                     <NotificationBell unread={unread} notifications={notifications} />
                     <span className="mx-0.5 hidden h-6 w-px bg-border sm:block" />
-                    <a href="/vault/settings" aria-label="Settings" title="Settings" className="grid size-9 place-items-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+                    <a href="/vault/settings" aria-label="Settings" title="Settings" className="hidden size-9 place-items-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:grid">
                       <SettingsIcon className="size-[17px]" aria-hidden />
                     </a>
                     <a href="/logout" aria-label="Sign out" title="Sign out" className="grid size-9 place-items-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:border-destructive/30 hover:bg-destructive/5 hover:text-destructive">
@@ -200,20 +193,7 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
                 </main>
               </div>
 
-              <nav aria-label="Mobile navigation" className="fixed inset-x-0 bottom-0 z-30 border-t border-border/80 bg-background/95 pb-[env(safe-area-inset-bottom)] shadow-[0_-10px_30px_-22px_rgba(0,0,0,.35)] backdrop-blur-xl lg:hidden">
-                <div className="mx-auto grid max-w-xl grid-cols-6 gap-1 px-2 pt-1.5">
-                  {mobileItems.map((item) => {
-                    const Icon = item.icon
-                    const active = isActive(item.href)
-                    return (
-                      <a key={item.href} href={item.href} aria-current={active ? 'page' : undefined} className={cn('flex min-h-[3.35rem] flex-col items-center justify-center gap-1 rounded-xl px-1 text-[10px] font-semibold transition-colors', active ? 'text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground hover:bg-muted')}>
-                        <span className={cn('grid size-7 place-items-center rounded-lg transition-colors', active ? 'bg-emerald-500/10' : '')}><Icon className="size-[18px]" aria-hidden /></span>
-                        <span>{item.label}</span>
-                      </a>
-                    )
-                  })}
-                </div>
-              </nav>
+              <MobileNavigation current={current} />
             </div>
           </div>
         ) : (
@@ -711,7 +691,7 @@ export const app = new Spiceflow()
           ) : (
             <>
               <div className="mb-3 text-[11px] text-muted-foreground">{registryRows.length} of {rows.length} credentials</div>
-              <div className="hidden overflow-x-auto sm:block">
+              <div className="hidden overflow-x-auto lg:block">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -732,7 +712,7 @@ export const app = new Spiceflow()
                   </TableBody>
                 </Table>
               </div>
-              <div className="grid gap-2.5 sm:hidden">
+              <div className="grid gap-2.5 lg:hidden">
                 {registryRows.map((credential) => (
                   <a key={credential.id} href={'/vault/credentials/' + credential.id} className="block min-w-0 rounded-xl border border-border bg-background p-3.5 transition-colors active:bg-muted/50">
                     <div className="flex min-w-0 items-start justify-between gap-3">
@@ -1150,7 +1130,7 @@ export const app = new Spiceflow()
           ) : (
             <>
               <div className="mb-3 text-[11px] text-muted-foreground">{filteredRows.length} of {rows.length} credentials</div>
-              <div className="hidden overflow-x-auto sm:block">
+              <div className="hidden overflow-x-auto lg:block">
                 <Table>
                   <TableHeader><TableRow><TableHead>Credential</TableHead><TableHead>Status</TableHead><TableHead>Failures</TableHead><TableHead>Last checked</TableHead><TableHead>Next check</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader>
                   <TableBody>
@@ -1165,7 +1145,7 @@ export const app = new Spiceflow()
                   </TableBody>
                 </Table>
               </div>
-              <div className="grid gap-2.5 sm:hidden">
+              <div className="grid gap-2.5 lg:hidden">
                 {filteredRows.map((row) => <article key={row.id} className="min-w-0 rounded-xl border border-border bg-background p-3.5">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0"><a href={'/vault/credentials/' + row.id} className="break-all font-mono text-xs font-semibold hover:text-primary">{row.name}</a><p className="mt-1 text-xs text-muted-foreground">{row.service}</p></div>
@@ -1301,14 +1281,34 @@ export const app = new Spiceflow()
             {analytics.credentials.length === 0 ? (
               <div className="flex items-center gap-3 rounded-xl bg-muted/25 px-4 py-5"><span className="grid size-9 shrink-0 place-items-center rounded-xl bg-background text-muted-foreground"><KeyRound className="size-4" /></span><div><p className="text-xs font-semibold">No credential usage to report</p><p className="mt-1 text-xs text-muted-foreground">Usage is aggregated without retaining request data.</p></div></div>
             ) : (
-              <div className="overflow-x-auto">
-                <Table><TableHeader><TableRow><TableHead>Credential</TableHead><TableHead>Requests</TableHead><TableHead>Success</TableHead><TableHead>Avg. latency</TableHead></TableRow></TableHeader>
-                  <TableBody>{analytics.credentials.map((row) => <TableRow key={row.credentialId}>
-                    <TableCell><a href={'/vault/credentials/' + row.credentialId} className="font-mono text-xs font-semibold underline-offset-4 hover:text-primary hover:underline">{row.credentialName}</a><p className="mt-1 text-[11px] text-muted-foreground">{row.service}</p></TableCell>
-                    <TableCell className="tabular-nums">{number.format(row.requests)}</TableCell><TableCell className="tabular-nums">{consumerRate(row.successes, row.requests)}%</TableCell><TableCell className="tabular-nums">{row.averageLatencyMs} ms</TableCell>
-                  </TableRow>)}</TableBody>
-                </Table>
-              </div>
+              <>
+                <div className="hidden overflow-x-auto lg:block">
+                  <Table><TableHeader><TableRow><TableHead>Credential</TableHead><TableHead>Requests</TableHead><TableHead>Success</TableHead><TableHead>Avg. latency</TableHead></TableRow></TableHeader>
+                    <TableBody>{analytics.credentials.map((row) => <TableRow key={row.credentialId}>
+                      <TableCell><a href={'/vault/credentials/' + row.credentialId} className="font-mono text-xs font-semibold underline-offset-4 hover:text-primary hover:underline">{row.credentialName}</a><p className="mt-1 text-[11px] text-muted-foreground">{row.service}</p></TableCell>
+                      <TableCell className="tabular-nums">{number.format(row.requests)}</TableCell><TableCell className="tabular-nums">{consumerRate(row.successes, row.requests)}%</TableCell><TableCell className="tabular-nums">{row.averageLatencyMs} ms</TableCell>
+                    </TableRow>)}</TableBody>
+                  </Table>
+                </div>
+                <div className="grid gap-2.5 lg:hidden">
+                  {analytics.credentials.map((row) => (
+                    <a key={row.credentialId} href={'/vault/credentials/' + row.credentialId} className="block min-w-0 rounded-xl border border-border bg-background p-3.5 transition-colors active:bg-muted/50">
+                      <div className="flex min-w-0 items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="break-all font-mono text-xs font-semibold">{row.credentialName}</p>
+                          <p className="mt-1 text-xs text-muted-foreground">{row.service}</p>
+                        </div>
+                        <span className="shrink-0 rounded-full border border-border px-2 py-1 text-[10px] font-medium tabular-nums">{consumerRate(row.successes, row.requests)}% success</span>
+                      </div>
+                      <div className="mt-3 grid grid-cols-3 gap-2 border-t border-border/70 pt-3">
+                        <div className="min-w-0"><p className="text-[10px] text-muted-foreground">Requests</p><p className="mt-1 truncate text-sm font-semibold tabular-nums">{number.format(row.requests)}</p></div>
+                        <div className="min-w-0"><p className="text-[10px] text-muted-foreground">Success</p><p className="mt-1 truncate text-sm font-semibold tabular-nums">{consumerRate(row.successes, row.requests)}%</p></div>
+                        <div className="min-w-0"><p className="text-[10px] text-muted-foreground">Avg. latency</p><p className="mt-1 truncate text-sm font-semibold tabular-nums">{row.averageLatencyMs} ms</p></div>
+                      </div>
+                    </a>
+                  ))}
+                </div>
+              </>
             )}
           </SectionCard>
         </div>
@@ -1479,7 +1479,7 @@ function AuditTable({ rows }: { rows: Awaited<ReturnType<typeof listAudit>> }) {
   if (rows.length === 0) return <p className="text-sm text-muted-foreground">No activity yet.</p>
   return (
     <>
-      <div className="hidden overflow-x-auto sm:block">
+      <div className="hidden overflow-x-auto lg:block">
         <Table>
           <TableHeader><TableRow><TableHead>When</TableHead><TableHead>Action</TableHead><TableHead>Credential</TableHead><TableHead>Result</TableHead><TableHead>Actor</TableHead><TableHead>Request detail</TableHead></TableRow></TableHeader>
           <TableBody>
@@ -1496,7 +1496,7 @@ function AuditTable({ rows }: { rows: Awaited<ReturnType<typeof listAudit>> }) {
           </TableBody>
         </Table>
       </div>
-      <div className="grid gap-3 sm:hidden">
+      <div className="grid gap-3 lg:hidden">
         {rows.map((r) => (
           <article key={r.id} className="min-w-0 space-y-3 rounded-xl border border-border bg-card p-3">
             <div className="flex min-w-0 items-start justify-between gap-3">

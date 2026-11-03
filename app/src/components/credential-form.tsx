@@ -469,7 +469,7 @@ export function CredentialForm({
         {stepError && <p role="alert" aria-live="polite" className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{stepError}</p>}
         {errorMessage && <p role="alert" aria-live="polite" className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{errorMessage}</p>}
 
-        <div className="sticky bottom-0 -mx-3 flex flex-col-reverse gap-2 border-t border-border bg-background/95 px-3 py-3 backdrop-blur sm:static sm:mx-0 sm:flex-row sm:items-center sm:justify-between sm:border-0 sm:bg-transparent sm:p-0">
+        <div className="sticky bottom-[calc(4.25rem+env(safe-area-inset-bottom))] z-20 -mx-3 flex flex-col-reverse gap-2 border-t border-border bg-background/95 px-3 py-3 backdrop-blur sm:static sm:mx-0 sm:flex-row sm:items-center sm:justify-between sm:border-0 sm:bg-transparent sm:p-0">
           <div>
             {step > 1 && (
               <Button type="button" variant="outline" className="w-full sm:w-auto" disabled={saving || validating} onClick={() => {
