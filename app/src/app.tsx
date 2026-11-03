@@ -31,6 +31,7 @@ import { linkHost, readStoredDoc, type CredentialDoc } from './lib/credential-do
 import { KeyRound, LayoutDashboard, Plus, ChartNoAxesCombined, ShieldCheck, Settings as SettingsIcon, ClipboardList, Workflow, LogOut, Activity, Clock3, CheckCircle2, AlertTriangle, ChevronRight, LockKeyhole, ArrowUpRight, Fingerprint, Search, Gauge, Globe } from 'lucide-react'
 import { getUsageAnalytics, listCredentialIntegrationMetadata, listNotifications, listCredentialValidationHistory, loadVaultPreferences, runScheduledCredentialValidation, unreadNotificationCount } from './lib/vault-observability.ts'
 import { SectionCard } from './components/ui/section-card.tsx'
+import { cleanupRunnerRateLimitEvents } from './lib/runner-rate-limit.ts'
 import { NotificationBell } from './components/notification-actions.tsx'
 import { AddExternalForm, CredentialControls, DismissRunnerRequestButton, RenewRegistrationLinkButton, RevokeSessionsButton } from './components/credential-actions.tsx'
 import { RunCredentialValidationButton } from './components/validation-actions.tsx'
@@ -1525,6 +1526,7 @@ export default {
     context.waitUntil((async () => {
       await ensureSchema(env.DB)
       const db = getDb()
+      await Promise.allSettled([cleanupRunnerRateLimitEvents(db)])
       const keys = await loadVaultKeys(db, vaultEnv())
       await runScheduledCredentialValidation(db, keys.encryptionKey)
     })())

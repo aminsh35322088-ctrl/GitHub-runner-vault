@@ -251,8 +251,10 @@ export async function validateWithServiceAdapter(
       const errorValue = body && typeof body === 'object' && !Array.isArray(body)
         ? (body as Record<string, unknown>).error : undefined
       const errorCode = typeof errorValue === 'string' ? errorValue : ''
-      const denied = /missing_scope|not_allowed|insufficient_scope|permission_denied|scope_denied/i.test(errorCode)
-      const rejected = /invalid_auth|invalid_token|token_invalid|token_revoked|token_expired|not_authed|account_inactive/i.test(errorCode)
+      const denied = verification.insufficientPermissionsValues?.some((value) => value === observed) === true
+        || /missing_scope|not_allowed|insufficient_scope|permission_denied|scope_denied/i.test(errorCode)
+      const rejected = verification.invalidValues?.some((value) => value === observed) === true
+        || /invalid_auth|invalid_token|token_invalid|token_revoked|token_expired|not_authed|account_inactive/i.test(errorCode)
       return {
         provider,
         status: denied ? 'insufficient_permissions' : rejected ? 'invalid' : 'unavailable',

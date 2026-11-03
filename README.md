@@ -50,7 +50,7 @@ The runner is **not** a trust boundary. An agent may have elevated permissions a
 | Upstream echoes the token back | Response body and headers are scanned and the token is **redacted** (raw, URL-encoded, JSON-escaped, base64). |
 | Agent tricks the owner into a bad setup | Models only *propose* a name and setup notes. The **owner** chooses hosts, auth header, lifetime and visibility. Notes are shown as plain text with the real hostname next to each link. |
 | Someone else gets a runner session | Bootstrap requires the deployment-pinned `repository_owner_id`, exact `main` ref, `rdc-lab.yml` `workflow_ref`, and an allowed event. The first repository ID is atomically pinned in D1; later runs must match it. Pull-request events are refused. |
-| Stolen session | 30-minute sessions, rate limits, append-only audit log, and an owner-side **revoke all sessions** button. |
+| Stolen session | 30-minute sessions, atomic D1 sliding-window limits, append-only audit log, and an owner-side **revoke all sessions** button. |
 | Someone else logs in to the owner UI | Sign-in uses a **private GitHub App created by you** and is restricted to **one numeric account id** (the app's creator); cookie sessions only. |
 | Agent edits the vault code | The vault runs as a separate Cloudflare Worker. |
 
@@ -237,7 +237,9 @@ Sign in at `https://<origin>/login` with the owner GitHub account.
 | `/vault/integrations` | Owner view of provider destinations and supported CLI adapters. |
 | Global header bell | Unread count, recent Vault events including new Runner credential requests, mark-read and mark-all-read actions on every panel page. No separate notification page or Telegram delivery. |
 | `/vault/audit` | Append-only audit log (database triggers block updates and deletes). |
-| `/vault/settings` | Validation interval, default lifetime/visibility, proxy timeout, analytics/notification retention, runner session revocation and metadata-only external entries. |
+| `/vault/settings` | Validation interval, default lifetime/visibility, proxy timeout, per-credential proxy/session/registration throughput limits, analytics/notification retention, runner session revocation and metadata-only external entries. |
+
+Runner traffic limits are owner-configurable in **Settings → Runner traffic limits**. Defaults are 30 proxy calls per credential per minute, 20 OIDC sessions per hour and 10 credential-registration requests per hour; each has a bounded adjustable range. D1 reserves quota slots atomically before a proxy request or registration is accepted, so concurrent bursts cannot all pass a stale count. Proxy quotas use the credential's immutable database ID rather than its display name; deleting a credential cascades its old reservations. Audit, usage and last-used metadata are persisted through the Worker's background lifecycle hook after the response, while the atomic D1 reservation remains the source of truth for rate limiting.
 
 ## Deployment
 

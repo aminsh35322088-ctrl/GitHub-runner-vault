@@ -311,6 +311,9 @@ const vaultPreferencesSchema = z.object({
   defaultVisible: z.boolean(),
   defaultLifetime: z.enum(['permanent', 'temporary']),
   proxyTimeoutMs: z.number().int().min(5_000).max(30_000),
+  proxyRequestsPerMinute: z.number().int().min(1).max(600),
+  runnerSessionsPerHour: z.number().int().min(1).max(120),
+  runnerRegistrationsPerHour: z.number().int().min(1).max(60),
 })
 
 export async function saveVaultPreferencesAction(input: VaultPreferences) {

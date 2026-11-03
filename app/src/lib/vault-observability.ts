@@ -6,7 +6,6 @@ import { readStoredDoc } from './credential-docs.ts'
 import { readCredentialValue } from './credential-service.ts'
 import { validateProviderToken, type CredentialValidationReport } from './credential-validation.ts'
 import { adapterHost, serviceAdapterFor, serviceAdapterFromDocument } from './service-adapter.ts'
-import { putSetting } from './vault-config.ts'
 
 type Db = ReturnType<typeof getDb>
 
@@ -17,6 +16,9 @@ export type VaultPreferences = {
   defaultVisible: boolean
   defaultLifetime: 'permanent' | 'temporary'
   proxyTimeoutMs: number
+  proxyRequestsPerMinute: number
+  runnerSessionsPerHour: number
+  runnerRegistrationsPerHour: number
 }
 
 export const DEFAULT_VAULT_PREFERENCES: VaultPreferences = {
@@ -26,9 +28,14 @@ export const DEFAULT_VAULT_PREFERENCES: VaultPreferences = {
   defaultVisible: true,
   defaultLifetime: 'permanent',
   proxyTimeoutMs: 20_000,
+  proxyRequestsPerMinute: 30,
+  runnerSessionsPerHour: 20,
+  runnerRegistrationsPerHour: 10,
 }
 
 let preferencesCache: { value: VaultPreferences; expiresAt: number } | null = null
+let preferencesLoad: Promise<VaultPreferences> | null = null
+let preferencesRevision = 0
 const PREFERENCES_CACHE_TTL_MS = 15_000
 
 const SETTING_KEYS = {
@@ -38,6 +45,9 @@ const SETTING_KEYS = {
   defaultVisible: 'default_visible',
   defaultLifetime: 'default_lifetime',
   proxyTimeoutMs: 'proxy_timeout_ms',
+  proxyRequestsPerMinute: 'proxy_requests_per_minute',
+  runnerSessionsPerHour: 'runner_sessions_per_hour',
+  runnerRegistrationsPerHour: 'runner_registrations_per_hour',
 } as const
 
 function intSetting(value: string | null, fallback: number, min: number, max: number): number {
@@ -48,35 +58,69 @@ function intSetting(value: string | null, fallback: number, min: number, max: nu
 
 export async function loadVaultPreferences(db: Db, now = Date.now()): Promise<VaultPreferences> {
   if (preferencesCache && preferencesCache.expiresAt > now) return { ...preferencesCache.value }
-  const keys = Object.values(SETTING_KEYS)
-  const rows = await db.select({ key: schema.vaultSetting.key, value: schema.vaultSetting.value })
-    .from(schema.vaultSetting).where(orm.inArray(schema.vaultSetting.key, keys))
-  const values = new Map(rows.map((row) => [row.key, row.value]))
-  const defaults = DEFAULT_VAULT_PREFERENCES
-  const value: VaultPreferences = {
-    validationIntervalHours: intSetting(values.get(SETTING_KEYS.validationIntervalHours) ?? null, defaults.validationIntervalHours, 1, 24),
-    analyticsRetentionDays: intSetting(values.get(SETTING_KEYS.analyticsRetentionDays) ?? null, defaults.analyticsRetentionDays, 7, 365),
-    notificationRetentionDays: intSetting(values.get(SETTING_KEYS.notificationRetentionDays) ?? null, defaults.notificationRetentionDays, 7, 365),
-    defaultVisible: values.get(SETTING_KEYS.defaultVisible) === undefined ? defaults.defaultVisible : values.get(SETTING_KEYS.defaultVisible) === 'true',
-    defaultLifetime: values.get(SETTING_KEYS.defaultLifetime) === 'temporary' ? 'temporary' : 'permanent',
-    proxyTimeoutMs: intSetting(values.get(SETTING_KEYS.proxyTimeoutMs) ?? null, defaults.proxyTimeoutMs, 5_000, 30_000),
+  if (preferencesLoad) return preferencesLoad.then((value) => ({ ...value }))
+
+  const revision = preferencesRevision
+  const pending = (async (): Promise<VaultPreferences> => {
+    const keys = Object.values(SETTING_KEYS)
+    const rows = await db.select({ key: schema.vaultSetting.key, value: schema.vaultSetting.value })
+      .from(schema.vaultSetting).where(orm.inArray(schema.vaultSetting.key, keys))
+    const values = new Map(rows.map((row) => [row.key, row.value]))
+    const defaults = DEFAULT_VAULT_PREFERENCES
+    return {
+      validationIntervalHours: intSetting(values.get(SETTING_KEYS.validationIntervalHours) ?? null, defaults.validationIntervalHours, 1, 24),
+      analyticsRetentionDays: intSetting(values.get(SETTING_KEYS.analyticsRetentionDays) ?? null, defaults.analyticsRetentionDays, 7, 365),
+      notificationRetentionDays: intSetting(values.get(SETTING_KEYS.notificationRetentionDays) ?? null, defaults.notificationRetentionDays, 7, 365),
+      defaultVisible: values.get(SETTING_KEYS.defaultVisible) === undefined ? defaults.defaultVisible : values.get(SETTING_KEYS.defaultVisible) === 'true',
+      defaultLifetime: values.get(SETTING_KEYS.defaultLifetime) === 'temporary' ? 'temporary' : 'permanent',
+      proxyTimeoutMs: intSetting(values.get(SETTING_KEYS.proxyTimeoutMs) ?? null, defaults.proxyTimeoutMs, 5_000, 30_000),
+      proxyRequestsPerMinute: intSetting(values.get(SETTING_KEYS.proxyRequestsPerMinute) ?? null, defaults.proxyRequestsPerMinute, 1, 600),
+      runnerSessionsPerHour: intSetting(values.get(SETTING_KEYS.runnerSessionsPerHour) ?? null, defaults.runnerSessionsPerHour, 1, 120),
+      runnerRegistrationsPerHour: intSetting(values.get(SETTING_KEYS.runnerRegistrationsPerHour) ?? null, defaults.runnerRegistrationsPerHour, 1, 60),
+    }
+  })()
+  preferencesLoad = pending
+  try {
+    const value = await pending
+    // An older in-flight read must never overwrite a newer save's cache.
+    if (revision === preferencesRevision) preferencesCache = { value, expiresAt: now + PREFERENCES_CACHE_TTL_MS }
+    return { ...value }
+  } finally {
+    if (preferencesLoad === pending) preferencesLoad = null
   }
-  preferencesCache = { value, expiresAt: now + PREFERENCES_CACHE_TTL_MS }
-  return { ...value }
+}
+
+/** Test helper: clear only the isolate-local preferences cache. */
+export function resetVaultPreferencesCache() {
+  preferencesRevision++
+  preferencesCache = null
+  preferencesLoad = null
 }
 
 export async function saveVaultPreferences(db: Db, input: VaultPreferences, now = Date.now()): Promise<void> {
   const parsed: VaultPreferences = {
-    validationIntervalHours: intSetting(String(input.validationIntervalHours), 6, 1, 24),
-    analyticsRetentionDays: intSetting(String(input.analyticsRetentionDays), 90, 7, 365),
-    notificationRetentionDays: intSetting(String(input.notificationRetentionDays), 90, 7, 365),
+    validationIntervalHours: intSetting(String(input.validationIntervalHours), DEFAULT_VAULT_PREFERENCES.validationIntervalHours, 1, 24),
+    analyticsRetentionDays: intSetting(String(input.analyticsRetentionDays), DEFAULT_VAULT_PREFERENCES.analyticsRetentionDays, 7, 365),
+    notificationRetentionDays: intSetting(String(input.notificationRetentionDays), DEFAULT_VAULT_PREFERENCES.notificationRetentionDays, 7, 365),
     defaultVisible: Boolean(input.defaultVisible),
     defaultLifetime: input.defaultLifetime === 'temporary' ? 'temporary' : 'permanent',
-    proxyTimeoutMs: intSetting(String(input.proxyTimeoutMs), 20_000, 5_000, 30_000),
+    proxyTimeoutMs: intSetting(String(input.proxyTimeoutMs), DEFAULT_VAULT_PREFERENCES.proxyTimeoutMs, 5_000, 30_000),
+    proxyRequestsPerMinute: intSetting(String(input.proxyRequestsPerMinute), DEFAULT_VAULT_PREFERENCES.proxyRequestsPerMinute, 1, 600),
+    runnerSessionsPerHour: intSetting(String(input.runnerSessionsPerHour), DEFAULT_VAULT_PREFERENCES.runnerSessionsPerHour, 1, 120),
+    runnerRegistrationsPerHour: intSetting(String(input.runnerRegistrationsPerHour), DEFAULT_VAULT_PREFERENCES.runnerRegistrationsPerHour, 1, 60),
   }
-  for (const [name, key] of Object.entries(SETTING_KEYS) as Array<[keyof VaultPreferences, string]>) {
-    await putSetting(db, key, String(parsed[name]), now)
-  }
+  const writes = Object.entries(SETTING_KEYS).map(([name, key]) =>
+    orm.sql`(${key}, ${String(parsed[name as keyof VaultPreferences])}, ${now})`,
+  )
+  // One parameterized multi-row upsert: one D1 round trip and an atomic update
+  // of the whole preferences snapshot (no partially saved settings).
+  await db.run(orm.sql`
+    INSERT INTO vault_setting (key, value, updated_at)
+    VALUES ${orm.sql.join(writes, orm.sql`, `)}
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `)
+  preferencesRevision++
+  preferencesLoad = null
   preferencesCache = { value: parsed, expiresAt: now + PREFERENCES_CACHE_TTL_MS }
 }
 
@@ -322,6 +366,7 @@ export async function listRunnerIntegrationMetadata(db: Db, now = Date.now()) {
       orm.eq(schema.credential.status, 'active'),
       orm.eq(schema.credential.visible, true),
       orm.eq(schema.credential.externallyManaged, false),
+      orm.or(orm.isNull(schema.credential.expiresAt), orm.gt(schema.credential.expiresAt, now)),
     ))
     .orderBy(schema.credential.service, schema.credential.name)
 

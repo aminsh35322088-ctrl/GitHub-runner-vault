@@ -86,7 +86,8 @@ export async function issueRunnerSession(
 
 export type SessionResult = { ok: true; session: RunnerSession } | { ok: false; error: string }
 
-export async function verifyRunnerSession(key: CryptoKey, token: string, nowMs: number, revokedBeforeMs: number): Promise<SessionResult> {
+/** Verify signature, payload shape and expiry without a D1 lookup. */
+export async function verifyRunnerSessionSignature(key: CryptoKey, token: string, nowMs: number): Promise<SessionResult> {
   const parts = token.split('.')
   if (parts.length !== 3 || parts[0] !== 'rs1' || token.length > 2048) return { ok: false, error: 'invalid session' }
   let valid = false
@@ -104,8 +105,14 @@ export async function verifyRunnerSession(key: CryptoKey, token: string, nowMs: 
   }
   if (typeof session.exp !== 'number' || typeof session.iat !== 'number') return { ok: false, error: 'invalid session' }
   if (session.exp <= nowMs) return { ok: false, error: 'session expired' }
-  if (session.iat <= revokedBeforeMs) return { ok: false, error: 'session revoked' }
   return { ok: true, session }
+}
+
+export async function verifyRunnerSession(key: CryptoKey, token: string, nowMs: number, revokedBeforeMs: number): Promise<SessionResult> {
+  const result = await verifyRunnerSessionSignature(key, token, nowMs)
+  if (!result.ok) return result
+  if (result.session.iat <= revokedBeforeMs) return { ok: false, error: 'session revoked' }
+  return result
 }
 
 export async function getRunnerRevokedBefore(db: Db): Promise<number> {

@@ -144,6 +144,32 @@ export function VaultSettingsForm({ initial }: { initial: VaultPreferences }) {
       </Section>
 
       <Section
+        title="Runner traffic limits"
+        description="Tune throughput per credential and the total OIDC/session and registration rates. Limits remain bounded to protect the Vault from accidental or abusive bursts."
+        icon={<ShieldCheck className="size-[18px]" />}
+      >
+        <Field label="Requests per credential / minute" hint="Applies independently to each credential across all active Runner sessions.">
+          <NativeSelect className="w-full" value={String(value.proxyRequestsPerMinute)} onChange={(event) => update('proxyRequestsPerMinute', Number(event.target.value))}>
+            {[30, 60, 120, 240, 480, 600].map((limit) => <option value={limit} key={limit}>{limit} requests / minute</option>)}
+          </NativeSelect>
+        </Field>
+        <Field label="New Runner sessions / hour" hint="Limits OIDC-to-session exchanges across the trusted Runner policy.">
+          <NativeSelect className="w-full" value={String(value.runnerSessionsPerHour)} onChange={(event) => update('runnerSessionsPerHour', Number(event.target.value))}>
+            {[10, 20, 40, 60, 80, 120].map((limit) => <option value={limit} key={limit}>{limit} sessions / hour</option>)}
+          </NativeSelect>
+        </Field>
+        <Field label="Credential registrations / hour" hint="Limits owner-inbox requests from trusted Runner workflows.">
+          <NativeSelect className="w-full" value={String(value.runnerRegistrationsPerHour)} onChange={(event) => update('runnerRegistrationsPerHour', Number(event.target.value))}>
+            {[5, 10, 20, 30, 40, 60].map((limit) => <option value={limit} key={limit}>{limit} requests / hour</option>)}
+          </NativeSelect>
+        </Field>
+        <div className="flex items-start gap-2.5 rounded-xl border border-border/70 bg-muted/25 p-3">
+          <Gauge className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+          <div><p className="text-xs font-semibold">Per-credential isolation</p><p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">A busy credential does not consume another credential’s proxy allowance. Raising a limit never exposes the stored token to a Runner.</p></div>
+        </div>
+      </Section>
+
+      <Section
         title="Data retention"
         description="Retention limits apply to aggregate usage records, validation history and in-panel notifications. Secret values and request payloads are not analytics data."
         icon={<Database className="size-[18px]" />}

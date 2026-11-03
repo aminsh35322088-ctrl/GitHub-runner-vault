@@ -22,6 +22,8 @@ export type ServiceAdapter = {
     permissionsPointer?: string
     successPointer?: string
     successValue?: string | number | boolean
+    invalidValues?: Array<string | number | boolean>
+    insufficientPermissionsValues?: Array<string | number | boolean>
   }
   defaultHeaders?: Record<string, string>
   cliTools: ServiceAdapterTool[]
@@ -42,6 +44,14 @@ const adapters: Record<string, ServiceAdapter> = {
     apiBaseUrl: 'https://api.cloudflare.com/client/v4',
     authHeader: 'Authorization',
     authScheme: 'Bearer',
+    validation: {
+      method: 'GET',
+      path: '/user/tokens/verify',
+      identityPointer: '/result/id',
+      successPointer: '/result/status',
+      successValue: 'active',
+      invalidValues: ['disabled', 'expired'],
+    },
     cliTools: [{
       id: 'wrangler', label: 'Wrangler CLI', binary: 'wrangler',
       integration: 'base-url-env', variable: 'CLOUDFLARE_API_BASE_URL',
@@ -156,6 +166,16 @@ const adapters: Record<string, ServiceAdapter> = {
   },
 }
 
+function validationValues(value: unknown): Array<string | number | boolean> | null {
+  if (!Array.isArray(value) || value.length > 16) return null
+  if (!value.every((entry) =>
+    typeof entry === 'boolean' ||
+    (typeof entry === 'number' && Number.isFinite(entry)) ||
+    (typeof entry === 'string' && entry.length > 0 && entry.length <= 120)
+  )) return null
+  return value as Array<string | number | boolean>
+}
+
 export function serviceAdapterFromDocument(document: unknown): ServiceAdapter | null {
   if (!document || typeof document !== 'object' || Array.isArray(document)) return null
   const raw = (document as Record<string, unknown>).service_adapter
@@ -163,12 +183,18 @@ export function serviceAdapterFromDocument(document: unknown): ServiceAdapter | 
   const adapter = raw as Record<string, unknown>
   const validation = adapter.validation && typeof adapter.validation === 'object'
     ? adapter.validation as Record<string, unknown> : null
+  const invalidValues = validation && Object.hasOwn(validation, 'invalid_values')
+    ? validationValues(validation.invalid_values) : undefined
+  const insufficientPermissionsValues = validation && Object.hasOwn(validation, 'insufficient_permissions_values')
+    ? validationValues(validation.insufficient_permissions_values) : undefined
   const tools = Array.isArray(adapter.cli_tools) ? adapter.cli_tools : []
   if (
     typeof adapter.api_base_url !== 'string' ||
     typeof adapter.auth_header !== 'string' ||
     !['Bearer', 'Token', 'Raw'].includes(String(adapter.auth_scheme)) ||
-    (validation && (!['GET', 'HEAD'].includes(String(validation.method)) || typeof validation.path !== 'string'))
+    (validation && (!['GET', 'HEAD'].includes(String(validation.method)) || typeof validation.path !== 'string')) ||
+    (validation && Object.hasOwn(validation, 'invalid_values') && invalidValues === null) ||
+    (validation && Object.hasOwn(validation, 'insufficient_permissions_values') && insufficientPermissionsValues === null)
   ) return null
   const cliTools: ServiceAdapterTool[] = tools.flatMap((entry): ServiceAdapterTool[] => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
@@ -200,6 +226,8 @@ export function serviceAdapterFromDocument(document: unknown): ServiceAdapter | 
       ...(typeof validation.permissions_pointer === 'string' ? { permissionsPointer: validation.permissions_pointer } : {}),
       ...(typeof validation.success_pointer === 'string' ? { successPointer: validation.success_pointer } : {}),
       ...(['string', 'number', 'boolean'].includes(typeof validation.success_value) ? { successValue: validation.success_value as string | number | boolean } : {}),
+      ...(invalidValues !== undefined && invalidValues !== null ? { invalidValues } : {}),
+      ...(insufficientPermissionsValues !== undefined && insufficientPermissionsValues !== null ? { insufficientPermissionsValues } : {}),
     } } : {}),
     ...(defaultHeaders ? { defaultHeaders } : {}),
     cliTools,

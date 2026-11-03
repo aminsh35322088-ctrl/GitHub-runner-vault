@@ -28,6 +28,29 @@ describe('built-in CLI adapter mappings', () => {
     }))
   })
 
+  test('configures Cloudflare token verification from its documented endpoint and maps all explicit token states', async () => {
+    const cloudflare = serviceAdapterFor('Cloudflare')!
+    expect(cloudflare.validation).toMatchObject({
+      method: 'GET', path: '/user/tokens/verify', successPointer: '/result/status',
+      successValue: 'active', invalidValues: ['disabled', 'expired'],
+    })
+
+    const token = 'cloudflare-test-token-that-must-not-leak'
+    const activeFetch = vi.fn<typeof fetch>().mockResolvedValue(json({
+      success: true, result: { id: 'provider-token-id', status: 'active' },
+    }))
+    const active = await validateWithServiceAdapter('Cloudflare', token, cloudflare, ['api.cloudflare.com'], activeFetch, 1234)
+    expect(active).toMatchObject({ status: 'valid', identity: 'provider-token-id', checkedAt: 1234 })
+    expect(activeFetch).toHaveBeenCalledWith('https://api.cloudflare.com/client/v4/user/tokens/verify', expect.objectContaining({ method: 'GET', redirect: 'manual' }))
+    expect(JSON.stringify(active)).not.toContain(token)
+
+    for (const status of ['disabled', 'expired']) {
+      const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(json({ success: true, result: { id: 'provider-token-id', status } }))
+      const report = await validateWithServiceAdapter('Cloudflare', token, cloudflare, ['api.cloudflare.com'], fetchFn)
+      expect(report.status).toBe('invalid')
+    }
+  })
+
   test('retains the documented Northflank token environment variable', () => {
     const adapter = serviceAdapterFor('Northflank')
     expect(adapter?.cliTools).toContainEqual(expect.objectContaining({
@@ -41,6 +64,7 @@ describe('built-in CLI adapter mappings', () => {
         api_base_url: 'https://api.custom.dev',
         auth_header: 'Authorization',
         auth_scheme: 'Bearer',
+        validation: { method: 'GET', path: '/verify', success_pointer: '/status', success_value: 'ok', invalid_values: ['revoked', 'expired'] },
         cli_tools: [{
           id: 'custom-cli', label: 'Custom CLI', binary: 'custom',
           integration: 'base-url-env', variable: 'CUSTOM_API_BASE_URL',
@@ -51,6 +75,7 @@ describe('built-in CLI adapter mappings', () => {
     expect(adapter?.cliTools[0]).toMatchObject({
       id: 'custom-cli', variable: 'CUSTOM_API_BASE_URL', tokenVariable: 'CUSTOM_API_TOKEN',
     })
+    expect(adapter?.validation).toMatchObject({ successPointer: '/status', successValue: 'ok', invalidValues: ['revoked', 'expired'] })
   })
 })
 

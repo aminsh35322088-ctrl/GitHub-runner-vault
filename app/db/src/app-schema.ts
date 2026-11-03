@@ -155,6 +155,19 @@ export const vaultSetting = sqliteCore.sqliteTable('vault_setting', {
   updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
 })
 
+// Atomic sliding-window reservations for Runner limits. Proxy rows reference the
+// current credential ID so deleting/replacing a credential cannot inherit its quota.
+export const runnerRateLimitEvent = sqliteCore.sqliteTable('runner_rate_limit_event', {
+  id: sqliteCore.text('id').primaryKey().notNull(),
+  scope: sqliteCore.text('scope', { enum: ['session', 'registration', 'proxy'] }).notNull(),
+  subject: sqliteCore.text('subject').notNull(),
+  credentialId: sqliteCore.text('credential_id').references(() => credential.id, { onDelete: 'cascade' }),
+  createdAt: epochMs('created_at').notNull(),
+}, (table) => [
+  sqliteCore.index('runner_rate_limit_event_scope_subject_at_idx').on(table.scope, table.subject, table.createdAt),
+  sqliteCore.index('runner_rate_limit_event_created_at_idx').on(table.createdAt),
+])
+
 export const vaultNotification = sqliteCore.sqliteTable('vault_notification', {
   id: sqliteCore.text('id').primaryKey().notNull(),
   dedupeKey: sqliteCore.text('dedupe_key').notNull().unique(),

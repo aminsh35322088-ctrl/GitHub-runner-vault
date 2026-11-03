@@ -62,5 +62,13 @@ export const SCHEMA_MIGRATIONS: SchemaMigration[] = [
       "CREATE INDEX IF NOT EXISTS credential_audit_action_at_idx ON credential_audit (action, at)",
       "CREATE INDEX IF NOT EXISTS credential_audit_action_name_at_idx ON credential_audit (action, credential_name, at)"
     ]
+  },
+  {
+    "id": "0006_runner_rate_limit_events",
+    "statements": [
+      "CREATE TABLE runner_rate_limit_event (\n  id text PRIMARY KEY NOT NULL,\n  scope text NOT NULL CHECK (scope IN ('session', 'registration', 'proxy')),\n  subject text NOT NULL CHECK (length(subject) BETWEEN 1 AND 160),\n  credential_id text,\n  created_at integer NOT NULL,\n  CONSTRAINT fk_runner_rate_limit_event_credential\n    FOREIGN KEY (credential_id) REFERENCES credential(id) ON DELETE CASCADE\n)",
+      "CREATE INDEX runner_rate_limit_event_scope_subject_at_idx\n  ON runner_rate_limit_event (scope, subject, created_at)",
+      "CREATE INDEX runner_rate_limit_event_created_at_idx\n  ON runner_rate_limit_event (created_at)"
+    ]
   }
 ]

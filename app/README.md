@@ -74,6 +74,7 @@ The dashboard uses compact mobile bottom navigation, responsive credential and a
 3. Set the Worker URL as the `VAULT_URL` Actions variable in the trusted runner repository and grant the workflow `id-token: write`.
 
 The Worker creates its tables on first request. The Deploy Button provisions D1 automatically; the Wrangler deploy helper also resolves and binds the configured D1 database for CLI and Git-connected deployments.
+Schema changes are embedded from `db/drizzle-app/*.sql` and applied once by the first Worker request. Runner sessions, registrations and per-credential proxy calls use atomic D1 sliding-window reservations; stale reservation rows are cleaned up by the existing 15-minute scheduled task. Do not manually run the embedded migration files against a live database while the Worker is serving traffic.
 
 For the threat model and runner integration guide, see the [upstream README](https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/blob/main/README.md), [security notes](https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/blob/main/SECURITY.md) and [runner usage guide](https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/blob/main/docs/runner-usage.md).
 

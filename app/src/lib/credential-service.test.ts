@@ -8,7 +8,7 @@ import {
   storeCredentialValue, MAX_TEMPORARY_MS,
 } from './credential-service.ts'
 import { consumeEnrollmentLink, listLatestRegistrationLinks, peekEnrollmentLink } from './enrollment.ts'
-import { createNotification, getUsageAnalytics, listCredentialValidationHistory, listNotifications, listRunnerIntegrationMetadata, listUnreadRegistrationNotificationIds, markNotificationIdsRead, markRegistrationNotificationsRead, recordCredentialUsage, runScheduledCredentialValidation, validateStoredCredentialNow } from './vault-observability.ts'
+import { createNotification, DEFAULT_VAULT_PREFERENCES, getUsageAnalytics, listCredentialValidationHistory, listNotifications, listRunnerIntegrationMetadata, listUnreadRegistrationNotificationIds, loadVaultPreferences, markNotificationIdsRead, markRegistrationNotificationsRead, recordCredentialUsage, resetVaultPreferencesCache, runScheduledCredentialValidation, saveVaultPreferences, validateStoredCredentialNow } from './vault-observability.ts'
 
 const KEY_B64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
 const SECRET = 'cfut_SUPERSECRETVALUE_123456789'
@@ -52,6 +52,35 @@ async function activeCredential(opts: Partial<Parameters<typeof storeCredentialV
   if (!stored.ok) throw new Error(`store failed: ${stored.error}`)
   return { db, key, now, name, id: req.value.credentialId }
 }
+
+describe('Vault preferences', () => {
+  test('loads safe defaults and atomically persists all tunable traffic limits', async () => {
+    const { db, now } = await setup()
+    resetVaultPreferencesCache()
+    try {
+      expect(await loadVaultPreferences(db, now)).toMatchObject(DEFAULT_VAULT_PREFERENCES)
+      const next = {
+        ...DEFAULT_VAULT_PREFERENCES,
+        proxyTimeoutMs: 15_000,
+        proxyRequestsPerMinute: 240,
+        runnerSessionsPerHour: 80,
+        runnerRegistrationsPerHour: 40,
+        validationIntervalHours: 3,
+        analyticsRetentionDays: 30,
+        notificationRetentionDays: 60,
+        defaultVisible: false,
+        defaultLifetime: 'temporary' as const,
+      }
+      await saveVaultPreferences(db, next, now + 1)
+      expect(await loadVaultPreferences(db, now + 2)).toEqual(next)
+
+      resetVaultPreferencesCache()
+      expect(await loadVaultPreferences(db, now + 3)).toEqual(next)
+    } finally {
+      resetVaultPreferencesCache()
+    }
+  })
+})
 
 describe('registration requests', () => {
   test('resolving a request marks only that request notification as read', async () => {
@@ -489,6 +518,12 @@ describe('runner registry visibility rules', () => {
     await setVisibility(db, id, true, now)
     await setEnabled(db, id, false, now)
     expect((await listRunnerIntegrationMetadata(db, now)).some((item) => item.name === name)).toBe(false)
+  })
+
+  test('expired temporary credentials are excluded from the CLI integration query', async () => {
+    const { db, now, name } = await activeCredential({ lifetime: 'temporary', expiresAt: Date.now() + 1_000 })
+    expect((await listRunnerIntegrationMetadata(db, now)).some((item) => item.name === name)).toBe(true)
+    expect((await listRunnerIntegrationMetadata(db, now + 1_001)).some((item) => item.name === name)).toBe(false)
   })
 
   test('permanent and temporary credentials both appear when active and visible', async () => {
