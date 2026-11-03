@@ -186,7 +186,7 @@ export function VaultSettingsForm({ initial }: { initial: VaultPreferences }) {
         </Field>
       </Section>
 
-      <div className="sticky bottom-0 z-10 -mx-4 border-t border-border bg-background/95 px-4 py-3 backdrop-blur sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0 sm:py-0">
+      <div className="sticky bottom-[calc(4.25rem+env(safe-area-inset-bottom))] z-20 -mx-4 border-t border-border bg-background/95 px-4 py-3 backdrop-blur sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0 sm:py-0">
         <div className="flex flex-col gap-3 rounded-2xl border border-border bg-card p-3 sm:flex-row sm:items-center sm:justify-between sm:px-4">
           <div className="flex min-w-0 items-start gap-2.5">
             <span className={dirty ? 'mt-1 size-2 shrink-0 rounded-full bg-amber-500' : 'mt-1 size-2 shrink-0 rounded-full bg-emerald-500'} />
