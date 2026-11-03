@@ -218,7 +218,13 @@ test('serve runs a Cloudflare Wrangler loopback bridge and keeps the real API to
   child.stdout.on('data', (chunk) => {
     stdout += chunk.toString()
     const match = stdout.match(/Listening only on 127\.0\.0\.1:(\d+)/)
-    if (match && stdout.includes('CLOUDFLARE_API_BASE_URL') && stdout.includes('CLOUDFLARE_API_TOKEN') && !port) {
+    if (
+      match
+      && stdout.includes('Use: export CLOUDFLARE_API_BASE_URL=')
+      && stdout.includes('export CLOUDFLARE_API_TOKEN="vault-local-placeholder"')
+      && stdout.includes('Then run: wrangler')
+      && !port
+    ) {
       port = Number(match[1])
       resolveReady()
     }
