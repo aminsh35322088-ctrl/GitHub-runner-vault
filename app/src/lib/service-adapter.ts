@@ -1,4 +1,5 @@
 import type { AuthScheme } from './credential-input.ts'
+import { presetForService } from './presets.ts'
 
 export type ServiceAdapterTool = {
   id: string
@@ -290,6 +291,35 @@ export function adapterHost(adapter: ServiceAdapter): string | null {
   } catch {
     return null
   }
+}
+
+/**
+ * The adapter that is allowed to act for a service — the trust decision every
+ * consumer (owner policy, validation, runner delivery) must share.
+ *
+ * A registration document is model-written and only self-attested as
+ * "verified", so it never outranks code:
+ *  - a built-in adapter for the service always wins over the document's;
+ *  - when the service has a curated preset, any adapter whose API host is not
+ *    one of the preset's hosts is rejected outright (returns null), so a
+ *    document cannot steer a real token to an attacker-chosen host;
+ *  - document adapters remain available for services with no preset, where
+ *    the documentation-host check in credential-docs.ts is the gate.
+ */
+export function effectiveServiceAdapter(service: string, document?: unknown): ServiceAdapter | null {
+  const preset = presetForService(service)
+  const builtin = serviceAdapterFor(service)
+  if (builtin) {
+    const host = adapterHost(builtin)
+    return preset && (!host || !preset.hosts.includes(host)) ? null : builtin
+  }
+  const fromDocument = serviceAdapterFromDocument(document)
+  if (!fromDocument) return null
+  if (preset) {
+    const host = adapterHost(fromDocument)
+    if (!host || !preset.hosts.includes(host)) return null
+  }
+  return fromDocument
 }
 
 export function serviceAdapterCatalog(): Array<{ service: string; apiBaseUrl: string; cliTools: ServiceAdapterTool[] }> {

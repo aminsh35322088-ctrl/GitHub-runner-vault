@@ -15,7 +15,7 @@ import { normalizeAllowedHosts, normalizeAuthStyle, readAllowedHosts, reservedNa
 import { availability, publicReason } from './credential-policy.ts'
 import { createEnrollmentLink, discardEnrollmentLink, type CreatedLink } from './enrollment.ts'
 import { defaultPurposeForService } from './presets.ts'
-import { adapterHost, serviceAdapterFor, serviceAdapterFromDocument } from './service-adapter.ts'
+import { adapterHost, effectiveServiceAdapter, serviceAdapterFor } from './service-adapter.ts'
 
 type Db = ReturnType<typeof getDb>
 
@@ -645,7 +645,7 @@ export async function readCredentialValue(
   if (row.externallyManaged || row.valueEncrypted === null || row.valueIv === null) return { ok: false, reason: 'unavailable' }
   const raw = await decryptCredentialValue(key, row.id, row.keyVersion, row.valueEncrypted, row.valueIv)
   const bundle = decodeCredentialBundle(raw)
-  const adapter = serviceAdapterFromDocument(readStoredDoc(row.docJson)) ?? serviceAdapterFor(row.service)
+  const adapter = effectiveServiceAdapter(row.service, readStoredDoc(row.docJson))
   return {
     ok: true,
     value: bundle.value,
