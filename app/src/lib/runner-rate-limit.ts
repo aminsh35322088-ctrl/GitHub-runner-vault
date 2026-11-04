@@ -2,7 +2,7 @@ import * as orm from 'drizzle-orm'
 import { getDb, schema } from 'db'
 
 type Db = ReturnType<typeof getDb>
-export type RunnerRateLimitScope = 'session' | 'registration' | 'proxy'
+export type RunnerRateLimitScope = 'session' | 'session_attempt' | 'registration' | 'proxy'
 
 export interface RunnerRateLimitReservation {
   scope: RunnerRateLimitScope

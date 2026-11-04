@@ -5,7 +5,7 @@ import { importEncryptionKey } from './credential-crypto.ts'
 import { deleteCredential, requestRegistration, storeCredentialValue, setEnabled, setVisibility } from './credential-service.ts'
 import { GITHUB_OIDC_ISSUER, type OidcPolicy } from './oidc.ts'
 import { deriveSessionKey, issueRunnerSession, revokeRunnerSessions } from './runner-session.ts'
-import { bearer, readBoundedRequestBody, tryAcquireProxyUploadSlot, MAX_CONCURRENT_PROXY_UPLOADS_PER_ISOLATE, createSession, registry, integrations, requestCredential, useCredential, USE_LIMIT_PER_MINUTE, type RunnerDeps } from './runner-core.ts'
+import { bearer, readBoundedRequestBody, tryAcquireProxyUploadSlot, MAX_CONCURRENT_PROXY_UPLOADS_PER_ISOLATE, createSession, registry, integrations, requestCredential, useCredential, USE_LIMIT_PER_MINUTE, SESSION_ATTEMPT_LIMIT_PER_HOUR, type RunnerDeps } from './runner-core.ts'
 import { DEFAULT_VAULT_PREFERENCES } from './vault-observability.ts'
 import { cleanupRunnerRateLimitEvents, releaseRunnerRateLimitReservation, reserveRunnerRateLimit } from './runner-rate-limit.ts'
 
@@ -238,6 +238,60 @@ describe('authentication', () => {
 
   test('the issuer constant is the real GitHub one', () => {
     expect(GITHUB_OIDC_ISSUER).toBe('https://token.actions.githubusercontent.com')
+  })
+})
+
+describe('session attempt limiting (pre-verification)', () => {
+  const deniedCount = async (d: RunnerDeps) =>
+    (await d.db.select().from(schema.credentialAudit).where(orm.eq(schema.credentialAudit.action, 'session_denied'))).length
+
+  const spendAttempts = async (d: RunnerDeps, subject: string, count: number) => {
+    for (let i = 0; i < count; i++) {
+      const id = await reserveRunnerRateLimit(d.db, {
+        scope: 'session_attempt', subject, now: d.now, windowMs: 3600_000, limit: SESSION_ATTEMPT_LIMIT_PER_HOUR,
+      })
+      expect(id).toBeTruthy()
+    }
+  }
+
+  test('an invalid-token flood from one IP is cut off with 429 and audit writes stop', async () => {
+    const now = Date.now() + 72 * 60 * 60_000
+    const ip = '203.0.113.10'
+    const d = await deps({ now, clientIp: ip })
+    await spendAttempts(d, `ip:${ip}`, SESSION_ATTEMPT_LIMIT_PER_HOUR - 1)
+
+    // The last slot in the budget still goes through verification and its
+    // denial is audited, exactly like a normal rejected token.
+    const before = await deniedCount(d)
+    expect((await createSession(d, 'Bearer aaaa.bbbb.cccc')).status).toBe(401)
+    expect(await deniedCount(d)).toBe(before + 1)
+
+    // Budget spent: the answer is 429 and no further audit row is written.
+    expect(await createSession(d, 'Bearer aaaa.bbbb.cccc')).toEqual({ status: 429, body: { error: 'rate_limited' } })
+    expect(await deniedCount(d)).toBe(before + 1)
+  })
+
+  test('the attempt budget is per client IP, with a shared fallback when the IP is unknown', async () => {
+    const now = Date.now() + 96 * 60 * 60_000
+    const ip = '198.51.100.7'
+    const d = await deps({ now, clientIp: ip })
+    await spendAttempts(d, `ip:${ip}`, SESSION_ATTEMPT_LIMIT_PER_HOUR)
+    expect((await createSession(d, 'Bearer aaaa.bbbb.cccc')).status).toBe(429)
+
+    // A different source IP still has its own budget and is verified (and denied) normally.
+    const other = await deps({ now, clientIp: '198.51.100.8' })
+    expect((await createSession(other, 'Bearer aaaa.bbbb.cccc')).status).toBe(401)
+
+    // No client IP: the shared fallback budget applies instead of no limit at all.
+    const anonymous = await deps({ now })
+    expect((await createSession(anonymous, 'Bearer aaaa.bbbb.cccc')).status).toBe(401)
+  })
+
+  test('a valid OIDC exchange still succeeds when the client IP is known', async () => {
+    const now = Date.now() + 120 * 60 * 60_000
+    const signed = await signedOidcToken(now)
+    const d = await deps({ now, jwks: signed.jwks, clientIp: '203.0.113.99' })
+    expect((await createSession(d, `Bearer ${signed.token}`)).status).toBe(200)
   })
 })
 

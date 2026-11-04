@@ -16,6 +16,13 @@ type Db = ReturnType<typeof getDb>
 export const USE_LIMIT_PER_MINUTE = 30
 export const SESSION_LIMIT_PER_HOUR = 20
 export const REGISTRATION_LIMIT_PER_HOUR = 10
+/**
+ * Session attempts (successful or not) allowed per client IP per hour, checked
+ * before OIDC verification. Legit runners fetch a fresh token per job and retry
+ * rarely, so this is generous headroom over SESSION_LIMIT_PER_HOUR; its job is
+ * to bound the audit writes an unauthenticated flood can cause.
+ */
+export const SESSION_ATTEMPT_LIMIT_PER_HOUR = 120
 
 export type RunnerDeps = {
   db: Db
@@ -26,6 +33,8 @@ export type RunnerDeps = {
   origin: string
   fetchFn: typeof fetch
   now: number
+  /** Client IP as reported by the platform (cf-connecting-ip), when known. */
+  clientIp?: string
   proxyTimeoutMs?: number
   getProxyTimeoutMs?: () => Promise<number>
   getVaultPreferences?: () => Promise<VaultPreferences>
@@ -49,6 +58,17 @@ export async function createSession(deps: RunnerDeps, authorization: string | nu
   const token = bearer(authorization)
   if (!token) return fail(401, 'missing_token')
   if (!deps.policy) return fail(503, 'vault_not_configured')
+  // Bound unauthenticated work before identity verification: every attempt
+  // first reserves a per-IP slot. Without this, a flood of invalid tokens
+  // writes one audit row per request and can exhaust the D1 write budget on
+  // its own. Once the budget is spent the answer is 429 and no audit row is
+  // written. Post-verification denials below stay audited; they are bounded
+  // by this same reservation.
+  const attempt = await reserveRunnerRateLimit(deps.db, {
+    scope: 'session_attempt', subject: deps.clientIp ? `ip:${deps.clientIp}` : 'global',
+    now: deps.now, windowMs: 3600_000, limit: SESSION_ATTEMPT_LIMIT_PER_HOUR,
+  })
+  if (!attempt) return fail(429, 'rate_limited')
   const verified = await verifyGithubOidc(token, deps.policy, deps.jwks, deps.now)
   if (!verified.ok) {
     await audit(deps.db, { action: 'session_denied', actor: 'runner', result: 'denied', detail: verified.error, now: deps.now })

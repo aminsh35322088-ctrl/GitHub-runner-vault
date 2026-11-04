@@ -10,16 +10,32 @@ import { cachedJwksSource } from './lib/oidc.ts'
 import { loadRunnerPolicy } from './lib/runner-policy.ts'
 import { deriveSessionKey } from './lib/runner-session.ts'
 import { createSession, registry, integrations, requestCredential, useCredential, type RunnerDeps } from './lib/runner-core.ts'
+import { CLOUDFLARE_IP_ADDRESS_HEADERS } from './lib/auth-config.ts'
 import { getRequestOrigin } from './db.ts'
 import { loadVaultPreferences } from './lib/vault-observability.ts'
 
 const jwks = cachedJwksSource()
+
+/**
+ * Client IP for pre-verification rate limiting. Cloudflare sets
+ * cf-connecting-ip at the edge, so it is not client-spoofable; anything that
+ * is not shaped like an IPv4/IPv6 address is treated as unknown and the core
+ * falls back to a single shared budget.
+ */
+function clientIp(request: Request): string | undefined {
+  for (const header of CLOUDFLARE_IP_ADDRESS_HEADERS) {
+    const value = request.headers.get(header)?.trim()
+    if (value && value.length <= 45 && /^[0-9a-fA-F.:]+$/.test(value)) return value
+  }
+  return undefined
+}
 
 async function buildDeps(request: Request, includeOidcPolicy = false, waitUntil?: RunnerDeps['waitUntil']): Promise<RunnerDeps> {
   const e = env as unknown as Record<string, unknown>
   const origin = getRequestOrigin(request)
   const db = getDb()
   const keys = await loadVaultKeys(db, e as VaultEnv)
+  const ip = clientIp(request)
   return {
     db,
     encryptionKey: keys.encryptionKey,
@@ -29,6 +45,7 @@ async function buildDeps(request: Request, includeOidcPolicy = false, waitUntil?
     origin,
     fetchFn: fetch,
     now: Date.now(),
+    ...(ip ? { clientIp: ip } : {}),
     getVaultPreferences: () => loadVaultPreferences(db),
     ...(waitUntil ? { waitUntil } : {}),
   }
