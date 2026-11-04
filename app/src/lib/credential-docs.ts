@@ -82,6 +82,17 @@ const serviceAdapterSchema = z.object({
   auth_header: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9-]{0,63}$/),
   auth_scheme: z.enum(['Bearer', 'Token', 'Raw']),
   default_headers: z.partialRecord(z.enum(['anthropic-version', 'x-api-version', 'x-github-api-version']), z.string().trim().min(1).max(100)).optional(),
+  credential_fields: z.array(z.object({
+    id: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/),
+    label: text(100),
+    required: z.boolean().default(true),
+    secret: z.boolean().default(true),
+  }).strict()).max(12).optional(),
+  auth_field_headers: z.array(z.object({
+    field: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/),
+    header: z.string().regex(/^[A-Za-z][A-Za-z0-9-]{0,63}$/),
+    scheme: z.enum(['Bearer', 'Token', 'Raw']),
+  }).strict()).max(12).optional(),
   validation: z.object({
     method: z.enum(['GET', 'HEAD']),
     path: z.string().min(1).max(200).regex(/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$/),
@@ -173,6 +184,25 @@ export const credentialDocSchema = z.object({
     }
     if (doc.service_adapter.cli_tools.some((tool) => tool.integration === 'host-flag' && !tool.flag)) {
       ctx.addIssue({ code: 'custom', path: ['service_adapter', 'cli_tools'], message: 'host-flag integration needs a documented flag' })
+    }
+    const fields = doc.service_adapter.credential_fields ?? []
+    const fieldIds = new Set(fields.map((field) => field.id))
+    if (fieldIds.size !== fields.length) {
+      ctx.addIssue({ code: 'custom', path: ['service_adapter', 'credential_fields'], message: 'credential field IDs must be unique' })
+    }
+    const mappedHeaders = new Set<string>()
+    for (const [index, mapping] of (doc.service_adapter.auth_field_headers ?? []).entries()) {
+      if (!fieldIds.has(mapping.field)) {
+        ctx.addIssue({ code: 'custom', path: ['service_adapter', 'auth_field_headers', index, 'field'], message: 'auth field mapping must reference a declared credential field' })
+      }
+      const header = mapping.header.toLowerCase()
+      if (mappedHeaders.has(header) || header === doc.service_adapter.auth_header.toLowerCase()) {
+        ctx.addIssue({ code: 'custom', path: ['service_adapter', 'auth_field_headers', index, 'header'], message: 'auth field headers must be unique and cannot override the primary auth header' })
+      }
+      mappedHeaders.add(header)
+      if (['host', 'cookie', 'set-cookie', 'content-length', 'transfer-encoding', 'connection', 'proxy-authorization'].includes(header)) {
+        ctx.addIssue({ code: 'custom', path: ['service_adapter', 'auth_field_headers', index, 'header'], message: 'sensitive or hop-by-hop headers cannot carry credential fields' })
+      }
     }
   }
 })

@@ -24,13 +24,14 @@ const REQUEST_HEADERS = new Set([
   'x-github-api-version', 'x-api-version', 'anthropic-version', 'anthropic-workspace-id',
   'x-pinecone-api-version',
 ])
-const RESPONSE_HEADERS = new Set(['content-type', 'etag', 'link', 'retry-after', 'location', 'last-modified', 'cache-control', 'x-github-request-id', 'cf-ray'])
+const RESPONSE_HEADERS = new Set(['content-type', 'etag', 'link', 'retry-after', 'location', 'last-modified', 'cache-control', 'x-github-request-id', 'x-oauth-scopes', 'x-accepted-github-permissions', 'x-ratelimit-remaining', 'x-github-sso', 'cf-ray'])
 
-export type ProxyCredential = { allowedHosts: string[]; authHeader: string; authScheme: AuthScheme }
+export type ProxyCredential = { allowedHosts: string[]; authHeader: string; authScheme: AuthScheme; authFieldHeaders?: Array<{ field: string; header: string; scheme: AuthScheme; required: boolean }> }
 
 export type ProxyInput = {
   credential: ProxyCredential
   value: string
+  authFields?: Record<string, string>
   method: string
   url: string
   headers?: Record<string, string>
@@ -130,8 +131,28 @@ export async function runProxy(input: ProxyInput, fetchFn: typeof fetch = fetch,
     }
     headers.set(lower, value)
   }
-  // Set last so nothing the runner sent can have come first or override it.
-  headers.set(input.credential.authHeader, formatAuthValue(input.credential.authScheme, input.value))
+  // Telegram Bot API is the one supported path-auth provider. Never synthesize
+  // a header for it: its official contract is /bot<TOKEN>/METHOD_NAME.
+  const telegramPathAuth = input.credential.authHeader.toLowerCase() === 'x-telegram-bot-api-token'
+  const upstreamUrl = new URL(target.url.toString())
+  const safeAuditPath = target.url.pathname
+  if (telegramPathAuth) {
+    if (input.credential.authScheme !== 'Raw' || !/^\/[A-Za-z][A-Za-z0-9]{0,63}$/.test(safeAuditPath)) {
+      return { ok: false, error: 'bad_url' }
+    }
+    upstreamUrl.pathname = '/bot' + input.value + safeAuditPath
+  } else {
+    // Set last so nothing the runner sent can have come first or override it.
+    headers.set(input.credential.authHeader, formatAuthValue(input.credential.authScheme, input.value))
+  }
+  for (const mapping of input.credential.authFieldHeaders ?? []) {
+    const fieldValue = input.authFields?.[mapping.field]
+    if (!fieldValue) {
+      if (mapping.required) return { ok: false, error: 'bad_header', detail: mapping.header.toLowerCase() }
+      continue
+    }
+    headers.set(mapping.header, formatAuthValue(mapping.scheme, fieldValue))
+  }
   headers.set('user-agent', 'runner-vault/1')
 
   let body: string | undefined
@@ -143,7 +164,7 @@ export async function runProxy(input: ProxyInput, fetchFn: typeof fetch = fetch,
 
   let response: Response
   try {
-    response = await fetchFn(target.url.toString(), {
+    response = await fetchFn(upstreamUrl.toString(), {
       method,
       headers,
       body,
@@ -161,11 +182,19 @@ export async function runProxy(input: ProxyInput, fetchFn: typeof fetch = fetch,
   const outHeaders: Record<string, string> = {}
   response.headers.forEach((value, name) => {
     if (!RESPONSE_HEADERS.has(name.toLowerCase())) return
-    const cleaned = redact(value, input.value)
+    let cleaned = redact(value, input.value)
+    for (const fieldValue of Object.values(input.authFields ?? {})) {
+      const next = redact(cleaned.text, fieldValue)
+      cleaned = { text: next.text, count: cleaned.count + next.count }
+    }
     redactions += cleaned.count
     outHeaders[name.toLowerCase()] = cleaned.text
   })
-  const cleanedBody = redact(decoded, input.value)
+  let cleanedBody = redact(decoded, input.value)
+  for (const fieldValue of Object.values(input.authFields ?? {})) {
+    const next = redact(cleanedBody.text, fieldValue)
+    cleanedBody = { text: next.text, count: cleanedBody.count + next.count }
+  }
   redactions += cleanedBody.count
 
   return {
@@ -177,6 +206,7 @@ export async function runProxy(input: ProxyInput, fetchFn: typeof fetch = fetch,
     redactions,
     host: target.url.hostname,
     method,
-    path: target.url.pathname,
+    // Keep the original method path; the upstream path contains the secret.
+    path: safeAuditPath,
   }
 }

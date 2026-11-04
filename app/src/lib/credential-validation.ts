@@ -11,6 +11,7 @@ export type CredentialValidationReport = {
   provider: string
   status: CredentialValidationStatus
   identity?: string
+  providerAccountId?: string
   tokenType?: string
   permissions: TokenPermission[]
   permissionsComplete: boolean
@@ -463,6 +464,65 @@ async function validateCloudflare(token: string, fetchFn: Fetch, checkedAt: numb
   }
 }
 
+/** Verify a BotFather token with Telegram's official, read-only getMe method. */
+async function validateTelegramBotApiToken(token: string, fetchFn: Fetch, checkedAt: number): Promise<CredentialValidationReport> {
+  const match = /^(\d{5,16}):[A-Za-z0-9_-]{20,}$/.exec(token)
+  if (!match) return report('Telegram Bot API', 'invalid', 'not-exposed', checkedAt, {
+    tokenType: 'Telegram Bot API token', message: 'قالب توکن Bot API تلگرام معتبر نیست.',
+  })
+
+  let response: Response
+  try {
+    response = await fetchFn('https://api.telegram.org/bot' + token + '/getMe', {
+      method: 'GET', redirect: 'manual', headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(8_000),
+    })
+  } catch {
+    return report('Telegram Bot API', 'unavailable', 'service-adapter', checkedAt, {
+      tokenType: 'Telegram Bot API token', message: 'اتصال به Telegram Bot API برقرار نشد؛ توکن نامعتبر اعلام نشده است.',
+    })
+  }
+
+  if (response.status === 429 || response.status >= 500) return report('Telegram Bot API', 'unavailable', 'service-adapter', checkedAt, {
+    tokenType: 'Telegram Bot API token', message: 'Telegram موقتاً در دسترس نیست یا درخواست را محدود کرده است؛ اعتبار توکن مشخص نشد.',
+  })
+
+  let body: { ok?: unknown; error_code?: unknown; result?: { id?: unknown; is_bot?: unknown; username?: unknown } }
+  try { body = await response.json() as typeof body } catch {
+    return report('Telegram Bot API', 'unavailable', 'service-adapter', checkedAt, {
+      tokenType: 'Telegram Bot API token', message: 'پاسخ getMe قابل‌خواندن نبود؛ وضعیت توکن مشخص نشد.',
+    })
+  }
+
+  if (response.status === 401 || body.error_code === 401 || body.error_code === 404) {
+    return report('Telegram Bot API', 'invalid', 'service-adapter', checkedAt, {
+      tokenType: 'Telegram Bot API token', message: 'Telegram Bot API این Bot Token را رد کرد.',
+    })
+  }
+  if (!response.ok || body.ok !== true) return report('Telegram Bot API', 'unavailable', 'service-adapter', checkedAt, {
+    tokenType: 'Telegram Bot API token', message: 'Telegram نتوانست هویت ربات را با getMe تأیید کند؛ وضعیت توکن نامشخص است.',
+  })
+
+  const id = body.result?.id
+  if (body.result?.is_bot !== true || typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) {
+    return report('Telegram Bot API', 'unavailable', 'service-adapter', checkedAt, {
+      tokenType: 'Telegram Bot API token', message: 'پاسخ getMe شامل شناسهٔ معتبر یک ربات نبود.',
+    })
+  }
+  if (String(id) !== match[1]) return report('Telegram Bot API', 'invalid', 'service-adapter', checkedAt, {
+    tokenType: 'Telegram Bot API token', message: 'شناسهٔ ربات برگشتی از getMe با شناسهٔ داخل توکن مطابقت ندارد.',
+  })
+
+  const username = typeof body.result?.username === 'string' && /^[A-Za-z0-9_]{5,32}$/.test(body.result.username)
+    ? body.result.username : undefined
+  return report('Telegram Bot API', 'valid', 'service-adapter', checkedAt, {
+    identity: username ? '@' + username : 'Telegram bot ' + String(id),
+    providerAccountId: String(id),
+    tokenType: 'Telegram Bot API token',
+    message: 'توکن با getMe تأیید شد؛ شناسهٔ عددی ربات' + (username ? ' و username آن' : '') + ' استخراج شد.',
+  })
+}
+
 /**
  * Validates supported provider tokens without ever returning or logging the
  * submitted value. Unsupported providers are clearly marked instead of being
@@ -476,6 +536,7 @@ export async function validateProviderToken(
   cloudflareAccountId?: string,
   adapter?: ServiceAdapter | null,
   allowedHosts?: string[],
+  authFields: Record<string, string> = {},
 ): Promise<CredentialValidationReport> {
   const value = token.trim()
   if (!value || new TextEncoder().encode(value).byteLength > 10_000 || /[\r\n\u0000]/.test(value)) {
@@ -485,6 +546,7 @@ export async function validateProviderToken(
   }
   const normalized = provider.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
   if (normalized === 'github') return validateGithub(value, fetchFn, checkedAt)
+  if (normalized === 'telegrambotapi' || normalized === 'telegram') return validateTelegramBotApiToken(value, fetchFn, checkedAt)
   if (normalized === 'cloudflare') {
     if (cloudflareAccountId && !/^[a-f0-9]{32}$/i.test(cloudflareAccountId)) {
       return report('Cloudflare', 'invalid', 'not-readable', checkedAt, {
@@ -494,7 +556,7 @@ export async function validateProviderToken(
     return validateCloudflare(value, fetchFn, checkedAt, cloudflareAccountId)
   }
   if (adapter && allowedHosts) {
-    return validateWithServiceAdapter(provider, value, adapter, allowedHosts, fetchFn, checkedAt)
+    return validateWithServiceAdapter(provider, value, adapter, allowedHosts, fetchFn, checkedAt, authFields)
   }
   return report(provider, 'unsupported', 'not-supported', checkedAt, {
     tokenType: 'unknown',

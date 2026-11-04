@@ -52,6 +52,10 @@ const storeSchema = z.object({
   /** hours from now; required for temporary, optional for permanent */
   expiresInHours: z.number().positive().max(24 * 365 * 3).nullable(),
   visible: z.boolean(),
+  connectionLabel: z.string().max(120).default(''),
+  providerAccountId: z.string().max(160).default(''),
+  authFields: z.record(z.string().regex(/^[a-z][a-z0-9_]{0,31}$/), z.string().max(4096)).refine((fields) => Object.keys(fields).length <= 12).default({}),
+  validationRequested: z.boolean().default(false),
 })
 export type StoreForm = z.input<typeof storeSchema>
 
@@ -82,7 +86,7 @@ function credentialPolicy(service: string, document?: unknown): CredentialPolicy
   }
 }
 
-function toStoreInput(form: z.output<typeof storeSchema>, now: number, policy: CredentialPolicy, validation?: CredentialValidationReport, validationIntervalHours = 6) {
+function toStoreInput(form: z.output<typeof storeSchema>, now: number, policy: CredentialPolicy, validation?: CredentialValidationReport, validationIntervalHours = 6, adapter = null as ReturnType<typeof serviceAdapterFor>) {
   return {
     value: form.value,
     lifetime: form.lifetime,
@@ -92,8 +96,13 @@ function toStoreInput(form: z.output<typeof storeSchema>, now: number, policy: C
     allowedHosts: policy.allowedHosts,
     authHeader: policy.authHeader,
     authScheme: policy.authScheme,
+    connectionLabel: form.connectionLabel,
+    providerAccountId: form.providerAccountId,
+    authFields: form.authFields,
+    authFieldIds: adapter?.credentialFields?.map((field) => field.id) ?? [],
+    requiredAuthFields: adapter?.credentialFields?.filter((field) => field.required).map((field) => field.id) ?? [],
     validation: validation?.status === 'valid' ? 'valid' as const
-      : validation?.status === 'invalid' ? 'invalid' as const
+      : (validation?.status === 'invalid' || validation?.status === 'expired') ? 'invalid' as const
         : validation?.status === 'insufficient_permissions' ? 'insufficient_permissions' as const : 'not_tested' as const,
     validationStatus: validation?.status ?? 'not_tested',
     validationDetails: validation ? JSON.stringify(validation).slice(0, 32_000) : null,
@@ -102,25 +111,49 @@ function toStoreInput(form: z.output<typeof storeSchema>, now: number, policy: C
   }
 }
 
+async function optionalSaveValidation(
+  service: string,
+  form: z.output<typeof storeSchema>,
+  policy: CredentialPolicy,
+  adapter: ReturnType<typeof serviceAdapterFor>,
+): Promise<CredentialValidationReport | undefined> {
+  if (!form.validationRequested) return undefined
+  try {
+    return await validateProviderToken(
+      service, form.value, fetch, Date.now(), undefined, adapter,
+      policy.allowedHosts, form.authFields,
+    )
+  } catch {
+    return {
+      provider: service, status: 'unavailable', permissions: [], permissionsComplete: false,
+      permissionSource: 'not-supported', checkedAt: Date.now(),
+      message: 'Validation could not be completed. The credential can still be saved and checked again later.',
+    }
+  }
+}
+
 async function key() {
   return (await loadVaultKeys(getDb(), env as unknown as VaultEnv)).encryptionKey
 }
 
 /** Validate a provider token on demand; the submitted value is never returned. */
-export async function validateCredentialTokenAction(service: string, value: string, credentialId?: string) {
+export async function validateCredentialTokenAction(service: string, value: string, credentialId?: string, authFields: Record<string, string> = {}) {
   return captureCredentialAction(async () => {
     await requireOwner()
     const parsed = z.object({
       service: z.string().trim().min(1).max(80),
       value: z.string().min(1).max(10_000),
       credentialId: idSchema.optional(),
-    }).parse({ service, value, credentialId })
+      authFields: z.record(z.string().regex(/^[a-z][a-z0-9_]{0,31}$/), z.string().max(4096)).refine((fields) => Object.keys(fields).length <= 12),
+    }).parse({ service, value, credentialId, authFields })
     const existing = parsed.credentialId ? await getCredentialForOwner(getDb(), parsed.credentialId) : null
     if (parsed.credentialId && !existing) throw new Error('Credential not found')
     const document = existing?.doc
     const adapter = serviceAdapterFromDocument(document) ?? serviceAdapterFor(parsed.service)
     const policy = credentialPolicy(parsed.service, document)
-    return validateProviderToken(parsed.service, parsed.value, fetch, Date.now(), undefined, adapter, policy.allowedHosts)
+    const declaredFields = new Set(adapter?.credentialFields?.map((field) => field.id) ?? [])
+    if (Object.keys(parsed.authFields).some((field) => !declaredFields.has(field))) throw new Error('Undeclared credential field')
+    return validateProviderToken(parsed.service, parsed.value, fetch, Date.now(), undefined, adapter, policy.allowedHosts, parsed.authFields)
   })
 }
 
@@ -134,13 +167,6 @@ export async function validateStoredCredentialAction(id: string) {
   })
 }
 
-function ensureSaveable(validation: CredentialValidationReport) {
-  // A failed network call is not proof that the token is invalid. The owner may
-  // still store it under the adapter's exact HTTPS host policy and review its state.
-  if (validation.status === 'invalid' || validation.status === 'expired') {
-    throw new Error(validation.message)
-  }
-}
 
 /** Create a credential directly from the authenticated owner dashboard. */
 export async function createCredentialAction(input: { name: string; service: string; form: StoreForm }) {
@@ -150,14 +176,13 @@ export async function createCredentialAction(input: { name: string; service: str
     const name = normalizeCredentialName(parsed.name)
     const policy = credentialPolicy(parsed.service)
     const adapter = serviceAdapterFor(parsed.service)
-    const validation = await validateProviderToken(parsed.service, parsed.form.value, fetch, Date.now(), undefined, adapter, policy.allowedHosts)
-    ensureSaveable(validation)
+    const validation = await optionalSaveValidation(parsed.service, parsed.form, policy, adapter)
     const now = Date.now()
     const db = getDb()
     const preferences = await loadVaultPreferences(db)
     const result = await createCredential(db, await key(), {
       name, service: parsed.service, purpose: defaultPurposeForService(parsed.service),
-      ...toStoreInput(parsed.form, now, policy, validation, preferences.validationIntervalHours),
+      ...toStoreInput(parsed.form, now, policy, validation, preferences.validationIntervalHours, adapter),
     })
     if (!result.ok) fail(result)
     return { id: result.value.id, name: result.value.name }
@@ -181,12 +206,11 @@ export async function submitRegistrationAction(token: string, form: StoreForm) {
     }
     const policy = credentialPolicy(credential.service, credential.doc)
     const adapter = serviceAdapterFromDocument(credential.doc) ?? serviceAdapterFor(credential.service)
-    const tokenReport = await validateProviderToken(credential.service, parsed.value, fetch, Date.now(), undefined, adapter, policy.allowedHosts)
-    ensureSaveable(tokenReport)
+    const validationReport = await optionalSaveValidation(credential.service, parsed, policy, adapter)
     const preferences = await loadVaultPreferences(db)
     const storeInput = {
       credentialId: info.credentialId,
-      ...toStoreInput(parsed, now, policy, tokenReport, preferences.validationIntervalHours),
+      ...toStoreInput(parsed, now, policy, validationReport, preferences.validationIntervalHours, adapter),
     }
     const validation = validateStoreInput(storeInput)
     if (!validation.ok) fail(validation)
@@ -255,12 +279,11 @@ export async function replaceCredentialAction(id: string, form: StoreForm) {
     if (!credential || credential.externallyManaged) throw new Error('Credential not found or is externally managed')
     const policy = credentialPolicy(credential.service, credential.doc)
     const adapter = serviceAdapterFromDocument(credential.doc) ?? serviceAdapterFor(credential.service)
-    const tokenReport = await validateProviderToken(credential.service, parsed.value, fetch, Date.now(), undefined, adapter, policy.allowedHosts)
-    ensureSaveable(tokenReport)
+    const validation = await optionalSaveValidation(credential.service, parsed, policy, adapter)
     const preferences = await loadVaultPreferences(db)
     const result = await storeCredentialValue(db, await key(), {
       credentialId: credential.id,
-      ...toStoreInput(parsed, Date.now(), policy, tokenReport, preferences.validationIntervalHours),
+      ...toStoreInput(parsed, Date.now(), policy, validation, preferences.validationIntervalHours, adapter),
     })
     if (!result.ok) fail(result)
     return { name: result.value.name }

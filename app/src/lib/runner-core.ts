@@ -8,7 +8,7 @@ import { verifyGithubOidc, type JwksSource, type OidcPolicy } from './oidc.ts'
 import { issueRunnerSession, verifyRunnerSessionSignature, getRunnerRevokedBefore, type RunnerSession } from './runner-session.ts'
 import { runProxy, type ProxyError } from './proxy.ts'
 import { BOOTSTRAP_WORKFLOW_FILE, DEFAULT_EVENTS, pinRunnerPolicy } from './runner-policy.ts'
-import { createNotification, listRunnerIntegrationMetadata, recordCredentialUsage, type VaultPreferences } from './vault-observability.ts'
+import { createNotification, listRunnerIntegrationMetadata, recordCredentialUsage, recordRuntimeCredentialEvidence, type VaultPreferences } from './vault-observability.ts'
 import { reserveRunnerRateLimit, releaseRunnerRateLimitReservation } from './runner-rate-limit.ts'
 
 type Db = ReturnType<typeof getDb>
@@ -181,6 +181,72 @@ const PROXY_STATUS: Record<ProxyError, number> = {
   body_not_allowed: 400, upstream_timeout: 504, upstream_error: 502,
 }
 
+function runtimeCredentialEvidence(
+  service: string,
+  status: number,
+  body: string,
+  headers: Record<string, string>,
+): { status: 'valid' | 'invalid' | 'insufficient_permissions'; message: string } | null {
+  const normalized = service.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+
+  if (normalized === 'telegrambotapi' || normalized === 'telegram') {
+    let response: { ok?: unknown; error_code?: unknown }
+    try { response = JSON.parse(body) as typeof response } catch { return null }
+    if (status >= 200 && status < 300 && response.ok === true) {
+      return { status: 'valid', message: 'Telegram Bot API returned ok=true for an authenticated method call.' }
+    }
+    if (response.error_code === 401 || response.error_code === 404 || status === 401) {
+      return { status: 'invalid', message: 'Telegram Bot API rejected the stored Bot Token.' }
+    }
+    if (response.error_code === 403) {
+      return { status: 'insufficient_permissions', message: 'Telegram Bot API accepted the token but denied this operation.' }
+    }
+    return null
+  }
+
+  if (normalized === 'slack') {
+    try {
+      const response = JSON.parse(body) as { ok?: unknown; error?: unknown }
+      if (status >= 200 && status < 300 && response.ok === true) {
+        return { status: 'valid', message: 'Slack Web API returned ok=true for an authenticated method call.' }
+      }
+      if (['invalid_auth', 'token_revoked', 'not_authed'].includes(String(response.error ?? ''))) {
+        return { status: 'invalid', message: 'Slack Web API rejected the stored token.' }
+      }
+      if (response.error === 'missing_scope') {
+        return { status: 'insufficient_permissions', message: 'Slack accepted the token but the requested method needs additional scopes.' }
+      }
+    } catch { return null }
+    return null
+  }
+
+  if (normalized === 'cloudflare') {
+    try {
+      const response = JSON.parse(body) as { success?: unknown }
+      if (status >= 200 && status < 300 && response.success === true) {
+        return { status: 'valid', message: 'Cloudflare API returned success=true for an authenticated request.' }
+      }
+    } catch { /* An unreadable body is not verification evidence. */ }
+    return null
+  }
+
+  if (normalized === 'github') {
+    if (headers['x-github-sso'] || headers['x-ratelimit-remaining'] === '0') return null
+    if (status >= 200 && status < 300 &&
+        (headers['x-oauth-scopes'] !== undefined || headers['x-accepted-github-permissions'] !== undefined)) {
+      return { status: 'valid', message: 'GitHub returned authenticated-token scope/permission metadata for the API request.' }
+    }
+    if (status === 403 && headers['x-accepted-github-permissions'] !== undefined) {
+      return { status: 'insufficient_permissions', message: 'GitHub accepted the token but reported that the requested operation needs additional permissions.' }
+    }
+    if (status === 401) return { status: 'invalid', message: 'GitHub rejected the stored token with HTTP 401.' }
+    return null
+  }
+
+  // Unknown providers do not get promoted by generic HTTP 2xx/4xx responses.
+  return null
+}
+
 export async function useCredential(deps: RunnerDeps, authorization: string | null, input: UseInput) {
   const auth = await authenticate(deps, authorization)
   if (!auth.ok) return auth.res
@@ -231,7 +297,7 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
     ? await deps.getProxyTimeoutMs()
     : deps.proxyTimeoutMs)
   const result = await runProxy({
-    credential: read.credential, value: read.value, method: input.method, url: input.url, headers, body: input.body as string | undefined,
+    credential: read.credential, value: read.value, authFields: read.authFields, method: input.method, url: input.url, headers, body: input.body as string | undefined,
   }, deps.fetchFn, proxyTimeoutMs)
 
   if (!result.ok) {
@@ -243,14 +309,20 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
     ])
     return fail(PROXY_STATUS[result.error], result.error)
   }
-  await scheduleBackgroundWrites(deps, [
+  const evidence = runtimeCredentialEvidence(read.credential.service, result.status, result.body, result.headers)
+  const writes: Promise<unknown>[] = [
     audit(deps.db, {
       ...common, credentialId: read.credential.id, action: 'proxy_use', result: 'ok',
       detail: `${result.method} ${result.host}${result.path} -> ${result.status}${result.redactions ? ` (${result.redactions} redacted)` : ''}`,
     }),
     recordCredentialUsage(deps.db, { credentialId: read.credential.id, consumer, success: result.status < 400, latencyMs: Date.now() - startedAt, now: deps.now }),
     db_touch(deps, read.credential.id),
-  ])
+  ]
+  if (evidence) writes.push(recordRuntimeCredentialEvidence(deps.db, {
+    credentialId: read.credential.id, valueIv: read.credential.valueIv,
+    provider: read.credential.service, ...evidence, now: deps.now,
+  }))
+  await scheduleBackgroundWrites(deps, writes)
   return {
     status: 200,
     body: { status: result.status, headers: result.headers, body: result.body, truncated: result.truncated, redacted: result.redactions > 0 },

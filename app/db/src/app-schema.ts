@@ -80,6 +80,8 @@ export const credential = sqliteCore.sqliteTable('credential', {
   id: sqliteCore.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
   name: sqliteCore.text('name').notNull().unique(),
   service: sqliteCore.text('service').notNull(),
+  connectionLabel: sqliteCore.text('connection_label').notNull().default(''),
+  providerAccountId: sqliteCore.text('provider_account_id').notNull().default(''),
   purpose: sqliteCore.text('purpose').notNull(),
   tokenType: sqliteCore.text('token_type').notNull().default(''),
   status: sqliteCore.text('status', { enum: ['pending', 'active', 'disabled'] }).notNull().default('pending'),
@@ -112,6 +114,7 @@ export const credential = sqliteCore.sqliteTable('credential', {
   sqliteCore.index('credential_status_idx').on(table.status),
   sqliteCore.index('credential_validation_due_idx').on(table.status, table.nextValidationAt),
   sqliteCore.index('credential_runner_registry_idx').on(table.status, table.visible, table.name),
+  sqliteCore.index('credential_provider_connection_idx').on(table.service, table.providerAccountId, table.connectionLabel),
 ])
 
 export const enrollmentLink = sqliteCore.sqliteTable('enrollment_link', {
@@ -205,7 +208,7 @@ export const credentialValidationHistory = sqliteCore.sqliteTable('credential_va
   credentialId: sqliteCore.text('credential_id').notNull().references(() => credential.id, { onDelete: 'cascade' }),
   credentialName: sqliteCore.text('credential_name').notNull().default(''),
   provider: sqliteCore.text('provider').notNull(),
-  source: sqliteCore.text('source', { enum: ['scheduled', 'manual'] }).notNull(),
+  source: sqliteCore.text('source', { enum: ['scheduled', 'manual', 'runtime'] }).notNull(),
   status: sqliteCore.text('status').notNull(),
   message: sqliteCore.text('message').notNull().default(''),
   identity: sqliteCore.text('identity'),

@@ -70,5 +70,24 @@ export const SCHEMA_MIGRATIONS: SchemaMigration[] = [
       "CREATE INDEX runner_rate_limit_event_scope_subject_at_idx\n  ON runner_rate_limit_event (scope, subject, created_at)",
       "CREATE INDEX runner_rate_limit_event_created_at_idx\n  ON runner_rate_limit_event (created_at)"
     ]
+  },
+  {
+    "id": "0007_runtime_validation_evidence",
+    "statements": [
+      "CREATE TABLE credential_validation_history_next (\n  id text PRIMARY KEY,\n  credential_id text NOT NULL,\n  credential_name text NOT NULL DEFAULT '',\n  provider text NOT NULL CHECK (length(provider) BETWEEN 1 AND 80),\n  source text NOT NULL CHECK (source IN ('scheduled', 'manual', 'runtime')),\n  status text NOT NULL CHECK (length(status) BETWEEN 1 AND 40),\n  message text NOT NULL DEFAULT '' CHECK (length(message) <= 600),\n  identity text,\n  token_type text,\n  permission_source text NOT NULL CHECK (length(permission_source) <= 40),\n  permissions_json text NOT NULL DEFAULT '[]',\n  permissions_complete integer NOT NULL DEFAULT 0 CHECK (permissions_complete IN (0, 1)),\n  duration_ms integer NOT NULL DEFAULT 0 CHECK (duration_ms >= 0),\n  checked_at integer NOT NULL,\n  CONSTRAINT fk_credential_validation_history_credential\n    FOREIGN KEY (credential_id) REFERENCES credential(id) ON DELETE CASCADE\n)",
+      "INSERT INTO credential_validation_history_next SELECT * FROM credential_validation_history",
+      "DROP TABLE credential_validation_history",
+      "ALTER TABLE credential_validation_history_next RENAME TO credential_validation_history",
+      "CREATE INDEX credential_validation_history_credential_idx ON credential_validation_history (credential_id, checked_at)",
+      "CREATE INDEX credential_validation_history_checked_idx ON credential_validation_history (checked_at)"
+    ]
+  },
+  {
+    "id": "0008_credential_connections_auth_bundles",
+    "statements": [
+      "ALTER TABLE credential ADD COLUMN connection_label text NOT NULL DEFAULT '' CHECK (length(connection_label) <= 120)",
+      "ALTER TABLE credential ADD COLUMN provider_account_id text NOT NULL DEFAULT '' CHECK (length(provider_account_id) <= 160)",
+      "CREATE INDEX IF NOT EXISTS credential_provider_connection_idx ON credential (service, provider_account_id, connection_label)"
+    ]
   }
 ]

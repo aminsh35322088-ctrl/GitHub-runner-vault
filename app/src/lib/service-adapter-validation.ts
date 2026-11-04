@@ -151,6 +151,7 @@ export async function validateWithServiceAdapter(
   allowedHosts: string[],
   fetchFn: typeof fetch = fetch,
   checkedAt = Date.now(),
+  authFields: Record<string, string> = {},
 ): Promise<CredentialValidationReport> {
   const verification = adapter.validation
   if (!verification) {
@@ -180,6 +181,18 @@ export async function validateWithServiceAdapter(
 
   const headers = new Headers(adapter.defaultHeaders ?? {})
   headers.set(adapter.authHeader, formatAuthValue(adapter.authScheme, token))
+  for (const mapping of adapter.authFieldHeaders ?? []) {
+    const fieldValue = authFields[mapping.field]
+    if (!fieldValue) {
+      if (mapping.required) return {
+        provider, status: 'unsupported', permissions: [], permissionsComplete: false,
+        permissionSource: 'not-supported', checkedAt,
+        message: 'یک فیلد احراز هویت ضروری برای اعتبارسنجی موجود نیست؛ هیچ درخواستی ارسال نشد.',
+      }
+      continue
+    }
+    headers.set(mapping.header, formatAuthValue(mapping.scheme, fieldValue))
+  }
   headers.set('accept', 'application/json')
   headers.set('user-agent', 'runner-credential-vault/1')
 
@@ -268,11 +281,14 @@ export async function validateWithServiceAdapter(
       }
     }
   }
+  const secrets = [token, ...Object.values(authFields)].filter((value) => typeof value === 'string' && value.length >= 4)
+  const containsSecret = (value: string) => secrets.some((secret) => value.includes(secret))
   const identityValue = getPointer(body, verification.identityPointer)
-  const identity = typeof identityValue === 'string' && !identityValue.includes(token)
+  const identity = typeof identityValue === 'string' && !containsSecret(identityValue)
     ? identityValue.slice(0, 160) : undefined
   const permissionsValue = getPointer(body, verification.permissionsPointer)
-  const permissions = permissionsFrom(permissionsValue).filter((permission) => !permission.name.includes(token))
+  const permissions = permissionsFrom(permissionsValue).filter((permission) =>
+    ![permission.name, permission.scope ?? '', ...(permission.resources ?? [])].some(containsSecret))
   return {
     provider, status: 'valid', permissions,
     permissionsComplete: Boolean(verification.permissionsPointer && hasPermissionRepresentation(permissionsValue)),

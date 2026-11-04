@@ -20,6 +20,15 @@ function json(body: unknown, status = 200) {
 }
 
 describe('built-in CLI adapter mappings', () => {
+  test('maps Telegram Bot API tokens to the official path-auth provider', () => {
+    expect(serviceAdapterFor('Telegram Bot API')).toMatchObject({
+      apiBaseUrl: 'https://api.telegram.org',
+      authHeader: 'X-Telegram-Bot-Api-Token',
+      authScheme: 'Raw',
+      cliTools: [],
+    })
+  })
+
   test('maps Cloudflare tokens to Wrangler through its documented API base URL override', () => {
     const adapter = serviceAdapterFor('Cloudflare')
     expect(adapter?.cliTools).toContainEqual(expect.objectContaining({
@@ -49,6 +58,56 @@ describe('built-in CLI adapter mappings', () => {
       const report = await validateWithServiceAdapter('Cloudflare', token, cloudflare, ['api.cloudflare.com'], fetchFn)
       expect(report.status).toBe('invalid')
     }
+  })
+
+  test('parses declared connection fields and only their explicit auth-header mappings', () => {
+    const parsed = serviceAdapterFromDocument({
+      service_adapter: {
+        api_base_url: 'https://api.custom.dev',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        credential_fields: [
+          { id: 'client_secret', label: 'Client secret', required: true, secret: true },
+          { id: 'workspace_id', label: 'Workspace ID', required: false, secret: false },
+        ],
+        auth_field_headers: [
+          { field: 'client_secret', header: 'X-Client-Secret', scheme: 'Raw' },
+        ],
+        cli_tools: [],
+      },
+    })
+    expect(parsed).toMatchObject({
+      credentialFields: [
+        { id: 'client_secret', required: true, secret: true },
+        { id: 'workspace_id', required: false, secret: false },
+      ],
+      authFieldHeaders: [{ field: 'client_secret', header: 'X-Client-Secret', scheme: 'Raw', required: true }],
+    })
+  })
+
+  test('validates a multi-field adapter and fails closed when a required secondary field is absent', async () => {
+    const multi: ServiceAdapter = {
+      ...adapter,
+      authFieldHeaders: [{ field: 'client_secret', header: 'X-Client-Secret', scheme: 'Raw', required: true }],
+    }
+    const secondary = 'secondary-client-secret-value'
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(json({ user: { name: 'test-account' } }))
+    const report = await validateWithServiceAdapter(
+      'Example', 'primary-secret-value', multi, ['api.example.com'], fetchFn, 1234,
+      { client_secret: secondary, unrelated: 'must-not-be-sent' },
+    )
+    expect(report).toMatchObject({ status: 'valid', identity: 'test-account' })
+    const headers = new Headers(fetchFn.mock.calls[0]?.[1]?.headers)
+    expect(headers.get('authorization')).toBe('Bearer primary-secret-value')
+    expect(headers.get('x-client-secret')).toBe(secondary)
+    expect(headers.get('unrelated')).toBeNull()
+
+    const missingFetch = vi.fn<typeof fetch>()
+    const missing = await validateWithServiceAdapter(
+      'Example', 'primary-secret-value', multi, ['api.example.com'], missingFetch, 1235, {},
+    )
+    expect(missing.status).toBe('unsupported')
+    expect(missingFetch).not.toHaveBeenCalled()
   })
 
   test('retains the documented Northflank token environment variable', () => {
@@ -169,5 +228,28 @@ describe('service adapter validation', () => {
     const report = await validateWithServiceAdapter('Example', 'secret-value', noCheck, ['api.example.com'], fetchFn)
     expect(report.status).toBe('unsupported')
     expect(fetchFn).not.toHaveBeenCalled()
+  })
+})
+
+describe('multi-field validation redaction', () => {
+  test('does not expose secondary credentials echoed in provider identity or permissions', async () => {
+    const secondary = 'secondary-secret-that-must-not-escape'
+    const multiFieldAdapter: ServiceAdapter = {
+      ...adapter,
+      authFieldHeaders: [{ field: 'client_secret', header: 'X-Client-Secret', scheme: 'Raw', required: true }],
+    }
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(json({
+      user: { name: secondary },
+      permissions: [{ name: secondary, scope: secondary, resources: ['safe-resource', secondary] }],
+    }))
+    const report = await validateWithServiceAdapter(
+      'Multi-field service', 'primary-validation-token', multiFieldAdapter,
+      ['api.example.com'], fetchFn, 1235, { client_secret: secondary },
+    )
+    expect(report.status).toBe('valid')
+    expect(report.identity).toBeUndefined()
+    expect(report.permissions).toEqual([])
+    expect(JSON.stringify(report)).not.toContain('primary-validation-token')
+    expect(JSON.stringify(report)).not.toContain(secondary)
   })
 })

@@ -20,6 +20,44 @@ import { adapterHost, serviceAdapterFor, serviceAdapterFromDocument } from './se
 type Db = ReturnType<typeof getDb>
 
 export const KEY_VERSION = 1
+const CREDENTIAL_BUNDLE_PREFIX = 'vault-credential-bundle:v1:'
+
+type CredentialBundle = { value: string; authFields: Record<string, string> }
+
+function encodeCredentialBundle(value: string, authFields: Record<string, string>) {
+  return Object.keys(authFields).length
+    ? CREDENTIAL_BUNDLE_PREFIX + JSON.stringify({ version: 1, value, authFields })
+    : value
+}
+
+/** Existing encrypted single-token rows remain readable without a migration. */
+function validProviderTokenSyntax(service: string, value: string) {
+  const normalized = service.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+  if (normalized === 'telegrambotapi' || normalized === 'telegram') {
+    return /^\d{5,16}:[A-Za-z0-9_-]{20,}$/.test(value)
+  }
+  return true
+}
+
+function decodeCredentialBundle(raw: string): CredentialBundle {
+  if (!raw.startsWith(CREDENTIAL_BUNDLE_PREFIX)) return { value: raw, authFields: {} }
+  try {
+    const parsed = JSON.parse(raw.slice(CREDENTIAL_BUNDLE_PREFIX.length)) as {
+      version?: unknown; value?: unknown; authFields?: unknown
+    }
+    if (parsed.version !== 1 || typeof parsed.value !== 'string' ||
+        !parsed.authFields || typeof parsed.authFields !== 'object' || Array.isArray(parsed.authFields)) {
+      return { value: raw, authFields: {} }
+    }
+    const fields: Record<string, string> = {}
+    for (const [id, value] of Object.entries(parsed.authFields)) {
+      if (/^[a-z][a-z0-9_]{0,31}$/.test(id) && typeof value === 'string') fields[id] = value
+    }
+    return { value: parsed.value, authFields: fields }
+  } catch {
+    return { value: raw, authFields: {} }
+  }
+}
 export const MAX_VALUE_BYTES = 8 * 1024
 export const MAX_TEMPORARY_MS = 24 * 3600_000
 const MAX_PERMANENT_MS = 3 * 365 * 24 * 3600_000
@@ -220,14 +258,22 @@ export async function createCredential(
   if (!service) return { ok: false, error: 'invalid_doc', detail: 'service is required' }
   const validated = validateStoreInput(input)
   if (!validated.ok) return validated
+  if (!validProviderTokenSyntax(service, validated.value.value)) {
+    return { ok: false, error: 'invalid_value', detail: 'invalid Telegram Bot API token format' }
+  }
+  for (const required of input.requiredAuthFields ?? []) {
+    if (!validated.value.authFields[required]?.trim()) return { ok: false, error: 'invalid_value', detail: 'missing required credential field' }
+  }
   const [existing] = await db.select({ id: schema.credential.id })
     .from(schema.credential).where(orm.eq(schema.credential.name, input.name)).limit(1)
   if (existing) return { ok: false, error: 'exists' }
 
   const id = crypto.randomUUID()
-  const sealed = await encryptCredentialValue(key, id, KEY_VERSION, validated.value.value)
+  const encodedBundle = encodeCredentialBundle(validated.value.value, validated.value.authFields)
+  if (new TextEncoder().encode(encodedBundle).byteLength > MAX_VALUE_BYTES) return { ok: false, error: 'invalid_value', detail: 'credential bundle is too large' }
+  const sealed = await encryptCredentialValue(key, id, KEY_VERSION, encodedBundle)
   await db.insert(schema.credential).values({
-    id, name: input.name, service, purpose, tokenType: '', status: 'active',
+    id, name: input.name, service, connectionLabel: validated.value.connectionLabel, providerAccountId: validated.value.providerAccountId, purpose, tokenType: '', status: 'active',
     visible: input.visible, lifetime: input.lifetime, delivery: input.delivery,
     allowedHosts: JSON.stringify(validated.value.hosts),
     authHeader: validated.value.style.header, authScheme: validated.value.style.scheme,
@@ -256,6 +302,12 @@ export type StoreInput = {
   /** Header and scheme the proxy uses upstream. Defaults to `Authorization: Bearer`. */
   authHeader?: string
   authScheme?: AuthScheme
+  authFields?: Record<string, string>
+  /** Allowed schema field IDs. Derived from the reviewed provider adapter on the server. */
+  authFieldIds?: string[]
+  requiredAuthFields?: string[]
+  connectionLabel?: string
+  providerAccountId?: string
   now: number
   validation?: 'not_tested' | 'valid' | 'invalid' | 'insufficient_permissions'
   validationDetails?: string | null
@@ -268,6 +320,9 @@ export type ValidatedStoreInput = {
   expiresAt: number | null
   hosts: string[]
   style: { header: string; scheme: AuthScheme }
+  authFields: Record<string, string>
+  connectionLabel: string
+  providerAccountId: string
 }
 
 /** Validate every owner-controlled value before a one-time registration link is consumed. */
@@ -291,7 +346,33 @@ export function validateStoreInput(input: Omit<StoreInput, 'credentialId'> & { c
   if (hosts.hosts.length === 0) return { ok: false, error: 'hosts_required' }
   const style = normalizeAuthStyle(input.authHeader ?? 'Authorization', input.authScheme ?? 'Bearer')
   if (!style.ok) return { ok: false, error: 'invalid_auth_style', detail: style.error }
-  return { ok: true, value: { value, expiresAt, hosts: hosts.hosts, style: { header: style.header, scheme: style.scheme } } }
+  const connectionLabel = (input.connectionLabel ?? '').trim()
+  const providerAccountId = (input.providerAccountId ?? '').trim()
+  if (connectionLabel.length > 120 || /[\r\n\u0000]/.test(connectionLabel) ||
+      providerAccountId.length > 160 || /[\r\n\u0000]/.test(providerAccountId)) {
+    return { ok: false, error: 'invalid_value', detail: 'invalid provider connection metadata' }
+  }
+  const authFields = input.authFields ?? {}
+  const allowedFields = input.authFieldIds ?? Object.keys(authFields)
+  if (Object.keys(authFields).length > 12 || allowedFields.length > 12) {
+    return { ok: false, error: 'invalid_value', detail: 'too many credential fields' }
+  }
+  let authFieldBytes = 0
+  for (const [field, fieldValue] of Object.entries(authFields)) {
+    if (!/^[a-z][a-z0-9_]{0,31}$/.test(field) || !allowedFields.includes(field) ||
+        typeof fieldValue !== 'string' || fieldValue.trim().length < 4 ||
+        /[\r\n\u0000]/.test(fieldValue) || new TextEncoder().encode(fieldValue).byteLength > 4096) {
+      return { ok: false, error: 'invalid_value', detail: 'invalid credential field bundle' }
+    }
+    authFieldBytes += new TextEncoder().encode(field + fieldValue).byteLength
+  }
+  if (new TextEncoder().encode(value).byteLength + authFieldBytes > MAX_VALUE_BYTES) {
+    return { ok: false, error: 'invalid_value', detail: 'credential bundle is too large' }
+  }
+  return { ok: true, value: {
+    value, expiresAt, hosts: hosts.hosts, style: { header: style.header, scheme: style.scheme },
+    authFields, connectionLabel, providerAccountId,
+  } }
 }
 
 export async function storeCredentialValue(
@@ -300,15 +381,32 @@ export async function storeCredentialValue(
   input: StoreInput,
   options: { requirePending?: boolean } = {},
 ): Promise<Result<{ name: string }>> {
-  const [row] = await db.select({ id: schema.credential.id, name: schema.credential.name, externallyManaged: schema.credential.externallyManaged })
+  const [row] = await db.select({ id: schema.credential.id, name: schema.credential.name, service: schema.credential.service, externallyManaged: schema.credential.externallyManaged, valueEncrypted: schema.credential.valueEncrypted, valueIv: schema.credential.valueIv, keyVersion: schema.credential.keyVersion })
     .from(schema.credential).where(orm.eq(schema.credential.id, input.credentialId)).limit(1)
   if (!row) return { ok: false, error: 'not_found' }
   if (row.externallyManaged) return { ok: false, error: 'invalid_value', detail: 'externally managed credentials hold no value' }
 
   const validated = validateStoreInput(input)
   if (!validated.ok) return validated
-  const { value, expiresAt, hosts, style } = validated.value
-  const { encrypted, iv } = await encryptCredentialValue(key, row.id, KEY_VERSION, value)
+  if (!validProviderTokenSyntax(row.service, validated.value.value)) {
+    return { ok: false, error: 'invalid_value', detail: 'invalid Telegram Bot API token format' }
+  }
+  const { value, expiresAt, hosts, style, connectionLabel, providerAccountId } = validated.value
+  let authFields = validated.value.authFields
+  // Write-only secondary fields are retained when a primary token is rotated.
+  if (!options.requirePending && row.valueEncrypted && row.valueIv) {
+    const previous = decodeCredentialBundle(await decryptCredentialValue(key, row.id, row.keyVersion, row.valueEncrypted, row.valueIv))
+    const allowed = new Set(input.authFieldIds ?? [])
+    const preserved = Object.fromEntries(Object.entries(previous.authFields).filter(([id]) => allowed.has(id)))
+    authFields = { ...preserved, ...authFields }
+  }
+  for (const required of input.requiredAuthFields ?? []) {
+    if (!authFields[required]?.trim()) return { ok: false, error: 'invalid_value', detail: 'missing required credential field' }
+  }
+  if (Object.keys(authFields).length > 12) return { ok: false, error: 'invalid_value', detail: 'too many credential fields' }
+  const encodedBundle = encodeCredentialBundle(value, authFields)
+  if (new TextEncoder().encode(encodedBundle).byteLength > MAX_VALUE_BYTES) return { ok: false, error: 'invalid_value', detail: 'credential bundle is too large' }
+  const { encrypted, iv } = await encryptCredentialValue(key, row.id, KEY_VERSION, encodedBundle)
   const conditions = [
     orm.eq(schema.credential.id, row.id),
     orm.eq(schema.credential.externallyManaged, false),
@@ -325,6 +423,8 @@ export async function storeCredentialValue(
   const [stored] = await db.update(schema.credential).set({
     authHeader: style.header,
     authScheme: style.scheme,
+    connectionLabel,
+    providerAccountId,
     valueEncrypted: encrypted,
     valueIv: iv,
     keyVersion: KEY_VERSION,
@@ -354,6 +454,8 @@ const METADATA_COLUMNS = {
   id: schema.credential.id,
   name: schema.credential.name,
   service: schema.credential.service,
+  connectionLabel: schema.credential.connectionLabel,
+  providerAccountId: schema.credential.providerAccountId,
   purpose: schema.credential.purpose,
   tokenType: schema.credential.tokenType,
   status: schema.credential.status,
@@ -436,6 +538,8 @@ export async function listRegistryForRunner(db: Db, now: number) {
   return db.select({
     name: schema.credential.name,
     service: schema.credential.service,
+    connectionLabel: schema.credential.connectionLabel,
+    providerAccountId: schema.credential.providerAccountId,
     purpose: schema.credential.purpose,
     lifetime: schema.credential.lifetime,
     delivery: schema.credential.delivery,
@@ -503,7 +607,11 @@ export async function registerExternallyManaged(db: Db, input: { name: string; s
 // ── The only place a value is decrypted ───────────────────────────────
 
 export type ValueResult =
-  | { ok: true; value: string; credential: { id: string; name: string; delivery: 'proxy'; allowedHosts: string[]; authHeader: string; authScheme: AuthScheme } }
+  | { ok: true; value: string; authFields: Record<string, string>; credential: {
+      id: string; name: string; service: string; connectionLabel: string; providerAccountId: string;
+      delivery: 'proxy'; allowedHosts: string[]; authHeader: string; authScheme: AuthScheme; valueIv: string;
+      authFieldHeaders: Array<{ field: string; header: string; scheme: AuthScheme; required: boolean }>
+    } }
   | { ok: false; reason: string }
 
 /**
@@ -520,10 +628,10 @@ export async function readCredentialValue(
   options: { validation?: boolean } = {},
 ): Promise<ValueResult> {
   const [row] = await db.select({
-    id: schema.credential.id, name: schema.credential.name, status: schema.credential.status, visible: schema.credential.visible,
+    id: schema.credential.id, name: schema.credential.name, service: schema.credential.service, connectionLabel: schema.credential.connectionLabel, providerAccountId: schema.credential.providerAccountId, status: schema.credential.status, visible: schema.credential.visible,
     expiresAt: schema.credential.expiresAt, externallyManaged: schema.credential.externallyManaged,
     delivery: schema.credential.delivery, allowedHosts: schema.credential.allowedHosts,
-    authHeader: schema.credential.authHeader, authScheme: schema.credential.authScheme,
+    authHeader: schema.credential.authHeader, authScheme: schema.credential.authScheme, docJson: schema.credential.docJson,
     valueEncrypted: schema.credential.valueEncrypted, valueIv: schema.credential.valueIv, keyVersion: schema.credential.keyVersion,
   }).from(schema.credential).where(orm.eq(schema.credential.name, name)).limit(1)
   if (!row) return { ok: false, reason: 'unavailable' }
@@ -535,13 +643,18 @@ export async function readCredentialValue(
   }, now)
   if (!state.available) return { ok: false, reason: publicReason(state.reason) }
   if (row.externallyManaged || row.valueEncrypted === null || row.valueIv === null) return { ok: false, reason: 'unavailable' }
-  const value = await decryptCredentialValue(key, row.id, row.keyVersion, row.valueEncrypted, row.valueIv)
+  const raw = await decryptCredentialValue(key, row.id, row.keyVersion, row.valueEncrypted, row.valueIv)
+  const bundle = decodeCredentialBundle(raw)
+  const adapter = serviceAdapterFromDocument(readStoredDoc(row.docJson)) ?? serviceAdapterFor(row.service)
   return {
     ok: true,
-    value,
+    value: bundle.value,
+    authFields: bundle.authFields,
     credential: {
-      id: row.id, name: row.name, delivery: row.delivery, allowedHosts: readAllowedHosts(row.allowedHosts),
-      authHeader: row.authHeader, authScheme: row.authScheme,
+      id: row.id, name: row.name, service: row.service, connectionLabel: row.connectionLabel, providerAccountId: row.providerAccountId,
+      delivery: row.delivery, allowedHosts: readAllowedHosts(row.allowedHosts),
+      authHeader: row.authHeader, authScheme: row.authScheme, valueIv: row.valueIv,
+      authFieldHeaders: adapter?.authFieldHeaders ?? [],
     },
   }
 }
