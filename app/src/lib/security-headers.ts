@@ -31,25 +31,15 @@ export const SECURITY_HEADERS: Readonly<Record<string, string>> = {
 
 /** Sets the baseline headers without overwriting a value a route already chose. */
 export function applySecurityHeaders(response: Response): Response {
-  // Response.redirect() returns immutable headers in Workers. Work on a copy
-  // and rebuild only when a baseline header is missing; this preserves route
-  // headers, status, status text and streaming bodies without mutating the
-  // original response.
-  const headers = new Headers(response.headers)
-  let changed = false
+  const missing = Object.entries(SECURITY_HEADERS).filter(([name]) => !response.headers.has(name))
+  if (missing.length === 0) return response
 
-  for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
-    if (!headers.has(name)) {
-      headers.set(name, value)
-      changed = true
-    }
+  // Response.redirect() and some upstream responses have immutable headers.
+  // Cloudflare's supported clone pattern creates a mutable response while
+  // preserving response metadata (including Workers-specific ResponseInit fields).
+  const secured = new Response(response.body, response)
+  for (const [name, value] of missing) {
+    secured.headers.set(name, value)
   }
-
-  if (!changed) return response
-
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  })
+  return secured
 }
