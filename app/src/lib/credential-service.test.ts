@@ -324,6 +324,18 @@ describe('registration requests', () => {
     })
   })
 
+  test('a requested purpose is stored and audited instead of the generated default', async () => {
+    const { db, now } = await setup()
+    const name = uniqueName()
+    const result = await requestRegistration(db, { name, service: 'Cloudflare', purpose: 'Deploy the worker', doc, requestedBy: 'runner:1', now })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const row = await getCredentialForOwner(db, result.value.credentialId)
+    expect(row?.purpose).toBe('Deploy the worker')
+    const audits = await db.select().from(schema.credentialAudit).where(orm.eq(schema.credentialAudit.credentialName, name))
+    expect(audits.find((entry) => entry.action === 'registration_requested')?.purpose).toBe('Deploy the worker')
+  })
+
   test('the registration request is audited by the worker', async () => {
     const { db, now } = await setup()
     const name = uniqueName()

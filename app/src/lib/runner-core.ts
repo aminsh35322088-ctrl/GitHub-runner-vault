@@ -364,8 +364,11 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
     // Same answer for missing, hidden, disabled and expired: no probing for hidden names.
     return fail(404, 'unavailable')
   }
+  // Audits record the credential's owner-approved purpose (never the
+  // request-supplied one, which is untrusted runner input).
+  const identified = { ...common, credentialId: read.credential.id, purpose: read.credential.purpose }
   if (read.credential.delivery !== 'proxy') {
-    await scheduleBackgroundWrites(deps, [audit(deps.db, { ...common, credentialId: read.credential.id, action: 'proxy_use', result: 'wrong_delivery' })])
+    await scheduleBackgroundWrites(deps, [audit(deps.db, { ...identified, action: 'proxy_use', result: 'wrong_delivery' })])
     return fail(400, 'not_a_proxy_credential')
   }
 
@@ -375,7 +378,7 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
     limit: preferences?.proxyRequestsPerMinute ?? USE_LIMIT_PER_MINUTE,
   })
   if (!reservation) {
-    await scheduleBackgroundWrites(deps, [audit(deps.db, { ...common, credentialId: read.credential.id, action: 'proxy_use', result: 'rate_limited' })])
+    await scheduleBackgroundWrites(deps, [audit(deps.db, { ...identified, action: 'proxy_use', result: 'rate_limited' })])
     return fail(429, 'rate_limited')
   }
 
@@ -390,7 +393,7 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
     if (!releaseUploadSlot) {
       try { await releaseRunnerRateLimitReservation(deps.db, reservation) } catch { /* Keep the request failure generic. */ }
       await scheduleBackgroundWrites(deps, [
-        audit(deps.db, { ...common, credentialId: read.credential.id, action: 'proxy_use', result: 'proxy_busy' }),
+        audit(deps.db, { ...identified, action: 'proxy_use', result: 'proxy_busy' }),
         recordCredentialUsage(deps.db, { credentialId: read.credential.id, consumer, success: false, latencyMs: Date.now() - startedAt, now: deps.now }),
       ])
       return fail(503, 'proxy_busy')
@@ -404,7 +407,7 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
       if (!streamed.ok) {
         try { await releaseRunnerRateLimitReservation(deps.db, reservation) } catch { /* Keep the request failure generic. */ }
         await scheduleBackgroundWrites(deps, [
-          audit(deps.db, { ...common, credentialId: read.credential.id, action: 'proxy_use', result: streamed.error }),
+          audit(deps.db, { ...identified, action: 'proxy_use', result: streamed.error }),
           recordCredentialUsage(deps.db, { credentialId: read.credential.id, consumer, success: false, latencyMs: Date.now() - startedAt, now: deps.now }),
         ])
         return fail(streamed.error === 'body_too_large' ? 413 : 400, streamed.error)
@@ -428,7 +431,7 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
     // A D1 reservation is the authoritative quota counter; audit and aggregates
     // are now best-effort background metadata and never hold the API response open.
     await scheduleBackgroundWrites(deps, [
-      audit(deps.db, { ...common, credentialId: read.credential.id, action: 'proxy_use', result: result.error, detail: result.detail }),
+      audit(deps.db, { ...identified, action: 'proxy_use', result: result.error, detail: result.detail }),
       recordCredentialUsage(deps.db, { credentialId: read.credential.id, consumer, success: false, latencyMs: Date.now() - startedAt, now: deps.now }),
     ])
     return fail(PROXY_STATUS[result.error], result.error)
@@ -436,7 +439,7 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
   const evidence = runtimeCredentialEvidence(read.credential.service, result.status, result.body, result.headers)
   const writes: Promise<unknown>[] = [
     audit(deps.db, {
-      ...common, credentialId: read.credential.id, action: 'proxy_use', result: 'ok',
+      ...identified, action: 'proxy_use', result: 'ok',
       detail: `${result.method} ${result.host}${result.path} -> ${result.status}${result.redactions ? ` (${result.redactions} redacted)` : ''}`,
     }),
     recordCredentialUsage(deps.db, { credentialId: read.credential.id, consumer, success: result.status < 400, latencyMs: Date.now() - startedAt, now: deps.now }),

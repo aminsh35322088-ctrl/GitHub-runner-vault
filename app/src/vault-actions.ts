@@ -11,7 +11,7 @@ import { env } from 'cloudflare:workers'
 import { getDb, getRequestOrigin, getSession } from './db.ts'
 import { loadVaultKeys, type VaultEnv } from './lib/vault-config.ts'
 import {
-  createCredential, deleteCredential, dismissPendingRegistrationRequest, getCredentialForOwner, readCredentialValue, registerExternallyManaged, renewRegistrationLink, setEnabled, setVisibility, storeCredentialValue, validateStoreInput,
+  createCredential, deleteCredential, dismissPendingRegistrationRequest, getCredentialForOwner, MAX_TEMPORARY_MS, readCredentialValue, registerExternallyManaged, renewRegistrationLink, setEnabled, setVisibility, storeCredentialValue, validateStoreInput,
 } from './lib/credential-service.ts'
 import { consumeEnrollmentLink, peekEnrollmentLink, releaseEnrollmentLink } from './lib/enrollment.ts'
 import { revokeRunnerSessions } from './lib/runner-session.ts'
@@ -56,6 +56,15 @@ const storeSchema = z.object({
   providerAccountId: z.string().max(160).default(''),
   authFields: z.record(z.string().regex(/^[a-z][a-z0-9_]{0,31}$/), z.string().max(4096)).refine((fields) => Object.keys(fields).length <= 12).default({}),
   validationRequested: z.boolean().default(false),
+}).superRefine((form, ctx) => {
+  // The service layer caps temporary credentials at MAX_TEMPORARY_MS; enforce
+  // the same bound here so the form fails fast instead of after submission.
+  if (form.lifetime !== 'temporary') return
+  if (form.expiresInHours === null) {
+    ctx.addIssue({ code: 'custom', path: ['expiresInHours'], message: 'Temporary credentials need an expiry.' })
+  } else if (form.expiresInHours * 3600_000 > MAX_TEMPORARY_MS) {
+    ctx.addIssue({ code: 'custom', path: ['expiresInHours'], message: `Temporary credentials can live at most ${MAX_TEMPORARY_MS / 3600_000} hours.` })
+  }
 })
 export type StoreForm = z.input<typeof storeSchema>
 
