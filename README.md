@@ -325,9 +325,12 @@ The Deploy Button provisions D1 automatically. Dashboard Git connection and Wran
 
 ### Where the key lives
 
-The master key is a Worker secret: `VAULT_MASTER_KEY` (32 random bytes, base64: `openssl rand -base64 32`). A fresh
-deployment without it **fails closed** — the vault never generates a master key into the same D1 database that holds
-the ciphertext, because anyone who can read that database could then decrypt every credential.
+The master key is a Worker secret: `VAULT_MASTER_KEY` (32 random bytes, base64). **Nobody has to create or paste it.**
+The deploy helper provisions it automatically after a successful Worker deploy on all supported routes (Deploy Button,
+Dashboard Git connection and Wrangler CLI): it generates a new key for a fresh deployment or copies a legacy D1 key
+verbatim into the secret during an upgrade. The value is sent to Wrangler through stdin only, never argv, files or logs.
+If provisioning cannot complete, a fresh deployment fails closed and a legacy deployment stays in the warned read-only
+mode until a later redeploy retries.
 
 Deployments created before this was required may still hold a master key in D1 (`vault_setting.master_key`). They
 keep working in a flagged legacy mode — existing credentials stay readable and Settings shows a warning — but
@@ -335,8 +338,8 @@ storing new credentials is paused until the owner sets the secret. Migration is 
 after the secret is set: if the secret equals the stored key, the database copy is simply deleted; if it differs,
 every stored value and the sealed GitHub client secret are preflighted, then all ciphertext rewrites, the GitHub
 secret reseal and deletion of the database copy commit in one atomic D1 batch. If any value cannot be decrypted,
-the migration stops without rewriting any row and retains the old database key. In that case, redeploy with the
-existing D1 key as `VAULT_MASTER_KEY` to restore the previous key path, or repair the affected data before retrying.
+the migration stops without rewriting any row and retains the old database key. In that case, the deploy helper will copy the existing D1 key into `VAULT_MASTER_KEY` on a later redeploy;
+if provisioning is blocked by deployment permissions, set the secret manually as a fallback or repair the affected data before retrying.
 
 Existing deployments that already have `BETTER_AUTH_SECRET` and `ENCRYPTION_KEY` secrets keep using them unchanged.
 

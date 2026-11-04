@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { prepareWorkerEntrypoint } from './prepare-worker-entry.mjs'
@@ -7,7 +8,7 @@ const isWindows = process.platform === 'win32'
 const binPath = (name) => resolve('node_modules', '.bin', name + (isWindows ? '.cmd' : ''))
 const ownerIdPattern = /^[1-9][0-9]{0,15}$/
 
-function runLocal(name, args, { capture = false } = {}) {
+function runLocal(name, args, { capture = false, input } = {}) {
   const executable = binPath(name)
   if (!existsSync(executable)) {
     throw new Error(`Local ${name} executable is missing. Run pnpm install first.`)
@@ -18,7 +19,8 @@ function runLocal(name, args, { capture = false } = {}) {
     env: process.env,
     encoding: 'utf8',
     shell: isWindows,
-    stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+    input,
+    stdio: input !== undefined ? ['pipe', capture ? 'pipe' : 'inherit', 'inherit'] : capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
   })
 
   if (result.error) throw result.error
@@ -162,6 +164,121 @@ function ensureD1(sourceConfigPath, generatedConfigPath) {
   if (nextSource !== source) writeFileSync(sourceConfigPath, nextSource)
 
   console.log(`[deploy] DB binding is ready: ${databaseName}`)
+  return databaseName
+}
+
+// ── master key provisioning ─────────────────────────────────────
+//
+// The vault's master key must live in the VAULT_MASTER_KEY Worker secret,
+// never in D1 next to the ciphertext it decrypts. Provisioning it is part of
+// deployment, not a user task: this helper runs with the same Wrangler
+// credentials that just deployed the Worker, so every route (Deploy Button,
+// Dashboard Git connection, Wrangler CLI) gets the secret with zero input.
+// The key value is only ever passed to Wrangler on stdin — never in argv,
+// files, config or logs. Provisioning never fails the deploy: if it cannot
+// complete, the vault stays fail-closed (or in flagged legacy mode) and a
+// later redeploy retries.
+
+export const MASTER_KEY_SECRET = 'VAULT_MASTER_KEY'
+
+export function parseSecretList(output) {
+  const text = stripAnsi(output)
+  try {
+    const parsed = JSON.parse(text)
+    const rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.result) ? parsed.result : null
+    if (rows) return rows.map((row) => row?.name).filter((name) => typeof name === 'string')
+  } catch { /* fall through to the text shape */ }
+  const names = new Set()
+  for (const match of text.matchAll(/"name"\s*:\s*"([^"]+)"/g)) names.add(match[1])
+  for (const line of text.split('\n')) {
+    const name = line.trim()
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) names.add(name)
+  }
+  return [...names]
+}
+
+export function parseStoredMasterKey(output) {
+  let parsed
+  try {
+    parsed = JSON.parse(stripAnsi(output))
+  } catch {
+    return null
+  }
+  const statements = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.result) ? parsed.result : [parsed]
+  for (const statement of statements) {
+    const rows = statement?.results ?? statement?.result?.results
+    if (!Array.isArray(rows)) continue
+    for (const row of rows) {
+      if (typeof row?.value === 'string' && row.value.trim()) return row.value.trim()
+    }
+  }
+  return null
+}
+
+export function isValidMasterKey(value) {
+  if (typeof value !== 'string') return false
+  const encoded = value.trim()
+  // A 32-byte key has one canonical 44-character base64 representation.
+  // Buffer.from(base64) alone is permissive and silently ignores invalid data.
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(encoded)) return false
+  try {
+    const decoded = Buffer.from(encoded, 'base64')
+    return decoded.length === 32 && decoded.toString('base64') === encoded
+  } catch {
+    return false
+  }
+}
+
+/** Decide what provisioning should do. Pure: the caller performs the I/O. */
+export function masterKeyAction(secretNames, storedKey) {
+  if (secretNames.includes(MASTER_KEY_SECRET)) return { action: 'skip' }
+  if (storedKey !== null && storedKey !== undefined) {
+    return isValidMasterKey(storedKey) ? { action: 'migrate', value: storedKey } : { action: 'blocked' }
+  }
+  return { action: 'generate' }
+}
+
+function ensureMasterKey(databaseName) {
+  let secretNames
+  try {
+    secretNames = parseSecretList(runLocal('wrangler', ['secret', 'list'], { capture: true }))
+  } catch (error) {
+    console.warn('[deploy] Could not list Worker secrets; skipping master key provisioning (' + error.message + '). The vault stays fail-closed until a redeploy provisions VAULT_MASTER_KEY.')
+    return
+  }
+  if (secretNames.includes(MASTER_KEY_SECRET)) {
+    console.log('[deploy] VAULT_MASTER_KEY secret is already set')
+    return
+  }
+
+  let storedKey = null
+  try {
+    storedKey = parseStoredMasterKey(runLocal('wrangler', ['d1', 'execute', databaseName, '--remote', '--json', '--command', "SELECT value FROM vault_setting WHERE key = 'master_key'"], { capture: true }))
+  } catch (error) {
+    if (!/no such table/i.test(error.message)) {
+      console.warn('[deploy] Could not read the stored master key from D1; skipping provisioning so an existing key is never replaced blindly (' + error.message + ').')
+      return
+    }
+    // Fresh database: vault_setting does not exist yet, so there is no
+    // legacy key to migrate.
+  }
+
+  const plan = masterKeyAction(secretNames, storedKey)
+  if (plan.action === 'blocked') {
+    console.warn('[deploy] A master_key row exists in D1 but is not a valid 32-byte key; leaving it untouched. Set the VAULT_MASTER_KEY Worker secret manually to the correct value, then redeploy.')
+    return
+  }
+
+  const value = plan.action === 'migrate' ? plan.value : randomBytes(32).toString('base64')
+  try {
+    runLocal('wrangler', ['secret', 'put', MASTER_KEY_SECRET], { input: value })
+  } catch (error) {
+    console.warn('[deploy] Could not set the VAULT_MASTER_KEY secret (' + error.message + '). The deployment build token needs Workers Scripts edit permission; until the secret is set the vault stays fail-closed (fresh) or in legacy database mode (upgrade).')
+    return
+  }
+  console.log(plan.action === 'migrate'
+    ? '[deploy] Migrated the existing master key from D1 into the VAULT_MASTER_KEY Worker secret; the database copy is removed on the next request'
+    : '[deploy] Generated a new master key and stored it as the VAULT_MASTER_KEY Worker secret')
 }
 
 export function deploy() {
@@ -177,8 +294,9 @@ export function deploy() {
   prepareWorkerEntrypoint(resolve(process.cwd(), 'dist/rsc'))
   const generated = loadGeneratedConfig(generatedConfigPath)
   ensureOwner(generated)
-  ensureD1(sourceConfigPath, generatedConfigPath)
+  const databaseName = ensureD1(sourceConfigPath, generatedConfigPath)
   runLocal('wrangler', ['deploy'])
+  ensureMasterKey(databaseName)
 }
 
 if (process.argv[1] && import.meta.url === new URL('file://' + resolve(process.argv[1])).href) {

@@ -155,7 +155,7 @@ async function key() {
 async function storageKey() {
   const keys = await loadVaultKeys(getDb(), env as unknown as VaultEnv)
   if (keys.keySource === 'database') {
-    throw new Error('ذخیره Credential تا تکمیل مهاجرت امن کلید اصلی متوقف است؛ کلید قدیمی در دیتابیس حفظ شده تا تمام داده‌ها با موفقیت بازرمزگذاری شوند. پس از رفع خطای مهاجرت، Deploy را دوباره اجرا کنید.')
+    throw new Error('ذخیره Credential تا تکمیل مهاجرت امن کلید اصلی متوقف است؛ کلید قدیمی در دیتابیس حفظ شده تا تمام داده‌ها با موفقیت بازرمزگذاری شوند. کافی است Vault را دوباره Deploy کنید تا خط لوله استقرار Secret را به‌صورت خودکار provision کند؛ تنظیم دستی فقط fallback است.')
   }
   return keys.encryptionKey
 }

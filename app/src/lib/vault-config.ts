@@ -133,7 +133,7 @@ async function resolveKeys(db: Db, e: VaultEnv): Promise<VaultKeys> {
     // pause new credential storage until the owner sets the secret.
     return { ...(await keysFromMaster(stored)), keySource: 'database' }
   }
-  throw new Error('VAULT_MASTER_KEY is not configured: set it as a Worker secret (base64-encoded 32 random bytes); the vault no longer generates a master key into its own database')
+  throw new Error('VAULT_MASTER_KEY is not configured: redeploy so the deploy pipeline can provision the Worker secret automatically (setting it manually is only a fallback); the vault no longer generates a master key into its own database')
 }
 
 /**

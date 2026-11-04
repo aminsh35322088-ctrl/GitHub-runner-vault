@@ -5,7 +5,11 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import {
+  isValidMasterKey,
+  masterKeyAction,
   parseD1DatabaseList,
+  parseSecretList,
+  parseStoredMasterKey,
   setD1DatabaseId,
   setD1DatabaseIdInJsonc,
 } from './deploy.mjs'
@@ -28,6 +32,58 @@ test('accepts a wrapped result shape returned by API-style Wrangler output', () 
     result: [{ database_name: 'runner-vault-db', database_id: DATABASE_ID }],
   }))
   assert.deepEqual(rows, [{ name: 'runner-vault-db', id: DATABASE_ID }])
+})
+
+// Bytes 0..31, the same fixed test-only key the app tests pin.
+const TEST_MASTER_KEY = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8='
+const EXECUTE_MASTER_KEY_CALL = "d1 execute runner-vault-db --remote --json --command SELECT value FROM vault_setting WHERE key = 'master_key'"
+
+test('parses the Wrangler secret list JSON shape', () => {
+  const names = parseSecretList(JSON.stringify([
+    { name: 'VAULT_MASTER_KEY', type: 'secret_text' },
+    { name: 'OTHER', type: 'secret_text' },
+  ]))
+  assert.deepEqual(names, ['VAULT_MASTER_KEY', 'OTHER'])
+})
+
+test('parses secret names from text output and tolerates noise', () => {
+  assert.deepEqual(parseSecretList('VAULT_MASTER_KEY\n'), ['VAULT_MASTER_KEY'])
+  assert.deepEqual(parseSecretList(''), [])
+})
+
+test('extracts the stored master key from D1 execute JSON', () => {
+  const output = JSON.stringify([{ results: [{ value: TEST_MASTER_KEY }], success: true }])
+  assert.equal(parseStoredMasterKey(output), TEST_MASTER_KEY)
+  assert.equal(parseStoredMasterKey(JSON.stringify([{ results: [], success: true }])), null)
+  assert.equal(parseStoredMasterKey(JSON.stringify({ result: [{ results: [{ value: TEST_MASTER_KEY }] }] })), TEST_MASTER_KEY)
+  assert.equal(parseStoredMasterKey('not json'), null)
+})
+
+test('validates master keys as base64-encoded 32 bytes', () => {
+  assert.equal(isValidMasterKey(TEST_MASTER_KEY), true)
+  assert.equal(isValidMasterKey('AAAA'), false)
+  assert.equal(isValidMasterKey(TEST_MASTER_KEY + 'garbage'), false)
+  assert.equal(isValidMasterKey(TEST_MASTER_KEY.slice(0, -1) + '/'), false)
+  assert.equal(isValidMasterKey(''), false)
+  assert.equal(isValidMasterKey(null), false)
+})
+
+test('master key provisioning skips when the secret already exists', () => {
+  assert.deepEqual(masterKeyAction(['VAULT_MASTER_KEY'], TEST_MASTER_KEY), { action: 'skip' })
+  assert.deepEqual(masterKeyAction(['VAULT_MASTER_KEY'], null), { action: 'skip' })
+})
+
+test('master key provisioning migrates a valid stored key verbatim', () => {
+  assert.deepEqual(masterKeyAction([], TEST_MASTER_KEY), { action: 'migrate', value: TEST_MASTER_KEY })
+})
+
+test('master key provisioning generates only when no stored key exists', () => {
+  assert.deepEqual(masterKeyAction([], null), { action: 'generate' })
+  assert.deepEqual(masterKeyAction(['OTHER_SECRET'], null), { action: 'generate' })
+})
+
+test('master key provisioning never replaces an unreadable stored key', () => {
+  assert.deepEqual(masterKeyAction([], 'not-a-key'), { action: 'blocked' })
 })
 
 test('injects the exact D1 ID into the generated Worker config', () => {
@@ -138,6 +194,14 @@ if (args[0] === 'd1' && args[1] === 'list') {
   state.push({ name: args[2], uuid: process.env.TEST_CREATED_DB_ID })
   fs.writeFileSync(process.env.TEST_DB_STATE, JSON.stringify(state))
   process.stdout.write('created')
+} else if (args[0] === 'd1' && args[1] === 'execute') {
+  const stored = process.env.TEST_STORED_KEY
+  process.stdout.write(JSON.stringify([{ results: stored ? [{ value: stored }] : [], success: true }]))
+} else if (args[0] === 'secret' && args[1] === 'list') {
+  process.stdout.write(process.env.TEST_SECRETS || '[]')
+} else if (args[0] === 'secret' && args[1] === 'put') {
+  fs.writeFileSync(process.env.TEST_SECRET_VALUE_FILE, fs.readFileSync(0, 'utf8'))
+  process.stdout.write('secret uploaded\\n')
 } else if (args[0] === 'deploy') {
   process.stdout.write('mock deploy complete\\n')
 } else {
@@ -176,6 +240,7 @@ fs.writeFileSync(path.join('dist/rsc', 'wrangler.json'), JSON.stringify({
     sourceConfig: join(app, 'wrangler.jsonc'),
     stateFile,
     callsFile,
+    secretValueFile: join(root, 'secret-value.txt'),
     env: {
       ...process.env,
       PATH: process.env.PATH,
@@ -183,6 +248,7 @@ fs.writeFileSync(path.join('dist/rsc', 'wrangler.json'), JSON.stringify({
       TEST_DB_STATE: stateFile,
       TEST_CREATED_DB_ID: DATABASE_ID,
       TEST_OWNER_ID: OWNER_ID,
+      TEST_SECRET_VALUE_FILE: join(root, 'secret-value.txt'),
     },
     cleanup() { rmSync(root, { recursive: true, force: true }) },
   }
@@ -205,8 +271,13 @@ test('uses the deployment-provided D1 UUID without D1 API calls', () => {
       RUNNER_VAULT_D1_DATABASE_ID: DATABASE_ID,
     })
     assert.equal(result.status, 0, result.stderr)
-    assert.deepEqual(readFileSync(f.callsFile, 'utf8').trim().split('\n'), ['deploy'])
+    assert.deepEqual(readFileSync(f.callsFile, 'utf8').trim().split('\n'), ['deploy', 'secret list', EXECUTE_MASTER_KEY_CALL, 'secret put VAULT_MASTER_KEY'])
     assert.equal(JSON.parse(readFileSync(f.generatedConfig, 'utf8')).d1_databases[0].database_id, DATABASE_ID)
+    // A fresh deploy generates a valid 32-byte key, delivered on stdin only:
+    // it reaches the secret-value file but never appears in the call log.
+    const generated = readFileSync(f.secretValueFile, 'utf8')
+    assert.equal(isValidMasterKey(generated), true)
+    assert.equal(readFileSync(f.callsFile, 'utf8').includes(generated), false)
   } finally {
     f.cleanup()
   }
@@ -218,7 +289,7 @@ test('Workers Builds reuses its prebuilt owner binding, resolves D1, then deploy
     const result = invokeDeploy(f, { WORKERS_CI: '1' })
     assert.equal(result.status, 0, result.stderr)
     const calls = readFileSync(f.callsFile, 'utf8').trim().split('\n')
-    assert.deepEqual(calls, ['d1 list --json', 'deploy'])
+    assert.deepEqual(calls, ['d1 list --json', 'deploy', 'secret list', EXECUTE_MASTER_KEY_CALL, 'secret put VAULT_MASTER_KEY'])
     const generated = JSON.parse(readFileSync(f.generatedConfig, 'utf8'))
     assert.equal(generated.vars.OWNER_GITHUB_ID, OWNER_ID)
     assert.equal(generated.d1_databases[0].database_id, DATABASE_ID)
@@ -237,7 +308,7 @@ test('Wrangler CLI path builds first, then resolves D1 and deploys', () => {
     const result = invokeDeploy(f, { RUNNER_VAULT_OWNER_GITHUB_ID: OWNER_ID })
     assert.equal(result.status, 0, result.stderr)
     const calls = readFileSync(f.callsFile, 'utf8').trim().split('\n')
-    assert.deepEqual(calls, ['vite build', 'd1 list --json', 'deploy'])
+    assert.deepEqual(calls, ['vite build', 'd1 list --json', 'deploy', 'secret list', EXECUTE_MASTER_KEY_CALL, 'secret put VAULT_MASTER_KEY'])
     const generated = JSON.parse(readFileSync(f.generatedConfig, 'utf8'))
     assert.equal(generated.vars.OWNER_GITHUB_ID, OWNER_ID)
     assert.equal(generated.d1_databases[0].database_id, DATABASE_ID)
@@ -255,8 +326,41 @@ test('creates a missing D1 database before deploying', () => {
     const result = invokeDeploy(f, { WORKERS_CI: '1' })
     assert.equal(result.status, 0, result.stderr)
     const calls = readFileSync(f.callsFile, 'utf8').trim().split('\n')
-    assert.deepEqual(calls, ['d1 list --json', 'd1 create runner-vault-db --binding DB --update-config', 'd1 list --json', 'deploy'])
+    assert.deepEqual(calls, ['d1 list --json', 'd1 create runner-vault-db --binding DB --update-config', 'd1 list --json', 'deploy', 'secret list', EXECUTE_MASTER_KEY_CALL, 'secret put VAULT_MASTER_KEY'])
     assert.equal(JSON.parse(readFileSync(f.generatedConfig, 'utf8')).d1_databases[0].database_id, DATABASE_ID)
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('skips master key provisioning when the secret already exists', () => {
+  const f = makeDeployFixture()
+  try {
+    const result = invokeDeploy(f, {
+      WORKERS_CI: '1',
+      TEST_SECRETS: JSON.stringify([{ name: 'VAULT_MASTER_KEY', type: 'secret_text' }]),
+    })
+    assert.equal(result.status, 0, result.stderr)
+    const calls = readFileSync(f.callsFile, 'utf8').trim().split('\n')
+    assert.deepEqual(calls, ['d1 list --json', 'deploy', 'secret list'])
+    assert.equal(existsSync(f.secretValueFile), false)
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('migrates a stored legacy master key into the secret verbatim', () => {
+  const f = makeDeployFixture()
+  try {
+    const result = invokeDeploy(f, {
+      WORKERS_CI: '1',
+      TEST_STORED_KEY: TEST_MASTER_KEY,
+    })
+    assert.equal(result.status, 0, result.stderr)
+    const calls = readFileSync(f.callsFile, 'utf8').trim().split('\n')
+    assert.deepEqual(calls, ['d1 list --json', 'deploy', 'secret list', EXECUTE_MASTER_KEY_CALL, 'secret put VAULT_MASTER_KEY'])
+    assert.equal(readFileSync(f.secretValueFile, 'utf8'), TEST_MASTER_KEY)
+    assert.equal(readFileSync(f.callsFile, 'utf8').includes(TEST_MASTER_KEY), false)
   } finally {
     f.cleanup()
   }
