@@ -9,7 +9,7 @@ import { z } from 'zod'
 import { getActionRequest } from 'spiceflow'
 import { env } from 'cloudflare:workers'
 import { getDb, getRequestOrigin, getSession } from './db.ts'
-import { loadVaultKeys, type VaultEnv } from './lib/vault-config.ts'
+import { loadOwnerId, loadVaultKeys, type VaultEnv } from './lib/vault-config.ts'
 import {
   createCredential, deleteCredential, dismissPendingRegistrationRequest, getCredentialForOwner, MAX_TEMPORARY_MS, readCredentialValue, registerExternallyManaged, renewRegistrationLink, setEnabled, setVisibility, storeCredentialValue, validateStoreInput,
 } from './lib/credential-service.ts'
@@ -413,7 +413,13 @@ export async function saveRunnerPolicyAction(form: RunnerForm) {
     throw new Error('Could not look up that repository. Check the name, or enter its numeric id (needed for private repositories).')
   }
   const audience = getRequestOrigin(getActionRequest())
-  await saveRunnerPolicy(getDb(), {
+  const db = getDb()
+  // Keep the immutable deployment-owner binding on every manual policy save.
+  const repositoryOwnerId = await loadOwnerId(db, env as unknown as VaultEnv)
+  await saveRunnerPolicy(db, {
     repository: parsed.repository, repositoryId, branch: parsed.branch, workflowFile: parsed.workflowFile, events: DEFAULT_EVENTS,
+    ...(repositoryOwnerId ? { repositoryOwnerId } : {}),
   }, audience)
+  // Sessions issued under the previous repository/workflow policy are no longer valid.
+  await revokeRunnerSessions(db, Date.now())
 }

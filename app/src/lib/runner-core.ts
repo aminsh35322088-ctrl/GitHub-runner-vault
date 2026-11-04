@@ -16,6 +16,52 @@ type Db = ReturnType<typeof getDb>
 export const USE_LIMIT_PER_MINUTE = 30
 export const SESSION_LIMIT_PER_HOUR = 20
 export const REGISTRATION_LIMIT_PER_HOUR = 10
+/** Backstops above the per-repository limits: one repository (or one runaway
+ * loop) can never consume the whole vault-wide budget, and vice versa. */
+export const SESSION_GLOBAL_LIMIT_PER_HOUR = 200
+export const REGISTRATION_GLOBAL_LIMIT_PER_HOUR = 100
+/** Registry/integrations are cheap metadata reads, but a stuck runner loop
+ * must not poll them without bound either. Counted per issued session. */
+export const READ_LIMIT_PER_MINUTE = 120
+
+/** Rate-limit subjects are namespaced per repository so limits stay isolated. */
+const repositorySubject = (repository: string) => `repository:${repository}`
+
+/** Short stable digest for subjects that must not embed a raw session id. */
+async function subjectDigest(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 32)
+}
+
+/**
+ * Reserve a per-repository slot and then the vault-wide backstop slot.
+ * Returns both reservation ids, or null (releasing the first slot) when
+ * either limit is already exhausted.
+ */
+async function reserveScopedAndGlobal(
+  deps: RunnerDeps,
+  input: { scope: 'session' | 'registration'; subject: string; limit: number; globalLimit: number },
+): Promise<{ scoped: string; global: string } | null> {
+  const scoped = await reserveRunnerRateLimit(deps.db, {
+    scope: input.scope, subject: input.subject, now: deps.now, windowMs: 3600_000, limit: input.limit,
+  })
+  if (!scoped) return null
+  let global: string | null
+  try {
+    global = await reserveRunnerRateLimit(deps.db, {
+      scope: input.scope, subject: 'global', now: deps.now, windowMs: 3600_000, limit: input.globalLimit,
+    })
+  } catch (error) {
+    await releaseRunnerRateLimitReservation(deps.db, scoped)
+    throw error
+  }
+  if (!global) {
+    await releaseRunnerRateLimitReservation(deps.db, scoped)
+    return null
+  }
+  return { scoped, global }
+}
+
 /**
  * Session attempts (successful or not) allowed per client IP per hour, checked
  * before OIDC verification. Legit runners fetch a fresh token per job and retry
@@ -116,9 +162,11 @@ export async function createSession(deps: RunnerDeps, authorization: string | nu
     }
   }
   const preferences = await deps.getVaultPreferences?.()
-  const reservation = await reserveRunnerRateLimit(deps.db, {
-    scope: 'session', subject: 'global', now: deps.now, windowMs: 3600_000,
+  const reservation = await reserveScopedAndGlobal(deps, {
+    scope: 'session',
+    subject: repositorySubject(verified.identity.repository),
     limit: preferences?.runnerSessionsPerHour ?? SESSION_LIMIT_PER_HOUR,
+    globalLimit: SESSION_GLOBAL_LIMIT_PER_HOUR,
   })
   if (!reservation) return fail(429, 'rate_limited')
 
@@ -146,9 +194,25 @@ async function authenticate(deps: RunnerDeps, authorization: string | null): Pro
 
 // ── GET /api/runner/registry ───────────────────────────────────────
 
+/**
+ * Per-session ceiling for the metadata read endpoints. The D1 schema only
+ * allows the session/registration/proxy scopes, so reads ride the session
+ * scope under their own `read:` subject namespace; the digest keeps the raw
+ * session id out of the rate-limit table.
+ */
+async function reserveReadLimit(deps: RunnerDeps, session: RunnerSession): Promise<boolean> {
+  const reservation = await reserveRunnerRateLimit(deps.db, {
+    scope: 'session', subject: `read:${await subjectDigest(JSON.stringify(session))}`,
+    now: deps.now, windowMs: 60_000, limit: READ_LIMIT_PER_MINUTE,
+  })
+  return reservation !== null
+}
+
+
 export async function registry(deps: RunnerDeps, authorization: string | null) {
   const auth = await authenticate(deps, authorization)
   if (!auth.ok) return auth.res
+  if (!await reserveReadLimit(deps, auth.session)) return fail(429, 'rate_limited')
   return { status: 200, body: { credentials: await listRegistryForRunner(deps.db, deps.now) } }
 }
 
@@ -156,6 +220,7 @@ export async function registry(deps: RunnerDeps, authorization: string | null) {
 export async function integrations(deps: RunnerDeps, authorization: string | null) {
   const auth = await authenticate(deps, authorization)
   if (!auth.ok) return auth.res
+  if (!await reserveReadLimit(deps, auth.session)) return fail(429, 'rate_limited')
   return { status: 200, body: { integrations: await listRunnerIntegrationMetadata(deps.db, deps.now) } }
 }
 
@@ -172,21 +237,24 @@ export async function requestCredential(
     return fail(400, 'invalid_request')
   }
   const preferences = await deps.getVaultPreferences?.()
-  const reservation = await reserveRunnerRateLimit(deps.db, {
-    scope: 'registration', subject: 'global', now: deps.now, windowMs: 3600_000,
+  const reservations = await reserveScopedAndGlobal(deps, {
+    scope: 'registration',
+    subject: repositorySubject(auth.session.repository),
     limit: preferences?.runnerRegistrationsPerHour ?? REGISTRATION_LIMIT_PER_HOUR,
+    globalLimit: REGISTRATION_GLOBAL_LIMIT_PER_HOUR,
   })
-  if (!reservation) return fail(429, 'rate_limited')
+  if (!reservations) return fail(429, 'rate_limited')
 
   // A thrown D1 error may happen after the credential/link has already been
-  // created (for example, when its trailing audit write fails). Keep the slot
-  // reserved on exceptions; only structured pre-acceptance errors release it.
+  // created (for example, when its trailing audit write fails). Keep both slots
+  // reserved on exceptions; only structured pre-acceptance errors release them.
   const result = await requestRegistration(deps.db, {
     name: input.name, service: input.service, purpose: typeof input.purpose === 'string' ? input.purpose : undefined, doc: input.doc,
     requestedBy: auth.session.sub, now: deps.now,
   })
   if (!result.ok) {
-    await releaseRunnerRateLimitReservation(deps.db, reservation)
+    await releaseRunnerRateLimitReservation(deps.db, reservations.scoped)
+    await releaseRunnerRateLimitReservation(deps.db, reservations.global)
     return fail(result.error === 'exists' ? 409 : 400, result.error, result.detail ? { detail: result.detail } : {})
   }
   await scheduleBackgroundWrites(deps, [createNotification(deps.db, {
