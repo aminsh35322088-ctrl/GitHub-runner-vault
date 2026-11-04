@@ -31,8 +31,25 @@ export const SECURITY_HEADERS: Readonly<Record<string, string>> = {
 
 /** Sets the baseline headers without overwriting a value a route already chose. */
 export function applySecurityHeaders(response: Response): Response {
+  // Response.redirect() returns immutable headers in Workers. Work on a copy
+  // and rebuild only when a baseline header is missing; this preserves route
+  // headers, status, status text and streaming bodies without mutating the
+  // original response.
+  const headers = new Headers(response.headers)
+  let changed = false
+
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
-    if (!response.headers.has(name)) response.headers.set(name, value)
+    if (!headers.has(name)) {
+      headers.set(name, value)
+      changed = true
+    }
   }
-  return response
+
+  if (!changed) return response
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  })
 }
