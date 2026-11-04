@@ -3,7 +3,7 @@ import { env } from 'cloudflare:workers'
 import { getDb, schema } from 'db'
 import * as orm from 'drizzle-orm'
 import {
-  buildManifest, convertManifest, keysFromMaster, loadGithubOAuth, loadOwnerId, loadOwnerLogin,
+  buildManifest, convertManifest, keysFromMaster, loadGithubOAuth, loadOwnerId, loadOwnerLogin, manifestAppName,
   loadVaultKeys, newSetupState, parseConversion, resetVaultKeyCache, saveGithubApp, setupStateMatches,
   SETUP_STATE_COOKIE, putSetting,
 } from './vault-config.ts'
@@ -212,12 +212,19 @@ describe('setup state', () => {
 
 describe('GitHub app manifest', () => {
   test('is a private app with exact callback URLs and a valid-length name', () => {
-    const m = buildManifest('https://vault.example.workers.dev', 'abc123')
+    const m = buildManifest('https://vault.example.workers.dev', '318252513')
     expect(m.public).toBe(false)
     expect(m.name.length).toBeLessThanOrEqual(34)
     expect(m.callback_urls).toEqual(['https://vault.example.workers.dev/api/auth/callback/github'])
     expect(m.redirect_url).toBe('https://vault.example.workers.dev/setup/github/callback')
     expect(m.default_permissions).toEqual({})
+  })
+
+  test('app name is fixed per owner, so setup never invents a new app name', () => {
+    expect(manifestAppName('318252513')).toBe('Runner Vault 318252513')
+    expect(buildManifest('https://a.example', '318252513').name).toBe(buildManifest('https://b.example', '318252513').name)
+    expect(manifestAppName('318252513')).not.toBe(manifestAppName('42'))
+    expect(manifestAppName('9'.repeat(64)).length).toBeLessThanOrEqual(34)
   })
 
   const good = { client_id: 'Iv1.x', client_secret: 'cs', owner: { id: 318252513, login: 'octocat', type: 'User' }, pem: 'PRIVATE', webhook_secret: 'w' }
