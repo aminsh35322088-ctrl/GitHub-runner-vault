@@ -253,81 +253,42 @@ Runner traffic limits are owner-configurable in **Settings → Runner traffic li
 
 ## Deployment
 
-Choose the deployment path that matches how you work. Every supported build path resolves the intended personal GitHub account before the Worker is deployed; there is no first-visitor owner claim.
+There is exactly one way to deploy: a setup wizard drives a GitHub Actions workflow. No Cloudflare dashboard steps, no local CLI, nothing to configure by hand — the single input is one Cloudflare API token, created from a prefilled template. The owner identity comes from the repository owner, so there is no first-visitor owner claim.
 
-### 1. Deploy to Cloudflare button
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://aminsh35322088-ctrl.github.io/GitHub-runner-vault/)
 
-The Deploy Button is the quickest route. Authorize GitHub and Cloudflare; Cloudflare creates a new repository under the GitHub account authorizing deployment, provisions D1, and deploys through Workers Builds. During the Vite build, the checked-out GitHub origin is used to resolve the numeric account ID through GitHub's typed JSON user API. If that API is unavailable, the immutable Actions owner ID is accepted only when both `GITHUB_REPOSITORY_OWNER` and the owner in `GITHUB_REPOSITORY` match the checked-out origin. HTML profile metadata is never treated as proof of a personal account; if identity cannot be verified, `/setup` stays locked until `RUNNER_VAULT_OWNER_GITHUB_ID` is configured. That ID becomes the Worker runtime variable `OWNER_GITHUB_ID` and is pinned in D1 on first request.
+*The button opens the setup wizard, hosted from this repository's `docs/` folder via GitHub Pages.*
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/aminsh35322088-ctrl/GitHub-runner-vault/tree/main/app)
+### Steps
 
-The button's source is the upstream repository and it creates an independent copy; it does not deploy an existing fork's commits. To deploy your exact fork, use the Dashboard GitHub connection below. The source repository for a Deploy Button must be public, but the destination repository can be private.
+1. Fork this repository under the personal GitHub account that will own the vault (or use your existing copy of it).
+2. Enable GitHub Pages once: **Settings → Pages → Deploy from a branch → main → /docs → Save**. The wizard then lives at https://aminsh35322088-ctrl.github.io/GitHub-runner-vault/.
+3. Open the wizard (button above) and enter your GitHub username and repository name.
+4. Create the Cloudflare token with the wizard's button — the permissions (Workers Scripts: Edit, D1: Edit, Account Settings: Read) and the token name are pre-selected; press **Create Token** and copy the value. The wizard verifies the token in your browser; the token is never stored and is only ever sent to Cloudflare's API.
+5. Save the token as the CLOUDFLARE_API_TOKEN repository secret — the wizard links straight to the prefilled form. If token verification lists multiple Cloudflare accounts, also save the 32-character ID of the intended account as the optional CLOUDFLARE_ACCOUNT_ID secret.
+6. Run the **Deploy to Cloudflare** workflow from the Actions tab (the wizard links there too). When the run finishes, its summary shows your vault URL.
+7. Open the vault URL and finish setup below.
 
-### 2. Connect your GitHub account from the Cloudflare Dashboard
+### Updating
 
-To import your own fork:
+Every merge to `main` redeploys automatically, and re-running the workflow by hand is always safe: the build, D1 provisioning and master-key provisioning are idempotent, and an upgrade keeps the existing D1 data, owner pin and credentials.
 
-1. Open **Workers & Pages → Create application → GitHub** and authorize the Cloudflare GitHub App.
-2. Select your personal fork/repository.
-3. Set **Root directory** to `app`.
-4. Set **Build command** to `pnpm build`.
-5. Set **Deploy command** to `pnpm deploy`.
-6. Save and deploy.
+### How it works
 
-For an existing Worker, use **Settings → Builds → Connect** and select the same repository. The Worker name must match `name` in `app/wrangler.jsonc` (default: `runner-vault`); change the config name too if you intentionally use a different Worker name. The GitHub repository should be your personal fork. If you intentionally connect a repository owned by someone else, add the build variable `RUNNER_VAULT_OWNER_GITHUB_ID` with your own numeric GitHub user ID under **Settings → Builds → Build variables**; that explicit value overrides the repository owner.
-
-Workers Builds runs the same build-time owner resolver. The deploy command reuses that build, then resolves the `DB` D1 binding and deploys through Wrangler. If D1 does not exist, the deploy helper creates it. For owner lookup reliability, provide `GH_TOKEN` or `GITHUB_TOKEN` as an encrypted Workers Builds build variable; the deploy helper sends it only to GitHub's user API.
-
-**Important — D1 permissions:** Cloudflare's automatically generated Workers Builds API token does not include D1 permissions by default. To let the helper discover/create D1 automatically, open **My Profile → API Tokens**, find the token selected in this Worker under **Settings → Builds → API token**, and add **Account → D1 Read** and **Account → D1 Edit**. Keep the user-scoped token selected for Workers Builds.
-
-Alternatively, create the D1 database in **Storage & databases → D1**, then set its UUID as the `RUNNER_VAULT_D1_DATABASE_ID` Workers Builds build variable (or CLI environment variable). The deploy helper uses that deployment-specific value and skips D1 list/create operations, so the default Build token does not need D1 permissions. Keep the UUID out of the reusable repository config; without this variable, the helper discovers the named database or creates it when missing.
-
-### 3. Wrangler CLI from a Git checkout
-
-Clone your own GitHub repository, then deploy from `app`:
-
-```bash
-git clone https://github.com/YOUR_ACCOUNT/GitHub-runner-vault.git
-cd GitHub-runner-vault/app
-pnpm install --frozen-lockfile
-pnpm exec wrangler login
-pnpm deploy
-```
-
-`pnpm deploy` runs the Vite production build, derives the owner from GitHub `origin`, resolves or creates the configured D1 database, updates the generated Wrangler config with its ID, and finally runs `wrangler deploy`. Use this project command rather than invoking `wrangler deploy` directly, because the wrapper performs the owner and D1 bootstrap first.
-
-The Vite RSC bundle is kept at `dist/rsc/index.js` for its internal server-action and module graph imports. The build then generates a small `dist/rsc/worker.js` entry that exports only the default Worker handler and removes Wrangler's `no_bundle` setting. This is intentional: Workerd service entrypoints accept handlers, not arbitrary named RSC exports. Both Workers Builds (which reuses the prepared build) and the Wrangler CLI path run the same idempotent preparation step before deployment.
-
-The repository contains two pnpm workspaces: the root workspace used by CI and the `app` workspace used by Cloudflare Workers Builds. Both lockfiles are committed and must be kept in sync. The root workspace explicitly includes `app` and `app/db`; build output under `app/dist` is not a workspace package.
-
-When there is no GitHub origin (for example, a source archive), the build falls back to the authenticated GitHub CLI account:
-
-```bash
-gh auth login
-pnpm deploy
-```
-
-Alternatively, set `RUNNER_VAULT_OWNER_GITHUB_ID` to the numeric ID of the intended personal GitHub account for that build; this explicit value takes priority. When a Git origin exists but GitHub's JSON API is unavailable, the Actions owner-ID fallback is accepted only if both `GITHUB_REPOSITORY_OWNER` and the owner portion of `GITHUB_REPOSITORY` match the checked-out origin. A mismatch or missing context leaves the Worker locked. GitHub Actions builds without a Git checkout can use their trusted `GITHUB_REPOSITORY_OWNER_ID` context. The Worker still checks the GitHub App creator against the resolved ID during `/setup`.
-
-### 4. Manual upload / dashboard editor without Git
-
-A direct upload or quick edit has no Git checkout or Vite build from which to derive identity. Before opening `/setup`, add `OWNER_GITHUB_ID` as a **Worker runtime variable** under **Settings → Variables & Secrets**. Set the numeric ID of the intended personal GitHub account. It is public identity metadata, not a secret. Also create/bind the D1 database as `DB` (the binding name must match `app/wrangler.jsonc`) before deploying the built Worker. The GitHub App creator must match the owner ID exactly.
-
-If no valid owner ID is present, `/setup` stays locked. The app never falls back to whichever visitor arrives first.
+- The workflow runs `pnpm deploy` (the root script). The build takes the owner ID from the repository owner, and `app/scripts/deploy.mjs` resolves or creates the D1 database, deploys the Worker with Wrangler using your token, and provisions the `VAULT_MASTER_KEY` Worker secret (see *Where the key lives*). The Worker creates its tables on first request.
+- After deploying, the workflow publishes `deployment.json` at the repository root with the vault URL and the exact commit that was deployed. The Runner Lab reads that file to discover the vault, so there are no Lab-side variables to set.
 
 ### Finish setup
 
 1. Open the Worker URL (`https://<name>.<you>.workers.dev`) and choose *Create the GitHub App* using the personal GitHub account that owns the deployed repository (or matches the explicitly configured owner ID). The app is always named `Runner Vault <your numeric GitHub ID>` — the name is fixed per account, so setup never creates a differently-named app on a later run. If GitHub reports that the name is taken, the app already exists under your account: delete it under **GitHub Settings → Developer settings → GitHub Apps** and run setup again, and it is recreated under the same name.
 2. Sign in to the owner dashboard. No Runner repository form is required: the first valid OIDC run from the owner's `main/.github/workflows/rdc-lab.yml` workflow proves the owner identity and atomically pins the repository ID. Later runs must match the pinned repository, owner, branch, event and workflow. Pull-request events are refused.
-3. Set the Lab Actions variables `RUNNER_VAULT_URL`, `RUNNER_VAULT_REPOSITORY` (the public Vault source repository) and `RUNNER_VAULT_CLIENT_REF` (a reviewed immutable client commit). The existing Lab workflow downloads the client, obtains an OIDC token, establishes a short-lived session and reads the registry before starting RDC. No runner token or manual policy value is needed.
-
-The Deploy Button provisions D1 automatically. Dashboard Git connection and Wrangler CLI deployments use the deploy helper to find or create the named D1 database, patch the built Worker config, and deploy. The Worker creates its tables on first request.
+3. Nothing to configure in the Runner Lab: its workflow reads `deployment.json` from this repository and connects automatically — see the [Runner Lab README](https://github.com/aminsh35322088-ctrl/GitHub-Runner-Lab). The Lab downloads the client at the commit recorded in `deployment.json`, obtains an OIDC token, establishes a short-lived session and reads the registry before starting RDC. No runner token or manual policy value is needed.
 
 ### Where the key lives
 
 The master key is a Worker secret: `VAULT_MASTER_KEY` (32 random bytes, base64). **Nobody has to create or paste it.**
-The deploy helper provisions it automatically after a successful Worker deploy on all supported routes (Deploy Button,
-Dashboard Git connection and Wrangler CLI): it generates a new key for a fresh deployment or copies a legacy D1 key
+The deploy helper provisions it automatically after every successful deploy (the GitHub Actions workflow above is
+the only supported route): it generates a new key for a fresh deployment or copies a legacy D1 key
 verbatim into the secret during an upgrade. The value is sent to Wrangler through stdin only, never argv, files or logs.
 If provisioning cannot complete, a fresh deployment fails closed and a legacy deployment stays in the warned read-only
 mode until a later redeploy retries.
@@ -353,18 +314,20 @@ Stored credentials are not touched.
 
 ## Configuration reference
 
-A normal deployment sets exactly one secret (`VAULT_MASTER_KEY`); everything else below is optional and the rest is configured in the UI.
+A deployment needs exactly one GitHub repository secret (`CLOUDFLARE_API_TOKEN`); everything else below is automatic, an optional override, or configured in the UI.
 
 | Name | Kind | Notes |
 | --- | --- | --- |
-| `VAULT_MASTER_KEY` | secret | **Required for new deployments.** Keeps the master key out of D1 (see above). |
+| `CLOUDFLARE_API_TOKEN` | Actions secret | **The one required input.** Created with the wizard's prefilled template (Workers Scripts: Edit, D1: Edit, Account Settings: Read); used only by the deploy workflow. |
+| `CLOUDFLARE_ACCOUNT_ID` | Actions secret | Optional. Only needed when the token can see more than one account; otherwise the workflow resolves the single account automatically. |
+| `VAULT_MASTER_KEY` | Worker secret | Provisioned automatically by the deploy helper (see above); keeps the master key out of D1. Set manually only as a fallback. |
 | `PUBLIC_ORIGIN` | var | Canonical HTTPS origin for a custom domain. By default the actual request origin is used. |
-| `OWNER_GITHUB_ID` | var | Derived during production build from GitHub `origin`, authenticated `gh`, or an explicit build variable; pinned in D1 on first use. Manual uploads must set this Worker runtime variable. |
+| `OWNER_GITHUB_ID` | var | Set by the deploy workflow from the repository owner; pinned in D1 on first use. Never set by hand. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | vars / secrets | Optional override for the private GitHub sign-in App created through `/setup`. |
 | `RUNNER_REPOSITORY`, `RUNNER_REPOSITORY_ID`, `RUNNER_ALLOWED_REFS`, `RUNNER_ALLOWED_EVENTS`, `RUNNER_ALLOWED_WORKFLOW_REFS` | vars | Optional explicit static policy override. When absent, owner-verified OIDC bootstrap pins the first repository automatically. |
 | `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY` | secrets | Legacy explicit keys; both must be set to be used. |
-| `RUNNER_VAULT_D1_DATABASE_ID` | build var | Optional UUID of a pre-created D1 database; skips D1 list/create API calls. Never commit this deployment-specific value. |
-| `DB` | D1 binding | Provisioned by Deploy Button or the deploy helper. Auto-discovery/creation needs D1 Read/Edit on the Workers Builds token or Wrangler login. |
+| `RUNNER_VAULT_D1_DATABASE_ID` | deploy env | Optional internal override: UUID of a pre-created D1 database; skips D1 list/create calls. Never commit this deployment-specific value. |
+| `DB` | D1 binding | Provisioned automatically by the deploy helper during the Actions deploy. |
 
 ## Operations
 
@@ -401,7 +364,7 @@ redaction in every encoding, timeouts) and the runner API end to end (including 
 - No automatic key rotation tooling.
 - Provider validation depends on the documented read-only API. Unsupported services remain explicitly `unsupported`; unavailable endpoints remain inconclusive.
 - Suggested hardening after first deploy: a branch ruleset on `main` of this repository and Cloudflare Access in front of `/vault/*` as a second owner gate.
-- Runner integration is deployment-specific: install client/vault.mjs in the trusted repository and set its VAULT_URL Actions variable. Pin the client revision and review upgrades.
+- Runner integration is deployment-specific: the trusted repository's workflow reads `deployment.json` (vault URL + pinned client revision) from this repository; review vault upgrades before merging them, because the Lab follows the deployed revision.
 
 ## Repository layout
 
@@ -413,4 +376,5 @@ redaction in every encoding, timeouts) and the runner API end to end (including 
 | `db/` | Drizzle schema (types) and the baseline SQL (`db/drizzle-app/`), embedded into the Worker |
 | `client/vault.mjs` | Zero-dependency runner client |
 | `docs/runner-usage.md` | Runner-side usage and `doc.json` schema |
+| `docs/index.html` | The GitHub Pages setup wizard (the Deploy button at the top of [Deployment](#deployment)) |
 | `SECURITY.md`, `NOTICE.md` | Trust model, upstream credit |

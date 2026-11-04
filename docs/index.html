@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Runner Vault — one-click setup</title>
+<style>
+  :root { color-scheme: light dark; --line: #8886; --accent: #2563eb; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 system-ui, sans-serif; }
+  main { max-width: 40rem; margin: 0 auto; padding: 1rem 1rem 3rem; }
+  h1 { font-size: 1.4rem; margin: 0.5rem 0 0.25rem; }
+  h2 { font-size: 1.05rem; margin: 0 0 0.5rem; }
+  p { margin: 0.4rem 0; }
+  .sub { opacity: 0.75; margin-bottom: 1.25rem; }
+  section { border: 1px solid var(--line); border-radius: 0.75rem; padding: 1rem; margin: 0 0 1rem; }
+  label { display: block; font-weight: 600; margin: 0.6rem 0 0.25rem; }
+  input { width: 100%; padding: 0.6rem; font-size: 1rem; border: 1px solid var(--line); border-radius: 0.5rem; }
+  a.btn, button { display: inline-block; min-height: 44px; padding: 0.6rem 1rem; margin-top: 0.6rem;
+    border-radius: 0.5rem; border: 1px solid var(--accent); background: var(--accent); color: #fff;
+    font-size: 1rem; text-decoration: none; cursor: pointer; }
+  button[disabled] { opacity: 0.6; }
+  ul.checks { list-style: none; padding: 0; margin: 0.6rem 0 0; }
+  ul.checks li { padding: 0.2rem 0; }
+  .ok { color: #15803d; } .bad { color: #dc2626; }
+  small, .small { font-size: 0.85rem; opacity: 0.8; }
+  code { font-family: ui-monospace, monospace; font-size: 0.9em; }
+  #vaultLink { font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Runner Vault — one-click setup</h1>
+  <p class="sub">This wizard deploys your credential vault to Cloudflare through GitHub Actions.
+  You only make one token and paste it once — everything else is automatic.</p>
+  <p class="small"><strong>One-time prerequisite:</strong> in your repository, open
+  <strong>Settings → Pages</strong>, choose <strong>Deploy from a branch</strong>, then select
+  branch <code>main</code> and folder <code>/docs</code>. Save and reopen this page after GitHub
+  Pages publishes it.</p>
+
+  <section>
+    <h2>Your repository</h2>
+    <label for="user">GitHub username</label>
+    <input id="user" autocomplete="username" placeholder="e.g. octocat">
+    <label for="repo">Repository name</label>
+    <input id="repo" value="GitHub-runner-vault">
+    <p class="small">Use the account and repository that hold (or will hold) your vault fork.
+    Every link below follows these two fields.</p>
+  </section>
+
+  <section>
+    <h2>Step 1 — Create your Cloudflare token</h2>
+    <p>Everything is pre-selected — just press <strong>Create Token</strong> and copy the value.</p>
+    <a class="btn" id="tokenLink" target="_blank" rel="noopener">Create the token on Cloudflare</a>
+  </section>
+
+  <section>
+    <h2>Step 2 — Check the token</h2>
+    <p>Paste the token to verify it here, in your browser, before saving it anywhere.</p>
+    <label for="token">Cloudflare API token</label>
+    <input id="token" type="password" autocomplete="off" placeholder="Paste the token">
+    <button id="verify" type="button">Check token</button>
+    <ul class="checks" id="checks"></ul>
+  </section>
+
+  <section>
+    <h2>Step 3 — Save it as a repository secret</h2>
+    <p>Open the prefilled secret form on GitHub and paste the same token as
+    <code>CLOUDFLARE_API_TOKEN</code>.</p>
+    <a class="btn" id="secretLink" target="_blank" rel="noopener">Save CLOUDFLARE_API_TOKEN</a>
+    <p>If the token check above lists <strong>more than one Cloudflare account</strong>, also save
+    the ID of the account you want to deploy into as <code>CLOUDFLARE_ACCOUNT_ID</code>.
+    This second secret is optional when exactly one account is visible to the token.</p>
+    <a class="btn" id="accountSecretLink" target="_blank" rel="noopener">Optional: set CLOUDFLARE_ACCOUNT_ID</a>
+  </section>
+
+  <section>
+    <h2>Step 4 — Deploy</h2>
+    <p>Run the <strong>Deploy to Cloudflare</strong> workflow once. After that, every merge to
+    <code>main</code> redeploys automatically — you never repeat these steps to update.</p>
+    <a class="btn" id="deployLink" target="_blank" rel="noopener">Open the Deploy workflow</a>
+  </section>
+
+  <section>
+    <h2>Step 5 — Finish</h2>
+    <p>After the workflow run turns green, check for your deployment:</p>
+    <button id="checkDeploy" type="button">Check deployment</button>
+    <p id="deployResult"></p>
+  </section>
+
+  <p class="small">Security: this page is open source (it lives in the vault repository under
+  <code>docs/</code>). Your token stays in this page's memory only — it is never stored and is sent
+  nowhere except Cloudflare's own API when you press “Check token”. You can revoke or rotate the
+  token any time in the Cloudflare dashboard.</p>
+</main>
+
+<script>
+'use strict';
+var CF = 'https://api.cloudflare.com/client/v4';
+var params = new URLSearchParams(location.search);
+var userEl = document.getElementById('user');
+var repoEl = document.getElementById('repo');
+userEl.value = params.get('user') || '';
+if (params.get('repo')) repoEl.value = params.get('repo');
+
+function repoPath() {
+  return encodeURIComponent(userEl.value.trim()) + '/' + encodeURIComponent(repoEl.value.trim() || 'GitHub-runner-vault');
+}
+
+var permissions = [
+  { key: 'workers_scripts', type: 'edit' },
+  { key: 'd1', type: 'edit' },
+  { key: 'account_settings', type: 'read' }
+];
+document.getElementById('tokenLink').href =
+  'https://dash.cloudflare.com/profile/api-tokens?name=Runner%20Vault%20Deploy&accountId=*&zoneId=all&permissionGroupKeys=' +
+  encodeURIComponent(JSON.stringify(permissions));
+
+function refreshLinks() {
+  var base = 'https://github.com/' + repoPath();
+  document.getElementById('secretLink').href = base + '/settings/secrets/actions/new?name=CLOUDFLARE_API_TOKEN';
+  document.getElementById('accountSecretLink').href = base + '/settings/secrets/actions/new?name=CLOUDFLARE_ACCOUNT_ID';
+  document.getElementById('deployLink').href = base + '/actions/workflows/deploy.yml';
+}
+userEl.addEventListener('input', refreshLinks);
+repoEl.addEventListener('input', refreshLinks);
+refreshLinks();
+
+function line(list, ok, text) {
+  var li = document.createElement('li');
+  li.className = ok ? 'ok' : 'bad';
+  li.textContent = (ok ? '✓ ' : '✗ ') + text;
+  list.appendChild(li);
+}
+
+function cf(token, path) {
+  return fetch(CF + path, { headers: { Authorization: 'Bearer ' + token } })
+    .then(function (res) { return res.json().catch(function () { return null; }); });
+}
+
+document.getElementById('verify').addEventListener('click', function () {
+  var token = document.getElementById('token').value.trim();
+  var list = document.getElementById('checks');
+  var button = document.getElementById('verify');
+  list.innerHTML = '';
+  if (!token) { line(list, false, 'Paste a token first.'); return; }
+  button.disabled = true;
+  cf(token, '/user/tokens/verify').then(function (verify) {
+    if (!verify || !verify.success || !verify.result || verify.result.status !== 'active') {
+      line(list, false, 'Token is not valid or not active — create it again in Step 1 and copy the full value.');
+      return null;
+    }
+    line(list, true, 'Token is valid and active.');
+    return cf(token, '/accounts');
+  }).then(function (accounts) {
+    if (!accounts) return;
+    var found = (accounts.result || []);
+    if (!accounts.success || found.length === 0) {
+      line(list, false, 'No Cloudflare account is visible to this token — the Account Settings: Read permission is missing.');
+      return;
+    }
+    found.forEach(function (account) {
+      line(list, true, 'Account found: ' + account.name + ' (' + account.id + ')');
+      cf(token, '/accounts/' + account.id + '/workers/scripts').then(function (scripts) {
+        if (scripts && scripts.success) line(list, true, 'Workers Scripts API reachable on ' + account.name + '.');
+        else line(list, false, 'Workers Scripts API not reachable on ' + account.name + ' — add Workers Scripts: Edit to the token.');
+      });
+      cf(token, '/accounts/' + account.id + '/d1/database').then(function (d1) {
+        if (d1 && d1.success) line(list, true, 'D1 API reachable on ' + account.name + '.');
+        else line(list, false, 'D1 API not reachable on ' + account.name + ' — add D1: Edit to the token.');
+      });
+    });
+  }).catch(function () {
+    line(list, false, 'Could not reach the Cloudflare API — check your connection and try again.');
+  }).finally(function () { button.disabled = false; });
+});
+
+document.getElementById('checkDeploy').addEventListener('click', function () {
+  var out = document.getElementById('deployResult');
+  out.textContent = 'Checking…';
+  fetch('https://api.github.com/repos/' + repoPath() + '/contents/deployment.json', {
+    headers: { Accept: 'application/vnd.github+json' }, cache: 'no-store'
+  }).then(function (res) {
+    if (res.status === 404) { out.textContent = 'Not deployed yet — run the Deploy workflow (Step 4) first.'; return null; }
+    if (!res.ok) { out.textContent = 'Could not check the deployment (GitHub answered ' + res.status + '). Check the username and repository above.'; return null; }
+    return res.json();
+  }).then(function (body) {
+    if (!body || !body.content) return;
+    var info = JSON.parse(atob(body.content.replace(/\s/g, '')));
+    out.innerHTML = '';
+    var a = document.createElement('a');
+    a.id = 'vaultLink';
+    a.href = info.url;
+    a.textContent = info.url;
+    out.appendChild(a);
+    out.appendChild(document.createTextNode(' — open it and choose “Create the GitHub App” to finish. The Runner Lab finds this file automatically, so there is nothing else to configure.'));
+  }).catch(function () {
+    out.textContent = 'Could not reach GitHub — check your connection and try again.';
+  });
+});
+</script>
+</body>
+</html>

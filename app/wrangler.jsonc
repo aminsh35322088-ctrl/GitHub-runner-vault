@@ -14,8 +14,8 @@
     "enabled": true,
     "redact_query_string": true
   },
-  // Deploy Button provisions D1 automatically; scripts/deploy.mjs resolves or creates it
-  // for Git-connected builds and Wrangler CLI deployments before `wrangler deploy`.
+  // scripts/deploy.mjs (run by the Deploy to Cloudflare Actions workflow) resolves or
+  // creates this D1 database before `wrangler deploy`.
   "d1_databases": [
     { "binding": "DB", "database_name": "runner-vault-db" }
   ],
