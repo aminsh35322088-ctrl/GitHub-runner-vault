@@ -333,8 +333,10 @@ Deployments created before this was required may still hold a master key in D1 (
 keep working in a flagged legacy mode — existing credentials stay readable and Settings shows a warning — but
 storing new credentials is paused until the owner sets the secret. Migration is automatic on the first request
 after the secret is set: if the secret equals the stored key, the database copy is simply deleted; if it differs,
-every stored value (and the sealed GitHub client secret) is re-encrypted under the new key first, then the database
-copy is deleted.
+every stored value and the sealed GitHub client secret are preflighted, then all ciphertext rewrites, the GitHub
+secret reseal and deletion of the database copy commit in one atomic D1 batch. If any value cannot be decrypted,
+the migration stops without rewriting any row and retains the old database key. In that case, redeploy with the
+existing D1 key as `VAULT_MASTER_KEY` to restore the previous key path, or repair the affected data before retrying.
 
 Existing deployments that already have `BETTER_AUTH_SECRET` and `ENCRYPTION_KEY` secrets keep using them unchanged.
 
