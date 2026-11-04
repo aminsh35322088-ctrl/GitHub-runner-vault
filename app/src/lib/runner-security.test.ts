@@ -43,6 +43,7 @@ function goodClaims(overrides: Record<string, unknown> = {}) {
     repository: 'example-org/runner-project', repository_id: '999', repository_owner: 'example-org',
     repository_owner_id: '65', ref: 'refs/heads/main',
     event_name: 'workflow_dispatch', run_id: '12345', run_attempt: '1', sha: 'abc', jti: 'j1',
+    sub: 'repo:example-org/runner-project:ref:refs/heads/main',
     workflow_ref: 'example-org/runner-project/.github/workflows/runner.yml@refs/heads/main',
     ...overrides,
   }
@@ -118,6 +119,9 @@ describe('GitHub OIDC verification', () => {
     ['pull_request event', { event_name: 'pull_request' }, 'event not allowed'],
     ['missing run id', { run_id: undefined }, 'missing run id'],
     ['non-numeric run id', { run_id: 'abc' }, 'missing run id'],
+    ['subject names a different repository', { sub: 'repo:attacker/other:ref:refs/heads/main' }, 'subject mismatch'],
+    ['missing subject', { sub: undefined }, 'subject mismatch'],
+    ['missing token id', { jti: undefined }, 'missing token id'],
   ]
   test.each(bad)('rejects %s', async (_label, overrides, error) => {
     const { privateKey, jwk } = await makeKeyPair()
@@ -263,7 +267,7 @@ describe('GitHub OIDC verification', () => {
 
 // ── Runner sessions ─────────────────────────────────────────────────
 
-const identity = { repository: 'a/b', repositoryId: '1', repositoryOwnerId: '2', runId: '55', runAttempt: '2', ref: 'refs/heads/main', event: 'workflow_dispatch', workflow: 'w', workflowRef: 'a/b/.github/workflows/w.yml@refs/heads/main', sha: 's', jti: 'j' }
+const identity = { repository: 'a/b', repositoryId: '1', repositoryOwnerId: '2', runId: '55', runAttempt: '2', ref: 'refs/heads/main', event: 'workflow_dispatch', workflow: 'w', workflowRef: 'a/b/.github/workflows/w.yml@refs/heads/main', sha: 's', jti: 'j', sub: 'repo:a/b:ref:refs/heads/main', expiresAt: NOW + 300_000 }
 const SECRET_32 = 'test-secret-at-least-32-characters-long!!'
 
 describe('runner sessions', () => {

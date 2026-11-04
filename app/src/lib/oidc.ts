@@ -7,7 +7,11 @@
 //     `alg: none` or HMAC-confusion token is rejected before any key lookup),
 //   - issuer, audience (this vault's origin), expiry and not-before,
 //   - that the token comes from the configured repository, from an allowed ref and
-//     event (so pull-request and fork runs cannot enroll).
+//     event (so pull-request and fork runs cannot enroll),
+//   - that the subject claim names that same repository, and that the token id
+//     (jti) is present. Verification alone does not stop replay: the caller
+//     consumes the jti (see createSession in runner-core.ts) so each token can
+//     be exchanged exactly once.
 //
 // Honest limit: any process on the runner that can read the job's OIDC request
 // variables can obtain such a token. This authenticates the *workflow run*, not the
@@ -47,6 +51,10 @@ export type RunnerIdentity = {
   workflowRef: string
   sha: string
   jti: string
+  /** The token's `sub` claim, already checked to name `repository`. */
+  sub: string
+  /** The OIDC token's own expiry (epoch ms), not the issued session's. */
+  expiresAt: number
 }
 
 export type OidcResult = { ok: true; identity: RunnerIdentity } | { ok: false; error: string }
@@ -253,6 +261,19 @@ export async function verifyGithubOidc(
   const runId = str(claims, 'run_id')
   if (!/^\d{1,20}$/.test(runId)) return { ok: false, error: 'missing run id' }
 
+  // Defence in depth: GitHub binds the subject to the same repository the
+  // other claims name (`repo:OWNER/REPO:ref:...`, `:environment:...` or
+  // `:pull_request`). A token whose sub names another repository is not the
+  // token it claims to be, even if every remaining claim was copied across.
+  const sub = str(claims, 'sub')
+  if (!sub.toLowerCase().startsWith(`repo:${repository.toLowerCase()}:`)) {
+    return { ok: false, error: 'subject mismatch' }
+  }
+  // The caller consumes the jti to make the token single-use; without one
+  // there is nothing to consume, so fail closed.
+  const jti = str(claims, 'jti')
+  if (!jti) return { ok: false, error: 'missing token id' }
+
   return {
     ok: true,
     identity: {
@@ -266,7 +287,9 @@ export async function verifyGithubOidc(
       workflow: workflow.slice(0, 200),
       workflowRef: workflowRef.slice(0, 300),
       sha: str(claims, 'sha').slice(0, 64),
-      jti: str(claims, 'jti').slice(0, 100),
+      jti: jti.slice(0, 100),
+      sub: sub.slice(0, 300),
+      expiresAt: typeof claims.exp === 'number' ? claims.exp * 1000 : 0,
     },
   }
 }

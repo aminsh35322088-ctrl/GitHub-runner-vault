@@ -89,5 +89,12 @@ export const SCHEMA_MIGRATIONS: SchemaMigration[] = [
       "ALTER TABLE credential ADD COLUMN provider_account_id text NOT NULL DEFAULT '' CHECK (length(provider_account_id) <= 160)",
       "CREATE INDEX IF NOT EXISTS credential_provider_connection_idx ON credential (service, provider_account_id, connection_label)"
     ]
+  },
+  {
+    "id": "0009_oidc_token_use",
+    "statements": [
+      "CREATE TABLE oidc_token_use (\n  jti text PRIMARY KEY NOT NULL,\n  subject text NOT NULL DEFAULT '',\n  expires_at integer NOT NULL,\n  created_at integer NOT NULL\n)",
+      "CREATE INDEX oidc_token_use_expires_at_idx ON oidc_token_use (expires_at)"
+    ]
   }
 ]

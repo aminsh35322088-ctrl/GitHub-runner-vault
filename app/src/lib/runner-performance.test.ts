@@ -119,6 +119,8 @@ describe('runner hot-path performance diagnostics', () => {
       workflowRef: 'performance/runner/.github/workflows/performance.yml@refs/heads/main',
       sha: 'performance',
       jti: 'performance',
+      sub: 'repo:performance/runner:ref:refs/heads/main',
+      expiresAt: routeNow + 300_000,
     }, routeNow)
     const routeDeps = {
       db,
