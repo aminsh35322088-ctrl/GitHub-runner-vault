@@ -8,7 +8,6 @@
 import './globals.css'
 import { env } from 'cloudflare:workers'
 import { Spiceflow } from 'spiceflow'
-import { Head } from 'spiceflow/react'
 import { getDb, getAuth, getSession, getRequestOrigin, requirePageSession } from './db.ts'
 import { ensureSchema } from './lib/schema.ts'
 import { loadRunnerPolicyInput } from './lib/runner-policy.ts'
@@ -83,12 +82,18 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
 
   return (
     <html lang="en" className={cn('h-dvh', dark ? 'dark' : undefined)} suppressHydrationWarning>
-      <Head>
-        <Head.Meta charSet="UTF-8" />
-        <Head.Meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-        <Head.Meta name="robots" content="noindex, nofollow" />
-        <Head.Title>Runner Credential Vault</Head.Title>
-      </Head>
+      {/* Plain <head> elements, not spiceflow's <Head>: in spiceflow
+          1.26.0-rsc.18 the Head component only collects tags for a
+          <CollectedHead/> emission that never lands in the served
+          document (and CollectedHead is not exported), so the collected
+          viewport/title tags were silently dropped and phones laid the
+          page out at desktop width. Literal elements are emitted as-is. */}
+      <head>
+        <meta charSet="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+        <meta name="robots" content="noindex, nofollow" />
+        <title>Runner Credential Vault</title>
+      </head>
       <body className="h-dvh overflow-hidden bg-background font-sans antialiased">
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
         <a href="#main-content" className="sr-only z-[100] rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground focus:not-sr-only focus:fixed focus:left-3 focus:top-3">Skip to main content</a>
