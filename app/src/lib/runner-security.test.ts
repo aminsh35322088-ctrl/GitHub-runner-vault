@@ -433,9 +433,13 @@ describe('proxy requests', () => {
     expect(await runProxy({ credential, value: SECRET, method, url: 'https://api.cloudflare.com/x' }, stubFetch(() => new Response('ok')))).toMatchObject({ ok: false, error: 'bad_method' })
   })
 
-  test('bodies: refused on GET, capped in size', async () => {
-    const fetchFn = stubFetch(() => new Response('ok'))
+  test('bodies: refuses GET bodies, forwards deployment-sized payloads, and enforces the hard cap', async () => {
+    const seen: Seen[] = []
+    const fetchFn = stubFetch(() => new Response('ok'), seen)
     expect(await runProxy({ credential, value: SECRET, method: 'GET', url: 'https://api.cloudflare.com/x', body: 'x' }, fetchFn)).toMatchObject({ ok: false, error: 'body_not_allowed' })
+    const deploymentPayload = 'x'.repeat(512 * 1024)
+    expect(await runProxy({ credential, value: SECRET, method: 'POST', url: 'https://api.cloudflare.com/x', body: deploymentPayload }, fetchFn)).toMatchObject({ ok: true, status: 200 })
+    expect(seen[0]?.init.body).toBe(deploymentPayload)
     expect(await runProxy({ credential, value: SECRET, method: 'POST', url: 'https://api.cloudflare.com/x', body: 'x'.repeat(MAX_REQUEST_BODY + 1) }, fetchFn)).toMatchObject({ ok: false, error: 'body_too_large' })
   })
 

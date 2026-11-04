@@ -209,6 +209,17 @@ test('serve runs a Northflank loopback bridge without forwarding a CLI placehold
       consumer: 'cli:northflank',
       purpose: 'CLI integration: Northflank CLI',
     })
+    const deploymentPayload = 'bundle-data-'.repeat(50_000)
+    const upload = await fetch(`http://127.0.0.1:${port}/v1/deploy`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: deploymentPayload,
+    })
+    assert.equal(upload.status, 200)
+    assert.equal(seen.length, 2)
+    assert.equal(seen[1].body.method, 'POST')
+    assert.equal(seen[1].body.url, 'https://api.northflank.com/v1/deploy')
+    assert.equal(seen[1].body.body, deploymentPayload)
     assert.ok(!stdout.includes(SECRET))
     assert.ok(!stderr.includes(SECRET))
   } finally {
@@ -312,6 +323,17 @@ test('serve runs a Cloudflare Wrangler loopback bridge and keeps the real API to
       consumer: 'cli:wrangler',
       purpose: 'CLI integration: Wrangler CLI',
     })
+    const deploymentPayload = 'bundle-data-'.repeat(50_000)
+    const upload = await fetch(`http://127.0.0.1:${port}/v1/deploy`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: deploymentPayload,
+    })
+    assert.equal(upload.status, 200)
+    assert.equal(seen.length, 2)
+    assert.equal(seen[1].body.method, 'POST')
+    assert.equal(seen[1].body.url, 'https://api.cloudflare.com/client/v4/v1/deploy')
+    assert.equal(seen[1].body.body, deploymentPayload)
     assert.ok(!stdout.includes(SECRET))
     assert.ok(!stderr.includes(SECRET))
   } finally {

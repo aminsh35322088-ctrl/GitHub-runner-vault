@@ -13,7 +13,8 @@
 
 import { formatAuthValue, normalizeHost, type AuthScheme } from './credential-input.ts'
 
-export const MAX_REQUEST_BODY = 256 * 1024
+// Keep uploads bounded while allowing normal deployment bundles and multipart/API payloads.
+export const MAX_REQUEST_BODY = 10 * 1024 * 1024
 export const MAX_RESPONSE_BODY = 1024 * 1024
 export const UPSTREAM_TIMEOUT_MS = 20_000
 export const MAX_URL_LENGTH = 2000

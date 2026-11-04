@@ -190,7 +190,8 @@ export function parseHeaders(list) {
   return out
 }
 
-const LOCAL_PROXY_BODY_LIMIT = 256 * 1024
+// Match the Worker-side cap; this is a bounded buffer, not an unbounded upload path.
+const LOCAL_PROXY_BODY_LIMIT = 10 * 1024 * 1024
 const LOCAL_PROXY_RESPONSE_LIMIT = 1_100 * 1024
 const LOCAL_PROXY_REQUEST_HEADERS = new Set([
   'accept', 'content-type', 'if-match', 'if-none-match',
@@ -271,6 +272,8 @@ async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPor
     if (request.method === 'CONNECT' || request.method === 'TRACE') return reject(405, 'method_not_allowed')
     let target
     try { target = mapLocalProxyTarget(adapter.apiBaseUrl, request.url ?? '/') } catch { return reject(400, 'invalid_path') }
+    const declaredLength = Number(request.headers['content-length'])
+    if (Number.isFinite(declaredLength) && declaredLength > LOCAL_PROXY_BODY_LIMIT) return reject(413, 'body_too_large')
     let total = 0
     const chunks = []
     try {
