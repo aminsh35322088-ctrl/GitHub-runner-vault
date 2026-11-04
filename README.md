@@ -161,24 +161,34 @@ Body `{ name, service, doc }`, where `doc` follows the schema in `docs/runner-us
 
 ### `POST /api/runner/use`
 
-Body `{ name, method, url, headers?, body?, purpose?, consumer? }`. The optional low-cardinality `consumer` field is used only to group aggregate usage (for example `cli:northflank`); it is not trusted as an identity.
+JSON requests use body `{ name, method, url, headers?, body?, purpose?, consumer? }`. Their complete JSON envelope is capped at 512 KiB and the proxy still enforces its 10 MiB body limit after parsing.
+
+For large or binary uploads, use the raw transport instead of embedding the payload in JSON:
+
+- `Content-Type: application/octet-stream`
+- `X-Vault-Proxy-Metadata: <unpadded base64url of UTF-8 JSON metadata>`
+- The request body contains the original bytes, unchanged. The metadata object contains `name`, `method`, `url`, and optional `headers`, `purpose`, and `consumer`.
+- The raw body is limited to 10 MiB. A declared `Content-Length` is checked before reading; the streamed byte count is also enforced when the header is absent or inaccurate.
+
+The optional low-cardinality `consumer` field is used only to group aggregate usage (for example `cli:northflank`); it is not trusted as an identity.
 
 - Methods: `GET HEAD POST PUT PATCH DELETE`. URL: `https`, default port, no user info, host in the owner's list.
 - Request headers allowed: `accept`, `accept-language`, `content-type`, `if-match`, `if-none-match`,
   `x-github-api-version`, `x-api-version`. Anything else (including `Authorization`, `Host`, `Cookie`) is refused.
-- Limits: request body 256 KiB, response 1 MiB (then `truncated: true`), configurable 5–30 s upstream timeout (default 20 s), 30 calls per minute per credential. Redirects are **not** followed (a `3xx` is returned as is).
+- Limits: raw request body 10 MiB, JSON envelope 512 KiB, at most 3 active raw uploads per Worker isolate (`503 proxy_busy` when full), response 1 MiB (then `truncated: true`), configurable 5–30 s upstream timeout (default 20 s), 30 calls per minute per credential. Redirects are **not** followed (a `3xx` is returned as is).
 
 `200 { status, headers, body, truncated, redacted }`: `status` is the **upstream** status; an upstream error is still a
 `200` from the vault. Vault-side errors:
 
 | HTTP | `error` | Meaning |
 | --- | --- | --- |
-| 400 | `invalid_request`, `bad_method`, `bad_url`, `bad_header`, `body_not_allowed`, `not_a_proxy_credential` | Malformed or not allowed. |
+| 400 | `invalid_request`, `invalid_body`, `bad_method`, `bad_url`, `bad_header`, `body_not_allowed`, `not_a_proxy_credential` | Malformed or not allowed. |
 | 401 | `missing_token`, `unauthorized` | No or invalid session (expired, revoked, tampered). |
 | 403 | `host_not_allowed` | Host not approved by the owner for this credential. |
 | 404 | `unavailable` | Missing, hidden, disabled or expired (indistinguishable on purpose). |
-| 413 | `body_too_large` | Request body over 256 KiB. |
+| 413 | `body_too_large` | Raw request body over 10 MiB or JSON envelope over 512 KiB. |
 | 429 | `rate_limited` | Too many calls. |
+| 503 | `proxy_busy` | Three raw uploads are already active in this Worker isolate; retry later. |
 | 502 / 504 | `upstream_error`, `upstream_timeout` | Upstream failed (no detail is returned, so nothing can leak). |
 
 Every call is audited with the worker-observed result, the purpose the agent gave, and `METHOD host/path -> status`

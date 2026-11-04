@@ -13,7 +13,8 @@
 
 import { formatAuthValue, normalizeHost, type AuthScheme } from './credential-input.ts'
 
-export const MAX_REQUEST_BODY = 256 * 1024
+// Keep uploads bounded while allowing normal deployment bundles and multipart/API payloads.
+export const MAX_REQUEST_BODY = 10 * 1024 * 1024
 export const MAX_RESPONSE_BODY = 1024 * 1024
 export const UPSTREAM_TIMEOUT_MS = 20_000
 export const MAX_URL_LENGTH = 2000
@@ -35,12 +36,12 @@ export type ProxyInput = {
   method: string
   url: string
   headers?: Record<string, string>
-  body?: string
+  body?: string | Uint8Array<ArrayBuffer>
 }
 
 export type ProxyError =
   | 'bad_method' | 'bad_url' | 'host_not_allowed' | 'bad_header' | 'body_too_large'
-  | 'body_not_allowed' | 'upstream_timeout' | 'upstream_error'
+  | 'body_not_allowed' | 'invalid_body' | 'upstream_timeout' | 'upstream_error'
 
 export type ProxyResult =
   | { ok: true; status: number; headers: Record<string, string>; body: string; truncated: boolean; redactions: number; host: string; method: string; path: string }
@@ -155,19 +156,28 @@ export async function runProxy(input: ProxyInput, fetchFn: typeof fetch = fetch,
   }
   headers.set('user-agent', 'runner-vault/1')
 
-  let body: string | undefined
-  if (input.body !== undefined && input.body !== '') {
+  let body: string | Uint8Array<ArrayBuffer> | undefined
+  if (input.body !== undefined && !(typeof input.body === 'string' && input.body.length === 0)) {
     if (method === 'GET' || method === 'HEAD') return { ok: false, error: 'body_not_allowed' }
-    if (typeof input.body !== 'string' || new TextEncoder().encode(input.body).byteLength > MAX_REQUEST_BODY) return { ok: false, error: 'body_too_large' }
-    body = input.body
+    if (typeof input.body === 'string') {
+      if (new TextEncoder().encode(input.body).byteLength > MAX_REQUEST_BODY) return { ok: false, error: 'body_too_large' }
+      if (input.body.length > 0) body = input.body
+    } else if (input.body instanceof Uint8Array) {
+      if (input.body.byteLength > MAX_REQUEST_BODY) return { ok: false, error: 'body_too_large' }
+      if (input.body.byteLength > 0) body = input.body
+    } else {
+      return { ok: false, error: 'invalid_body' }
+    }
   }
+
+  const requestBody: BodyInit | undefined = body
 
   let response: Response
   try {
     response = await fetchFn(upstreamUrl.toString(), {
       method,
       headers,
-      body,
+      body: requestBody,
       redirect: 'manual',
       signal: AbortSignal.timeout(Math.min(30_000, Math.max(5_000, timeoutMs))),
     })

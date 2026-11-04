@@ -25,7 +25,10 @@ function startStub() {
         expiresAt: Date.now() + 15 * 60_000,
       })
       if (req.url === '/api/runner/use') {
-        const body = JSON.parse(raw)
+        const encodedMetadata = req.headers['x-vault-proxy-metadata']
+        const body = encodedMetadata
+          ? JSON.parse(Buffer.from(encodedMetadata, 'base64url').toString('utf8'))
+          : JSON.parse(raw)
         if (body.name === 'MISSING') return json(404, { error: 'unavailable' })
         return json(200, { status: 200, headers: {}, body: '{"ok":true}', truncated: false, redacted: false })
       }
@@ -114,8 +117,9 @@ test('request shows the owner inbox and one-time registration form', async () =>
 test('serve runs a Northflank loopback bridge without forwarding a CLI placeholder as a secret', async () => {
   const seen = []
   const worker = http.createServer(async (req, res) => {
-    let raw = ''
-    for await (const chunk of req) raw += chunk
+    const requestChunks = []
+    for await (const chunk of req) requestChunks.push(Buffer.from(chunk))
+    const raw = Buffer.concat(requestChunks)
     const json = (status, body) => {
       res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
       res.end(JSON.stringify(body))
@@ -136,8 +140,8 @@ test('serve runs a Northflank loopback bridge without forwarding a CLI placehold
       },
     }] })
     if (req.url === '/api/runner/use') {
-      const body = JSON.parse(raw)
-      seen.push({ body, authorization: req.headers.authorization })
+      const body = JSON.parse(Buffer.from(req.headers['x-vault-proxy-metadata'], 'base64url').toString('utf8'))
+      seen.push({ body, rawBody: raw, authorization: req.headers.authorization })
       return json(200, {
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -209,6 +213,27 @@ test('serve runs a Northflank loopback bridge without forwarding a CLI placehold
       consumer: 'cli:northflank',
       purpose: 'CLI integration: Northflank CLI',
     })
+    const deploymentPayload = Buffer.alloc(600 * 1024, 0xff)
+    const upload = await fetch(`http://127.0.0.1:${port}/v1/deploy`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: deploymentPayload,
+    })
+    assert.equal(upload.status, 200)
+    assert.equal(seen.length, 2)
+    assert.equal(seen[1].body.method, 'POST')
+    assert.equal(seen[1].body.url, 'https://api.northflank.com/v1/deploy')
+    assert.equal(seen[1].body.headers['content-type'], 'application/octet-stream')
+    assert.deepEqual(seen[1].rawBody, deploymentPayload)
+
+    const oversizedUpload = await fetch(`http://127.0.0.1:${port}/v1/deploy`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: Buffer.alloc(10 * 1024 * 1024 + 1),
+    })
+    assert.equal(oversizedUpload.status, 413)
+    assert.equal(seen.length, 2, 'oversized payload is rejected before it reaches Vault')
+
     assert.ok(!stdout.includes(SECRET))
     assert.ok(!stderr.includes(SECRET))
   } finally {
@@ -222,8 +247,9 @@ test('serve runs a Northflank loopback bridge without forwarding a CLI placehold
 test('serve runs a Cloudflare Wrangler loopback bridge and keeps the real API token in Vault', async () => {
   const seen = []
   const worker = http.createServer(async (req, res) => {
-    let raw = ''
-    for await (const chunk of req) raw += chunk
+    const requestChunks = []
+    for await (const chunk of req) requestChunks.push(Buffer.from(chunk))
+    const raw = Buffer.concat(requestChunks)
     const json = (status, body) => {
       res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
       res.end(JSON.stringify(body))
@@ -244,8 +270,8 @@ test('serve runs a Cloudflare Wrangler loopback bridge and keeps the real API to
       },
     }] })
     if (req.url === '/api/runner/use') {
-      const body = JSON.parse(raw)
-      seen.push({ body, authorization: req.headers.authorization })
+      const body = JSON.parse(Buffer.from(req.headers['x-vault-proxy-metadata'], 'base64url').toString('utf8'))
+      seen.push({ body, rawBody: raw, authorization: req.headers.authorization })
       return json(200, {
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -312,6 +338,18 @@ test('serve runs a Cloudflare Wrangler loopback bridge and keeps the real API to
       consumer: 'cli:wrangler',
       purpose: 'CLI integration: Wrangler CLI',
     })
+    const deploymentPayload = Buffer.alloc(600 * 1024, 0xff)
+    const upload = await fetch(`http://127.0.0.1:${port}/v1/deploy`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: deploymentPayload,
+    })
+    assert.equal(upload.status, 200)
+    assert.equal(seen.length, 2)
+    assert.equal(seen[1].body.method, 'POST')
+    assert.equal(seen[1].body.url, 'https://api.cloudflare.com/client/v4/v1/deploy')
+    assert.equal(seen[1].body.headers['content-type'], 'application/octet-stream')
+    assert.deepEqual(seen[1].rawBody, deploymentPayload)
     assert.ok(!stdout.includes(SECRET))
     assert.ok(!stderr.includes(SECRET))
   } finally {

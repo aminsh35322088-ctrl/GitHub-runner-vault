@@ -6,7 +6,7 @@ import { getDb, schema } from 'db'
 import { audit, listRegistryForRunner, readCredentialValue, requestRegistration } from './credential-service.ts'
 import { verifyGithubOidc, type JwksSource, type OidcPolicy } from './oidc.ts'
 import { issueRunnerSession, verifyRunnerSessionSignature, getRunnerRevokedBefore, type RunnerSession } from './runner-session.ts'
-import { runProxy, type ProxyError } from './proxy.ts'
+import { MAX_REQUEST_BODY, runProxy, type ProxyError, type ProxyResult } from './proxy.ts'
 import { BOOTSTRAP_WORKFLOW_FILE, DEFAULT_EVENTS, pinRunnerPolicy } from './runner-policy.ts'
 import { createNotification, listRunnerIntegrationMetadata, recordCredentialUsage, recordRuntimeCredentialEvidence, type VaultPreferences } from './vault-observability.ts'
 import { reserveRunnerRateLimit, releaseRunnerRateLimitReservation } from './runner-rate-limit.ts'
@@ -174,11 +174,92 @@ export async function requestCredential(
 
 // ── POST /api/runner/use ──────────────────────────────────────────
 
-export type UseInput = { name: unknown; method: unknown; url: unknown; headers?: unknown; body?: unknown; purpose?: unknown; consumer?: unknown }
+export type UseInput = {
+  name: unknown
+  method: unknown
+  url: unknown
+  headers?: unknown
+  body?: unknown
+  /** Raw request stream used by the local CLI bridge for byte-preserving uploads. */
+  bodyStream?: ReadableStream<Uint8Array> | null
+  /** Content-Length when the HTTP transport supplied a valid declaration. */
+  bodyLength?: number
+  purpose?: unknown
+  consumer?: unknown
+}
+
+type BoundedRequestBody =
+  | { ok: true; body?: Uint8Array<ArrayBuffer> }
+  | { ok: false; error: 'body_too_large' | 'invalid_body' }
+
+export async function readBoundedRequestBody(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+  declaredLength?: number,
+): Promise<BoundedRequestBody> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) return { ok: false, error: 'invalid_body' }
+  if (declaredLength !== undefined && (!Number.isSafeInteger(declaredLength) || declaredLength < 0)) {
+    return { ok: false, error: 'invalid_body' }
+  }
+  // Content-Length is only a hint: never allocate from an untrusted declared length.
+  if (declaredLength !== undefined && declaredLength > maxBytes) return { ok: false, error: 'body_too_large' }
+
+  let buffer: Uint8Array<ArrayBuffer> = new Uint8Array(Math.min(64 * 1024, maxBytes))
+  let total = 0
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+  try {
+    reader = stream.getReader()
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const nextTotal = total + value.byteLength
+      if (nextTotal > maxBytes) {
+        await reader.cancel().catch(() => undefined)
+        return { ok: false, error: 'body_too_large' }
+      }
+      if (declaredLength !== undefined && nextTotal > declaredLength) {
+        await reader.cancel().catch(() => undefined)
+        return { ok: false, error: 'invalid_body' }
+      }
+      if (nextTotal > buffer.byteLength) {
+        let capacity = Math.max(1, buffer.byteLength)
+        while (capacity < nextTotal) capacity = Math.min(maxBytes, capacity * 2)
+        const grown = new Uint8Array(capacity)
+        grown.set(buffer.subarray(0, total))
+        buffer = grown
+      }
+      buffer.set(value, total)
+      total = nextTotal
+    }
+  } catch {
+    return { ok: false, error: 'invalid_body' }
+  } finally {
+    reader?.releaseLock()
+  }
+
+  if (declaredLength !== undefined && total !== declaredLength) return { ok: false, error: 'invalid_body' }
+  if (total === 0) return { ok: true }
+  return { ok: true, body: buffer.subarray(0, total) }
+}
+
+// Keep raw uploads below the per-isolate memory ceiling under concurrent load.
+export const MAX_CONCURRENT_PROXY_UPLOADS_PER_ISOLATE = 3
+let activeProxyUploads = 0
+
+export function tryAcquireProxyUploadSlot(): (() => void) | null {
+  if (activeProxyUploads >= MAX_CONCURRENT_PROXY_UPLOADS_PER_ISOLATE) return null
+  activeProxyUploads += 1
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    activeProxyUploads = Math.max(0, activeProxyUploads - 1)
+  }
+}
 
 const PROXY_STATUS: Record<ProxyError, number> = {
   bad_method: 400, bad_url: 400, host_not_allowed: 403, bad_header: 400, body_too_large: 413,
-  body_not_allowed: 400, upstream_timeout: 504, upstream_error: 502,
+  body_not_allowed: 400, invalid_body: 400, upstream_timeout: 504, upstream_error: 502,
 }
 
 function runtimeCredentialEvidence(
@@ -261,6 +342,16 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
     }
   }
   if (input.body !== undefined && typeof input.body !== 'string') return fail(400, 'invalid_request')
+  if (input.bodyStream && input.body !== undefined) return fail(400, 'invalid_request')
+  if (input.bodyStream !== undefined && input.bodyStream !== null && typeof input.bodyStream.getReader !== 'function') {
+    return fail(400, 'invalid_request')
+  }
+  if (input.bodyLength !== undefined && (!Number.isSafeInteger(input.bodyLength) || input.bodyLength < 0)) {
+    return fail(400, 'invalid_request')
+  }
+  if (input.bodyLength !== undefined && input.bodyLength > 0 && !input.bodyStream) {
+    return fail(400, 'invalid_request')
+  }
 
   const safeName = /^[A-Z][A-Z0-9_]{0,79}$/.test(input.name) ? input.name : ''
   const common = { actor: auth.session.sub, credentialName: safeName, requestId, now: deps.now }
@@ -291,14 +382,47 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
   const startedAt = Date.now()
   const consumer = typeof input.consumer === 'string' && /^cli:[a-z0-9._-]{1,40}$/i.test(input.consumer)
     ? input.consumer.toLowerCase() : 'runner'
-  // Proxy policy is read only for actual upstream requests. Registry/session and
-  // rejected credential attempts do not need a settings-table round trip.
-  const proxyTimeoutMs = preferences?.proxyTimeoutMs ?? (deps.getProxyTimeoutMs
-    ? await deps.getProxyTimeoutMs()
-    : deps.proxyTimeoutMs)
-  const result = await runProxy({
-    credential: read.credential, value: read.value, authFields: read.authFields, method: input.method, url: input.url, headers, body: input.body as string | undefined,
-  }, deps.fetchFn, proxyTimeoutMs)
+
+  let proxyBody: string | Uint8Array<ArrayBuffer> | undefined = input.body as string | undefined
+  let releaseUploadSlot: (() => void) | null = null
+  if (input.bodyStream) {
+    releaseUploadSlot = tryAcquireProxyUploadSlot()
+    if (!releaseUploadSlot) {
+      try { await releaseRunnerRateLimitReservation(deps.db, reservation) } catch { /* Keep the request failure generic. */ }
+      await scheduleBackgroundWrites(deps, [
+        audit(deps.db, { ...common, credentialId: read.credential.id, action: 'proxy_use', result: 'proxy_busy' }),
+        recordCredentialUsage(deps.db, { credentialId: read.credential.id, consumer, success: false, latencyMs: Date.now() - startedAt, now: deps.now }),
+      ])
+      return fail(503, 'proxy_busy')
+    }
+  }
+
+  let result: ProxyResult
+  try {
+    if (input.bodyStream) {
+      const streamed = await readBoundedRequestBody(input.bodyStream, MAX_REQUEST_BODY, input.bodyLength)
+      if (!streamed.ok) {
+        try { await releaseRunnerRateLimitReservation(deps.db, reservation) } catch { /* Keep the request failure generic. */ }
+        await scheduleBackgroundWrites(deps, [
+          audit(deps.db, { ...common, credentialId: read.credential.id, action: 'proxy_use', result: streamed.error }),
+          recordCredentialUsage(deps.db, { credentialId: read.credential.id, consumer, success: false, latencyMs: Date.now() - startedAt, now: deps.now }),
+        ])
+        return fail(streamed.error === 'body_too_large' ? 413 : 400, streamed.error)
+      }
+      proxyBody = streamed.body
+    }
+
+    // Proxy policy is read only for actual upstream requests. Registry/session and
+    // rejected credential attempts do not need a settings-table round trip.
+    const proxyTimeoutMs = preferences?.proxyTimeoutMs ?? (deps.getProxyTimeoutMs
+      ? await deps.getProxyTimeoutMs()
+      : deps.proxyTimeoutMs)
+    result = await runProxy({
+      credential: read.credential, value: read.value, authFields: read.authFields, method: input.method, url: input.url, headers, body: proxyBody,
+    }, deps.fetchFn, proxyTimeoutMs)
+  } finally {
+    releaseUploadSlot?.()
+  }
 
   if (!result.ok) {
     // A D1 reservation is the authoritative quota counter; audit and aggregates
