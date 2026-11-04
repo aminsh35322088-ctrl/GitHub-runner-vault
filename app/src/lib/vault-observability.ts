@@ -618,7 +618,7 @@ async function validateTarget(
           }
         } else {
           try {
-            report = await validateProviderToken(target.service, read.value, fetchFn, now, undefined, adapter, allowedHosts)
+            report = await validateProviderToken(target.service, read.value, fetchFn, now, undefined, adapter, allowedHosts, read.authFields)
           } catch {
             report = {
               provider: target.service, status: 'unavailable', permissions: [], permissionsComplete: false,
@@ -644,6 +644,45 @@ async function validateTarget(
     }
   }
   return report
+}
+
+/** Record provider-authenticated runtime evidence without trusting generic transport success. */
+export async function recordRuntimeCredentialEvidence(
+  db: Db,
+  input: { credentialId: string; valueIv: string; provider: string; status: 'valid' | 'invalid' | 'insufficient_permissions'; message: string; now: number },
+): Promise<boolean> {
+  const [target] = await db.select({
+    id: schema.credential.id,
+    name: schema.credential.name,
+    valueIv: schema.credential.valueIv,
+    status: schema.credential.status,
+  }).from(schema.credential).where(orm.eq(schema.credential.id, input.credentialId)).limit(1)
+  if (!target || target.valueIv !== input.valueIv || target.status !== 'active') return false
+
+  const preferences = await loadVaultPreferences(db, input.now)
+  const updated = await db.update(schema.credential).set({
+    validation: input.status,
+    validationStatus: input.status,
+    validationDetails: JSON.stringify({ provider: input.provider, status: input.status, source: 'runtime', message: input.message }).slice(0, 32_000),
+    lastValidatedAt: input.now,
+    validationFailureCount: input.status === 'valid' ? 0 : 1,
+    firstValidationFailureAt: input.status === 'valid' ? null : input.now,
+    nextValidationAt: input.now + preferences.validationIntervalHours * 3_600_000,
+  }).where(orm.and(
+    orm.eq(schema.credential.id, target.id),
+    orm.eq(schema.credential.valueIv, input.valueIv),
+    orm.eq(schema.credential.status, 'active'),
+  )).returning({ id: schema.credential.id })
+  if (!updated.length) return false
+
+  await db.insert(schema.credentialValidationHistory).values({
+    id: crypto.randomUUID(), credentialId: target.id, credentialName: target.name,
+    provider: input.provider.slice(0, 80), source: 'runtime', status: input.status,
+    message: input.message.slice(0, 600), identity: null, tokenType: null,
+    permissionSource: 'capability-probe', permissionsJson: '[]', permissionsComplete: false,
+    durationMs: 0, checkedAt: input.now,
+  })
+  return true
 }
 
 export async function validateStoredCredentialNow(

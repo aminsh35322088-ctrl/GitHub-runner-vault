@@ -133,7 +133,7 @@ const STEP_META = [
 ] as const
 
 export function CredentialForm({
-  mode, token, id, defaults, preset = null, serviceName, credentialName, credentialPurpose, credentialId, apiBaseUrl,
+  mode, token, id, defaults, preset = null, serviceName, credentialName, credentialPurpose, credentialId, apiBaseUrl, credentialFields = [], connectionLabel: initialConnectionLabel = '', providerAccountId: initialProviderAccountId = '',
 }: {
   mode: 'create' | 'register' | 'replace'
   token?: string
@@ -145,6 +145,9 @@ export function CredentialForm({
   credentialPurpose?: string
   credentialId?: string
   apiBaseUrl?: string
+  credentialFields?: Array<{ id: string; label: string; required: boolean; secret: boolean }>
+  connectionLabel?: string
+  providerAccountId?: string
 }) {
   const [step, setStep] = useState(1)
   const [name, setName] = useState(
@@ -155,9 +158,13 @@ export function CredentialForm({
   const [lifetime, setLifetime] = useState(defaults.lifetime)
   const [service] = useState(preset?.label ?? serviceName ?? '')
   const [secretValue, setSecretValue] = useState('')
+  const [authFieldValues, setAuthFieldValues] = useState<Record<string, string>>({})
+  const [connectionLabel, setConnectionLabel] = useState(initialConnectionLabel)
+  const [providerAccountId, setProviderAccountId] = useState(initialProviderAccountId)
   const [hours, setHours] = useState('')
   const [visible, setVisible] = useState(defaults.visible)
   const [validation, setValidation] = useState<CredentialValidationReport | null>(null)
+  const [testRequested, setTestRequested] = useState(false)
   const [lastChecked, setLastChecked] = useState('')
   const [validating, setValidating] = useState(false)
   const [validationError, setValidationError] = useState('')
@@ -171,13 +178,16 @@ export function CredentialForm({
     setValidating(true)
     setValidationError('')
     setValidation(null)
+    setTestRequested(true)
     try {
-      const result = await validateCredentialTokenAction(service, candidate, credentialId)
+      const result = await validateCredentialTokenAction(service, candidate, credentialId, authFieldValues)
       if (!result.ok) {
         setValidationError(safeErrorMessage(new Error(result.error)))
         return
       }
       setValidation(result.value)
+      if (result.value.providerAccountId) setProviderAccountId(result.value.providerAccountId)
+      if (result.value.identity?.startsWith('@') && result.value.status === 'valid') setConnectionLabel(result.value.identity)
       if (result.value.status !== 'unavailable') setLastChecked(candidate)
     } catch (error) {
       setValidationError(safeErrorMessage(error))
@@ -203,8 +213,11 @@ export function CredentialForm({
         setStepError('Enter the secret token before continuing.')
         return
       }
-      if (validation?.status === 'invalid' || validation?.status === 'expired') {
-        setStepError('The provider rejected this token. Update it before continuing.')
+      const missingField = mode === 'replace'
+        ? undefined
+        : credentialFields.slice(1).find((field) => field.required && !authFieldValues[field.id]?.trim())
+      if (missingField) {
+        setStepError('Enter the required ' + missingField.label + ' field before continuing.')
         return
       }
     }
@@ -239,6 +252,10 @@ export function CredentialForm({
         lifetime,
         expiresInHours: hours.trim() ? Number(hours) : null,
         visible,
+        connectionLabel,
+        providerAccountId,
+        authFields: authFieldValues,
+        validationRequested: testRequested,
       }
       if (mode === 'create') {
         const created = await createCredentialAction({ name, service, form })
@@ -389,16 +406,41 @@ export function CredentialForm({
                 value={secretValue} onChange={(event) => {
                   setSecretValue(event.target.value)
                   setValidation(null)
+                  setTestRequested(false)
                   setLastChecked('')
                   setValidationError('')
                   setStepError('')
                 }}
-                onBlur={() => void checkToken()}
                 className="w-full font-mono"
                 inputMode="text"
                 aria-required="true"
               />
             </Field>
+            {credentialFields.slice(1).map((field) => (
+              <Field key={field.id} label={field.label} hint={field.secret ? 'Encrypted with the primary credential. Leave empty during replacement to keep the existing stored value.' : 'Stored as connection metadata; never used as a secret unless the adapter explicitly maps it.'}>
+                <Input
+                  name={'auth_' + field.id}
+                  type={field.secret ? 'password' : 'text'}
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={authFieldValues[field.id] ?? ''}
+                  onChange={(event) => {
+                    const nextValue = event.target.value
+                    setAuthFieldValues((current) => {
+                      const next = { ...current }
+                      if (nextValue === '') delete next[field.id]
+                      else next[field.id] = nextValue
+                      return next
+                    })
+                    setValidation(null)
+                    setTestRequested(false)
+                    setLastChecked('')
+                  }}
+                  className="w-full font-mono"
+                  aria-required={field.required && mode !== 'replace'}
+                />
+              </Field>
+            ))}
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <Button type="button" variant="outline" disabled={!secretValue.trim() || !service.trim() || validating || saving} onClick={() => void checkToken(secretValue)}>
                 {validating ? 'Checking token…' : 'Test access & inspect permissions'}
@@ -407,7 +449,7 @@ export function CredentialForm({
             </div>
             {validationError && <p className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert">{validationError}</p>}
             {validation && <ValidationResult report={validation} />}
-            <p className="text-xs leading-relaxed text-muted-foreground">Verification uses the provider's read-only endpoint. A network failure does not automatically mean the token is invalid. The final save performs its own server-side verification.</p>
+            <p className="text-xs leading-relaxed text-muted-foreground">Test is optional. When requested, Save rechecks on the server and records the result. Invalid tokens, unsupported checks, and network failures never block storage.</p>
           </section>
         )}
 
@@ -416,6 +458,20 @@ export function CredentialForm({
             <div>
               <h2 className="text-base font-semibold">Set access and lifetime</h2>
               <p className="mt-1 text-sm text-muted-foreground">Choose how long this token should remain stored and whether approved Runners can discover it.</p>
+            </div>
+            <div className="rounded-xl border border-border p-3.5 space-y-3">
+              <div>
+                <h3 className="text-sm font-semibold">Provider connection identity</h3>
+                <p className="mt-1 text-xs text-muted-foreground">Use a label to distinguish accounts under the same provider. IDs are public metadata, never secrets.</p>
+              </div>
+              <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+                <Field label="Connection label" hint="Examples: Personal, Production, Work, or a bot username.">
+                  <Input value={connectionLabel} onChange={(event) => setConnectionLabel(event.target.value)} maxLength={120} className="w-full" placeholder="Personal / Production" />
+                </Field>
+                <Field label="Provider account ID" hint="Optional public account, tenant, workspace, or bot identifier.">
+                  <Input value={providerAccountId} onChange={(event) => setProviderAccountId(event.target.value)} maxLength={160} className="w-full font-mono" placeholder="Public account ID" />
+                </Field>
+              </div>
             </div>
             <div className="grid min-w-0 gap-4 sm:grid-cols-2">
               <Field label="Token lifetime">

@@ -383,6 +383,44 @@ describe('proxy requests', () => {
     expect(await runProxy({ credential, value: SECRET, method: 'GET', url: 'https://api.cloudflare.com/x', headers: { accept: 'a\r\nX-Evil: 1' } }, fetchFn)).toMatchObject({ ok: false, error: 'bad_header' })
   })
 
+  test('injects only declared secondary auth fields and redacts every mapped secret from responses', async () => {
+    const secondary = 'secondary-proxy-secret-value'
+    const seen: Seen[] = []
+    const result = await runProxy({
+      credential: {
+        ...credential,
+        authFieldHeaders: [{ field: 'client_secret', header: 'X-Client-Secret', scheme: 'Raw', required: true }],
+      },
+      value: SECRET,
+      authFields: { client_secret: secondary, undeclared: 'not-forwarded-secret-value' },
+      method: 'GET',
+      url: 'https://api.cloudflare.com/x',
+    }, stubFetch(() => new Response('echo ' + SECRET + ' and ' + secondary), seen))
+    expect(result).toMatchObject({ ok: true, body: 'echo [REDACTED] and [REDACTED]' })
+    const headers = new Headers(seen[0]!.init.headers)
+    expect(headers.get('authorization')).toBe('Bearer ' + SECRET)
+    expect(headers.get('x-client-secret')).toBe(secondary)
+    expect(headers.get('undeclared')).toBeNull()
+    expect(JSON.stringify(result)).not.toContain(SECRET)
+    expect(JSON.stringify(result)).not.toContain(secondary)
+  })
+
+  test('refuses a missing required secondary auth field before making the upstream request', async () => {
+    const seen: Seen[] = []
+    const result = await runProxy({
+      credential: {
+        ...credential,
+        authFieldHeaders: [{ field: 'client_secret', header: 'X-Client-Secret', scheme: 'Raw', required: true }],
+      },
+      value: SECRET,
+      authFields: {},
+      method: 'GET',
+      url: 'https://api.cloudflare.com/x',
+    }, stubFetch(() => new Response('should-not-run'), seen))
+    expect(result).toMatchObject({ ok: false, error: 'bad_header' })
+    expect(seen).toHaveLength(0)
+  })
+
   test('custom auth header and raw scheme', async () => {
     const seen: Seen[] = []
     await runProxy({ credential: { ...credential, authHeader: 'X-Auth-Key', authScheme: 'Raw' }, value: SECRET, method: 'GET', url: 'https://api.cloudflare.com/x' }, stubFetch(() => new Response('ok'), seen))
@@ -460,5 +498,43 @@ describe('redaction helpers', () => {
   })
   test('redact counts replacements', () => {
     expect(redact('a SECRET1234 b SECRET1234', 'SECRET1234')).toEqual({ text: 'a [REDACTED] b [REDACTED]', count: 2 })
+  })
+})
+
+describe('Telegram Bot API proxy authentication', () => {
+  const botToken = '123456789:' + 'A'.repeat(35)
+  const telegramCredential = {
+    allowedHosts: ['api.telegram.org'],
+    authHeader: 'X-Telegram-Bot-Api-Token',
+    authScheme: 'Raw' as const,
+  }
+
+  test('injects the token only into the official /bot<TOKEN>/METHOD path and redacts it from results', async () => {
+    const seen: Seen[] = []
+    const result = await runProxy({
+      credential: telegramCredential,
+      value: botToken,
+      method: 'GET',
+      url: 'https://api.telegram.org/getMe',
+    }, stubFetch(() => Response.json({ ok: true, result: { id: 123456789 } }), seen))
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.url).toBe('https://api.telegram.org/bot' + botToken + '/getMe')
+    expect(new Headers(seen[0]!.init.headers).has('x-telegram-bot-api-token')).toBe(false)
+    expect(result).toMatchObject({ ok: true, status: 200, path: '/getMe' })
+    expect(JSON.stringify(result)).not.toContain(botToken)
+  })
+
+  test('rejects paths that could inject another token or method segment', async () => {
+    const seen: Seen[] = []
+    for (const url of [
+      'https://api.telegram.org/bot123:some-secret/getMe',
+      'https://api.telegram.org/getMe/extra',
+      'https://api.telegram.org/%2Fbot123/getMe',
+    ]) {
+      expect(await runProxy({ credential: telegramCredential, value: botToken, method: 'GET', url }, stubFetch(() => new Response('ok'), seen)))
+        .toMatchObject({ ok: false, error: 'bad_url' })
+    }
+    expect(seen).toHaveLength(0)
   })
 })

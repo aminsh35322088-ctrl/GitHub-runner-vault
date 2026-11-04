@@ -947,7 +947,7 @@ export const app = new Spiceflow()
     const preferences = await loadVaultPreferences(getDb())
     const { CredentialForm } = await import('./components/credential-form.tsx')
     if (!preset) return <div className="mx-auto w-full max-w-2xl"><SectionCard title="Custom service registration" description="Custom providers are registered from the Runner using their official API documentation. The request includes a verified Service Adapter, so network and authentication rules can be derived safely."><p className="text-sm text-muted-foreground">Ask the model on your Runner to request a one-time credential link for this service. You will be able to add the secret here without entering hosts, scopes or authentication settings.</p><a href="/vault" className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-primary px-4 text-sm font-medium text-primary-foreground">Back to overview <ChevronRight className="size-4"/></a></SectionCard></div>
-    return <div className="mx-auto w-full min-w-0 max-w-3xl space-y-5"><div><a href="/vault/services" className="inline-flex min-h-11 items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ChevronRight className="size-4 rotate-180"/> Provider catalog</a><h1 className="mt-2 text-2xl font-bold tracking-tight">{`Add ${preset.label} credential`}</h1><p className="mt-1 text-sm text-muted-foreground">Enter the token. Vault derives the verified API host, authentication style and validation behavior.</p></div><CredentialForm mode="create" preset={{ label: preset.label, docsUrl: preset.docsUrl }} apiBaseUrl={serviceAdapterFor(serviceId)?.apiBaseUrl} defaults={{ visible: preferences.defaultVisible, lifetime: preferences.defaultLifetime }} /></div>
+    return <div className="mx-auto w-full min-w-0 max-w-3xl space-y-5"><div><a href="/vault/services" className="inline-flex min-h-11 items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ChevronRight className="size-4 rotate-180"/> Provider catalog</a><h1 className="mt-2 text-2xl font-bold tracking-tight">{`Add ${preset.label} credential`}</h1><p className="mt-1 text-sm text-muted-foreground">Enter the token. Vault derives the verified API host, authentication style and validation behavior.</p></div><CredentialForm mode="create" preset={{ label: preset.label, docsUrl: preset.docsUrl }} apiBaseUrl={serviceAdapterFor(serviceId)?.apiBaseUrl} credentialFields={serviceAdapterFor(serviceId)?.credentialFields} defaults={{ visible: preferences.defaultVisible, lifetime: preferences.defaultLifetime }} /></div>
   })
 
   // ── One-time registration link ──────────────────────────────────
@@ -972,7 +972,7 @@ export const app = new Spiceflow()
           <p className="text-xs text-muted-foreground mt-1">Link expires in about {Math.max(1, Math.round((link.expiresAt - Date.now()) / 60_000))} min and works once.</p>
         </div>
         {credential.doc && <DocView doc={credential.doc} />}
-        <CredentialForm mode="register" token={params.token} credentialId={credential.id} serviceName={credential.service} credentialName={credential.name} credentialPurpose={credential.purpose} preset={preset ? { label: preset.label } : null} apiBaseUrl={serviceAdapterFromDocument(credential.doc)?.apiBaseUrl ?? serviceAdapterFor(credential.service)?.apiBaseUrl} defaults={{ visible: preferences.defaultVisible, lifetime: preferences.defaultLifetime }} />
+        <CredentialForm mode="register" token={params.token} credentialId={credential.id} serviceName={credential.service} credentialName={credential.name} credentialPurpose={credential.purpose} preset={preset ? { label: preset.label } : null} apiBaseUrl={serviceAdapterFromDocument(credential.doc)?.apiBaseUrl ?? serviceAdapterFor(credential.service)?.apiBaseUrl} credentialFields={(serviceAdapterFromDocument(credential.doc) ?? serviceAdapterFor(credential.service))?.credentialFields} defaults={{ visible: preferences.defaultVisible, lifetime: preferences.defaultLifetime }} />
       </div>
     )
   })
@@ -1036,7 +1036,7 @@ export const app = new Spiceflow()
 
         {!c.externallyManaged && (
           <SectionCard title="Replace secret value" description="Submit a replacement token. The previous value is not displayed and cannot be recovered from the dashboard." icon={<LockKeyhole className="size-[18px]" />}>
-            <CredentialForm mode="replace" id={c.id} credentialId={c.id} serviceName={c.service} credentialName={c.name} credentialPurpose={c.purpose} apiBaseUrl={serviceAdapterFromDocument(c.doc)?.apiBaseUrl ?? serviceAdapterFor(c.service)?.apiBaseUrl} defaults={{ visible: c.visible, lifetime: c.lifetime }} />
+            <CredentialForm mode="replace" id={c.id} credentialId={c.id} serviceName={c.service} credentialName={c.name} credentialPurpose={c.purpose} apiBaseUrl={serviceAdapterFromDocument(c.doc)?.apiBaseUrl ?? serviceAdapterFor(c.service)?.apiBaseUrl} credentialFields={(serviceAdapterFromDocument(c.doc) ?? serviceAdapterFor(c.service))?.credentialFields} connectionLabel={c.connectionLabel} providerAccountId={c.providerAccountId} defaults={{ visible: c.visible, lifetime: c.lifetime }} />
           </SectionCard>
         )}
 

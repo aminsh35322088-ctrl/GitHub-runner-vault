@@ -40,6 +40,7 @@ export const SERVICE_CATALOG: ServicePreset[] = [
   { id: 'supabase', label: 'Supabase', category: 'Data & Storage', description: 'Manage Supabase projects through the Management API.', docsUrl: 'https://supabase.com/docs/reference/api/introduction', hosts: ['api.supabase.com'], authHeader: 'Authorization', authScheme: 'Bearer' },
   { id: 'pinecone', label: 'Pinecone', category: 'Data & Storage', description: 'Manage vector index configuration through the control-plane API.', docsUrl: 'https://docs.pinecone.io/guides/operations/authentication', hosts: ['api.pinecone.io'], authHeader: 'Api-Key', authScheme: 'Raw' },
   { id: 'slack', label: 'Slack', category: 'Communication', description: 'Use Slack Web API methods and workspace integrations.', docsUrl: 'https://api.slack.com/authentication/token-types', hosts: ['slack.com'], authHeader: 'Authorization', authScheme: 'Bearer' },
+  { id: 'telegrambotapi', label: 'Telegram Bot API', category: 'Communication', description: 'Call Telegram Bot API methods for a bot; the token is verified with getMe.', docsUrl: 'https://core.telegram.org/bots/api', hosts: ['api.telegram.org'], authHeader: 'X-Telegram-Bot-Api-Token', authScheme: 'Raw' },
 ]
 
 export function defaultPurposeForService(service: string): string {

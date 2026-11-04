@@ -8,7 +8,7 @@ import {
   storeCredentialValue, MAX_TEMPORARY_MS,
 } from './credential-service.ts'
 import { consumeEnrollmentLink, listLatestRegistrationLinks, peekEnrollmentLink } from './enrollment.ts'
-import { createNotification, DEFAULT_VAULT_PREFERENCES, getUsageAnalytics, listCredentialValidationHistory, listNotifications, listRunnerIntegrationMetadata, listUnreadRegistrationNotificationIds, loadVaultPreferences, markNotificationIdsRead, markRegistrationNotificationsRead, recordCredentialUsage, resetVaultPreferencesCache, runScheduledCredentialValidation, saveVaultPreferences, validateStoredCredentialNow } from './vault-observability.ts'
+import { createNotification, DEFAULT_VAULT_PREFERENCES, getUsageAnalytics, listCredentialValidationHistory, listNotifications, listRunnerIntegrationMetadata, listUnreadRegistrationNotificationIds, loadVaultPreferences, markNotificationIdsRead, markRegistrationNotificationsRead, recordCredentialUsage, recordRuntimeCredentialEvidence, resetVaultPreferencesCache, runScheduledCredentialValidation, saveVaultPreferences, validateStoredCredentialNow } from './vault-observability.ts'
 
 const KEY_B64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
 const SECRET = 'cfut_SUPERSECRETVALUE_123456789'
@@ -334,6 +334,37 @@ describe('registration requests', () => {
   })
 })
 
+describe('runtime validation evidence', () => {
+  test('promotes credentials after authenticated success and ignores evidence for a rotated value', async () => {
+    const { db, key, now, name, id } = await activeCredential()
+    const used = await readCredentialValue(db, key, name, now)
+    if (!used.ok) throw new Error('credential could not be read')
+    expect(await getCredentialForOwner(db, id)).toMatchObject({ validationStatus: 'not_tested' })
+
+    expect(await recordRuntimeCredentialEvidence(db, {
+      credentialId: id, valueIv: used.credential.valueIv, provider: 'Cloudflare',
+      status: 'valid', message: 'Authenticated provider request succeeded.', now: now + 1,
+    })).toBe(true)
+    expect(await getCredentialForOwner(db, id)).toMatchObject({ validationStatus: 'valid', validation: 'valid', lastValidatedAt: now + 1 })
+    let history = await listCredentialValidationHistory(db, 10)
+    expect(history[0]).toMatchObject({ credentialId: id, source: 'runtime', status: 'valid' })
+
+    const replacement = await storeCredentialValue(db, key, {
+      credentialId: id, value: 'replacement-secret-value-123456', lifetime: 'permanent',
+      expiresAt: null, visible: true, delivery: 'proxy', allowedHosts: ['api.cloudflare.com'], now: now + 2,
+    })
+    expect(replacement.ok).toBe(true)
+    expect(await recordRuntimeCredentialEvidence(db, {
+      credentialId: id, valueIv: used.credential.valueIv, provider: 'Cloudflare',
+      status: 'invalid', message: 'Late rejection for a rotated value.', now: now + 3,
+    })).toBe(false)
+    expect(await getCredentialForOwner(db, id)).toMatchObject({ validationStatus: 'not_tested' })
+    history = await listCredentialValidationHistory(db, 10)
+    expect(history.filter((entry) => entry.credentialId === id)).toHaveLength(1)
+    expect(JSON.stringify(history)).not.toContain('replacement-secret-value-123456')
+  })
+})
+
 describe('direct owner dashboard creation', () => {
   test('creates an active credential with encrypted value and audited metadata', async () => {
     const { db, key, now } = await setup()
@@ -366,6 +397,24 @@ describe('direct owner dashboard creation', () => {
     expect(JSON.stringify(audit)).not.toContain(SECRET)
   })
 
+  test('stores syntactically valid credentials even when optional provider validation says invalid', async () => {
+    const { db, key, now } = await setup()
+    const result = await createCredential(db, key, {
+      name: uniqueName('UNVERIFIED'), service: 'Cloudflare', purpose: 'Optional validation regression',
+      value: SECRET, lifetime: 'permanent', expiresAt: null, visible: true,
+      delivery: 'proxy', allowedHosts: ['api.cloudflare.com'],
+      authHeader: 'Authorization', authScheme: 'Bearer',
+      validation: 'invalid',
+      validationDetails: JSON.stringify({ provider: 'Cloudflare', status: 'invalid', message: 'Provider verifier rejected the token.' }),
+      now,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(await getCredentialForOwner(db, result.value.id)).toMatchObject({
+      status: 'active', hasValue: true, validation: 'invalid', validationStatus: 'invalid',
+    })
+  })
+
   test('rejects unsafe hosts and duplicate names without storing a credential', async () => {
     const { db, key, now } = await setup()
     const name = uniqueName('PANEL')
@@ -383,7 +432,172 @@ describe('direct owner dashboard creation', () => {
   })
 })
 
+describe('provider connections and encrypted multi-field credentials', () => {
+  const connectionDoc = {
+    ...doc,
+    official_documentation_links: [{ title: 'Example API documentation', url: 'https://example.com/docs' }],
+    service_adapter: {
+      api_base_url: 'https://api.example.com',
+      auth_header: 'Authorization',
+      auth_scheme: 'Bearer',
+      credential_fields: [
+        { id: 'client_secret', label: 'Client secret', required: true, secret: true },
+        { id: 'workspace_id', label: 'Workspace ID', required: false, secret: false },
+        { id: 'signing_key', label: 'Signing key', required: false, secret: true },
+      ],
+      auth_field_headers: [
+        { field: 'client_secret', header: 'X-Client-Secret', scheme: 'Raw' },
+        { field: 'signing_key', header: 'X-Signing-Key', scheme: 'Raw' },
+      ],
+      cli_tools: [],
+    },
+  }
+
+  async function createConnection(label: string, accountId: string, secondary: string) {
+    const { db, key, now } = await setup()
+    const name = uniqueName('EXAMPLE')
+    const requested = await requestRegistration(db, {
+      name, service: 'Example API', purpose: 'Access a separate provider account',
+      doc: connectionDoc, requestedBy: 'runner:connections', now,
+    })
+    if (!requested.ok) throw new Error(requested.error)
+    const stored = await storeCredentialValue(db, key, {
+      credentialId: requested.value.credentialId,
+      value: 'primary-token-' + label.toLowerCase(),
+      authFields: { client_secret: secondary, workspace_id: 'workspace-' + label },
+      authFieldIds: ['client_secret', 'workspace_id', 'signing_key'],
+      requiredAuthFields: ['client_secret'],
+      connectionLabel: label,
+      providerAccountId: accountId,
+      lifetime: 'permanent', expiresAt: null, visible: true, delivery: 'proxy',
+      allowedHosts: ['api.example.com'], authHeader: 'Authorization', authScheme: 'Bearer', now,
+    }, { requirePending: true })
+    if (!stored.ok) throw new Error(stored.error)
+    return { db, key, now, name, id: requested.value.credentialId, secondary }
+  }
+
+  test('stores same-provider accounts independently and exposes only their public connection metadata', async () => {
+    const personal = await createConnection('Personal', 'acct-personal-001', 'personal-client-secret-value')
+    const work = await createConnection('Work', 'acct-work-002', 'work-client-secret-value')
+
+    const personalRead = await readCredentialValue(personal.db, personal.key, personal.name, personal.now)
+    const workRead = await readCredentialValue(work.db, work.key, work.name, work.now)
+    expect(personalRead).toMatchObject({
+      ok: true,
+      value: 'primary-token-personal',
+      authFields: { client_secret: 'personal-client-secret-value', workspace_id: 'workspace-Personal' },
+      credential: { connectionLabel: 'Personal', providerAccountId: 'acct-personal-001' },
+    })
+    expect(workRead).toMatchObject({
+      ok: true,
+      value: 'primary-token-work',
+      authFields: { client_secret: 'work-client-secret-value', workspace_id: 'workspace-Work' },
+      credential: { connectionLabel: 'Work', providerAccountId: 'acct-work-002' },
+    })
+    if (personalRead.ok) {
+      expect(personalRead.credential.authFieldHeaders).toContainEqual({
+        field: 'client_secret', header: 'X-Client-Secret', scheme: 'Raw', required: true,
+      })
+    }
+
+    const [personalRow] = await personal.db.select({
+      encrypted: schema.credential.valueEncrypted,
+      label: schema.credential.connectionLabel,
+      account: schema.credential.providerAccountId,
+    }).from(schema.credential).where(orm.eq(schema.credential.id, personal.id))
+    expect(personalRow).toMatchObject({ label: 'Personal', account: 'acct-personal-001' })
+    expect(personalRow?.encrypted).not.toContain('personal-client-secret-value')
+    expect(personalRow?.encrypted).not.toContain('primary-token-personal')
+
+    const runnerRows = await listRegistryForRunner(personal.db, personal.now)
+    expect(runnerRows.find((row) => row.name === personal.name)).toMatchObject({
+      connectionLabel: 'Personal', providerAccountId: 'acct-personal-001',
+    })
+    expect(runnerRows.find((row) => row.name === work.name)).toMatchObject({
+      connectionLabel: 'Work', providerAccountId: 'acct-work-002',
+    })
+    expect(JSON.stringify(runnerRows)).not.toContain('personal-client-secret-value')
+    expect(JSON.stringify(runnerRows)).not.toContain('work-client-secret-value')
+  })
+
+  test('retains write-only secondary credentials when only the primary token is rotated', async () => {
+    const connection = await createConnection('Production', 'acct-prod-003', 'production-client-secret-value')
+    const replaced = await storeCredentialValue(connection.db, connection.key, {
+      credentialId: connection.id,
+      value: 'rotated-primary-token-value',
+      authFieldIds: ['client_secret', 'workspace_id', 'signing_key'],
+      requiredAuthFields: ['client_secret'],
+      connectionLabel: 'Production',
+      providerAccountId: 'acct-prod-003',
+      lifetime: 'permanent', expiresAt: null, visible: true, delivery: 'proxy',
+      allowedHosts: ['api.example.com'], authHeader: 'Authorization', authScheme: 'Bearer',
+      now: connection.now + 1,
+    })
+    expect(replaced.ok).toBe(true)
+    const read = await readCredentialValue(connection.db, connection.key, connection.name, connection.now + 1)
+    expect(read).toMatchObject({
+      ok: true,
+      value: 'rotated-primary-token-value',
+      authFields: { client_secret: 'production-client-secret-value', workspace_id: 'workspace-Production' },
+      credential: { connectionLabel: 'Production', providerAccountId: 'acct-prod-003' },
+    })
+  })
+
+  test('rejects undeclared, short and missing required fields before storing', async () => {
+    const { db, now } = await setup()
+    const name = uniqueName('EXAMPLE')
+    const requested = await requestRegistration(db, {
+      name, service: 'Example API', doc: connectionDoc, requestedBy: 'runner:connections', now,
+    })
+    if (!requested.ok) throw new Error('unexpected registration failure')
+    const base = {
+      credentialId: requested.value.credentialId,
+      value: 'primary-token-value',
+      authFieldIds: ['client_secret'],
+      requiredAuthFields: ['client_secret'],
+      lifetime: 'permanent' as const, expiresAt: null, visible: true, delivery: 'proxy' as const,
+      allowedHosts: ['api.example.com'], now,
+    }
+    expect(await storeCredentialValue(db, await importEncryptionKey(KEY_B64), {
+      ...base, authFields: { unknown_field: 'another-secret-value' },
+    }, { requirePending: true })).toMatchObject({ ok: false, error: 'invalid_value' })
+    expect(await storeCredentialValue(db, await importEncryptionKey(KEY_B64), {
+      ...base, authFields: { client_secret: 'x' },
+    }, { requirePending: true })).toMatchObject({ ok: false, error: 'invalid_value' })
+    expect(await storeCredentialValue(db, await importEncryptionKey(KEY_B64), base, { requirePending: true }))
+      .toMatchObject({ ok: false, error: 'invalid_value' })
+  })
+})
+
 describe('storing a value', () => {
+  test('does not set lastValidatedAt when a credential is stored without running validation', async () => {
+    const { db, id, now } = await activeCredential()
+    expect(await getCredentialForOwner(db, id)).toMatchObject({
+      validationStatus: 'not_tested',
+      validation: 'not_tested',
+      lastValidatedAt: null,
+    })
+
+    const replaced = await storeCredentialValue(db, await importEncryptionKey(KEY_B64), {
+      credentialId: id,
+      value: 'replacement-primary-token-value',
+      lifetime: 'permanent',
+      expiresAt: null,
+      visible: true,
+      delivery: 'proxy',
+      allowedHosts: ['api.cloudflare.com'],
+      validation: 'not_tested',
+      validationStatus: 'not_tested',
+      now: now + 1,
+    })
+    expect(replaced.ok).toBe(true)
+    expect(await getCredentialForOwner(db, id)).toMatchObject({
+      validationStatus: 'not_tested',
+      validation: 'not_tested',
+      lastValidatedAt: null,
+    })
+  })
+
   test('encrypts at rest and never exposes the value in any listing', async () => {
     const { db, id, now, name } = await activeCredential()
     const [raw] = await db.select({ enc: schema.credential.valueEncrypted, iv: schema.credential.valueIv }).from(schema.credential).where(orm.eq(schema.credential.id, id))
@@ -493,7 +707,7 @@ describe('runner registry visibility rules', () => {
   test('the runner registry never includes secrets, hosts or documentation', async () => {
     const { db, now, name } = await activeCredential()
     const entry = (await listRegistryForRunner(db, now)).find((c) => c.name === name)
-    expect(Object.keys(entry!).sort()).toEqual(['delivery', 'expiresAt', 'externallyManaged', 'lifetime', 'name', 'purpose', 'service', 'validation'])
+    expect(Object.keys(entry!).sort()).toEqual(['connectionLabel', 'delivery', 'expiresAt', 'externallyManaged', 'lifetime', 'name', 'providerAccountId', 'purpose', 'service', 'validation'])
   })
 
   test('CLI adapter metadata is isolated to its own endpoint and only active visible credentials', async () => {
@@ -544,6 +758,61 @@ describe('runner registry visibility rules', () => {
     expect(await readCredentialValue(db, key, name, now)).toEqual({ ok: false, reason: 'unavailable' })
     const row = await db.select({ enc: schema.credential.valueEncrypted }).from(schema.credential).where(orm.eq(schema.credential.name, name))
     expect(row[0]?.enc).toBeNull()
+  })
+})
+
+describe('optional validation save states', () => {
+  test.each([
+    ['invalid', 'invalid'],
+    ['invalid', 'expired'],
+    ['insufficient_permissions', 'insufficient_permissions'],
+    ['not_tested', 'unsupported'],
+    ['not_tested', 'unavailable'],
+  ] as const)('stores credentials with validation=%s and status=%s without blocking save', async (validation, validationStatus) => {
+    const { db, key, now } = await setup()
+    const result = await createCredential(db, key, {
+      name: uniqueName('OPTIONAL_VALIDATION'),
+      service: 'Cloudflare',
+      purpose: 'Optional validation regression',
+      value: SECRET,
+      lifetime: 'permanent',
+      expiresAt: null,
+      visible: true,
+      delivery: 'proxy',
+      allowedHosts: ['api.cloudflare.com'],
+      authHeader: 'Authorization',
+      authScheme: 'Bearer',
+      validation,
+      validationStatus,
+      validationDetails: JSON.stringify({ status: validationStatus, message: 'Stored as non-blocking test evidence.' }),
+      now,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(await getCredentialForOwner(db, result.value.id)).toMatchObject({
+      status: 'active',
+      hasValue: true,
+      validation,
+      validationStatus,
+      validationDetails: expect.stringContaining(validationStatus),
+    })
+  })
+})
+
+describe('provider-specific token syntax', () => {
+  test('requires the BotFather Telegram Bot API token format before storage', async () => {
+    const { db, key, now } = await setup()
+    const name = uniqueName('TELEGRAM')
+    const requested = await requestRegistration(db, {
+      name, service: 'Telegram Bot API', purpose: 'Telegram Bot API', doc, requestedBy: 'runner:test', now,
+    })
+    if (!requested.ok) throw new Error('unexpected registration failure')
+    expect(await storeCredentialValue(db, key, {
+      credentialId: requested.value.credentialId, value: 'not-a-telegram-token',
+      lifetime: 'permanent', expiresAt: null, visible: true, delivery: 'proxy',
+      allowedHosts: ['api.telegram.org'], authHeader: 'X-Telegram-Bot-Api-Token',
+      authScheme: 'Raw', now,
+    }, { requirePending: true })).toMatchObject({ ok: false, error: 'invalid_value' })
   })
 })
 

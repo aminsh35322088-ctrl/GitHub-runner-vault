@@ -308,3 +308,53 @@ describe('provider token validation', () => {
     expect(other.status).toBe('unsupported')
   })
 })
+
+describe('Telegram Bot API token validation', () => {
+  const botToken = '123456789:' + 'A'.repeat(35)
+
+  test('uses getMe, checks the bot identity and extracts the numeric ID', async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      ok: true, result: { id: 123456789, is_bot: true, username: 'vault_test_bot' },
+    }))
+    const report = await validateProviderToken('Telegram Bot API', botToken, fetchFn, 1234)
+    expect(report).toMatchObject({
+      provider: 'Telegram Bot API', status: 'valid', identity: '@vault_test_bot',
+      providerAccountId: '123456789', tokenType: 'Telegram Bot API token', checkedAt: 1234,
+    })
+    expect(fetchFn).toHaveBeenCalledWith(
+      'https://api.telegram.org/bot' + botToken + '/getMe',
+      expect.objectContaining({ method: 'GET', redirect: 'manual' }),
+    )
+    expect(JSON.stringify(report)).not.toContain(botToken)
+  })
+
+  test('works without a public username but still returns the verified numeric bot ID', async () => {
+    const report = await validateProviderToken('Telegram Bot API', botToken, vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      ok: true, result: { id: 123456789, is_bot: true, first_name: 'Private bot' },
+    })), 1235)
+    expect(report).toMatchObject({ status: 'valid', providerAccountId: '123456789', identity: 'Telegram bot 123456789' })
+  })
+
+  test('rejects malformed tokens, definitive Telegram auth failures and mismatched bot IDs', async () => {
+    const malformed = await validateProviderToken('Telegram Bot API', 'not-a-bot-token', vi.fn<typeof fetch>(), 1)
+    const invalid = await validateProviderToken('Telegram Bot API', botToken, vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      ok: false, error_code: 404, description: 'Not Found',
+    }, 404)), 2)
+    const mismatch = await validateProviderToken('Telegram Bot API', botToken, vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      ok: true, result: { id: 987654321, is_bot: true, username: 'another_bot' },
+    })), 3)
+    expect(malformed.status).toBe('invalid')
+    expect(invalid.status).toBe('invalid')
+    expect(mismatch.status).toBe('invalid')
+    expect(mismatch.providerAccountId).toBeUndefined()
+  })
+
+  test('does not call network failures or rate limits invalid tokens', async () => {
+    const offline = await validateProviderToken('Telegram Bot API', botToken, vi.fn<typeof fetch>().mockRejectedValue(new Error('offline')), 4)
+    const limited = await validateProviderToken('Telegram Bot API', botToken, vi.fn<typeof fetch>().mockResolvedValue(new Response('', { status: 429 })), 5)
+    const unavailable = await validateProviderToken('Telegram Bot API', botToken, vi.fn<typeof fetch>().mockResolvedValue(new Response('', { status: 503 })), 6)
+    expect(offline.status).toBe('unavailable')
+    expect(limited.status).toBe('unavailable')
+    expect(unavailable.status).toBe('unavailable')
+  })
+})

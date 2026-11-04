@@ -11,6 +11,9 @@ export type ServiceAdapterTool = {
   setupHint: string
 }
 
+export type ServiceAdapterCredentialField = { id: string; label: string; required: boolean; secret: boolean }
+export type ServiceAdapterAuthFieldHeader = { field: string; header: string; scheme: AuthScheme; required: boolean }
+
 export type ServiceAdapter = {
   apiBaseUrl: string
   authHeader: string
@@ -26,6 +29,8 @@ export type ServiceAdapter = {
     insufficientPermissionsValues?: Array<string | number | boolean>
   }
   defaultHeaders?: Record<string, string>
+  credentialFields?: ServiceAdapterCredentialField[]
+  authFieldHeaders?: ServiceAdapterAuthFieldHeader[]
   cliTools: ServiceAdapterTool[]
 }
 
@@ -40,6 +45,14 @@ const northflank: ServiceAdapterTool = {
 }
 
 const adapters: Record<string, ServiceAdapter> = {
+  telegrambotapi: {
+    apiBaseUrl: 'https://api.telegram.org',
+    // Telegram Bot API authentication is path-based, not a bearer/header token.
+    // proxy.ts recognizes this sentinel and inserts /bot<TOKEN>/ before METHOD.
+    authHeader: 'X-Telegram-Bot-Api-Token',
+    authScheme: 'Raw',
+    cliTools: [],
+  },
   cloudflare: {
     apiBaseUrl: 'https://api.cloudflare.com/client/v4',
     authHeader: 'Authorization',
@@ -213,6 +226,27 @@ export function serviceAdapterFromDocument(document: unknown): ServiceAdapter | 
       setupHint: tool.setup_hint,
     }]
   })
+  const credentialFields = Array.isArray(adapter.credential_fields)
+    ? adapter.credential_fields.flatMap((entry): ServiceAdapterCredentialField[] => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
+      const field = entry as Record<string, unknown>
+      if (typeof field.id !== 'string' || !/^[a-z][a-z0-9_]{0,31}$/.test(field.id) ||
+          typeof field.label !== 'string' || typeof field.required !== 'boolean' || typeof field.secret !== 'boolean') return []
+      return [{ id: field.id, label: field.label, required: field.required, secret: field.secret }]
+    }) : undefined
+  const authFieldHeaders = Array.isArray(adapter.auth_field_headers)
+    ? adapter.auth_field_headers.flatMap((entry): ServiceAdapterAuthFieldHeader[] => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
+      const mapping = entry as Record<string, unknown>
+      if (typeof mapping.field !== 'string' || typeof mapping.header !== 'string' ||
+          !/^[A-Za-z][A-Za-z0-9-]{0,63}$/.test(mapping.header) ||
+          !['Bearer', 'Token', 'Raw'].includes(String(mapping.scheme))) return []
+      const field = credentialFields?.find((item) => item.id === mapping.field)
+      if (!field) return []
+      return [{ field: mapping.field, header: mapping.header, scheme: mapping.scheme as AuthScheme, required: field.required }]
+    }) : undefined
+  if ((adapter.credential_fields !== undefined && !credentialFields) ||
+      (adapter.auth_field_headers !== undefined && !authFieldHeaders)) return null
   const defaultHeaders = adapter.default_headers && typeof adapter.default_headers === 'object' && !Array.isArray(adapter.default_headers)
     ? adapter.default_headers as Record<string, string> : undefined
   return {
@@ -230,6 +264,8 @@ export function serviceAdapterFromDocument(document: unknown): ServiceAdapter | 
       ...(insufficientPermissionsValues !== undefined && insufficientPermissionsValues !== null ? { insufficientPermissionsValues } : {}),
     } } : {}),
     ...(defaultHeaders ? { defaultHeaders } : {}),
+    ...(credentialFields ? { credentialFields } : {}),
+    ...(authFieldHeaders ? { authFieldHeaders } : {}),
     cliTools,
   }
 }

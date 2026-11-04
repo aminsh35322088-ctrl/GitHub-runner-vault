@@ -114,3 +114,11 @@ The actual token must never appear in the document, model output, shell argument
 - A credential that is missing, hidden, disabled or expired all answer `unavailable`.
 - Calls to a host the owner did not approve are refused (`host_not_allowed`).
 - Limits: 30 calls/min per credential, 256 KiB request, 1 MiB response and a configurable 5–30 s upstream timeout (20 s default).
+
+## Telegram Bot API
+
+Add **Telegram Bot API** from the provider catalog and paste the BotFather token. The optional **Test access & inspect permissions** action calls Telegram's official `getMe` method. It verifies the returned bot ID against the numeric prefix in the token and records the public numeric ID and username as connection metadata. A network error or rate limit is reported as unavailable, not as an invalid token.
+
+The proxy uses Telegram's documented path authentication (`/bot<TOKEN>/METHOD_NAME`). For Telegram requests, give the Vault the method path only, for example `https://api.telegram.org/getMe`; the Vault inserts the Bot Token into the upstream path, never into a caller-controlled header. The token is not returned in runner metadata, audit details, or the response body.
+
+This catalog entry covers the Bot API token. The `tgcloud` CLI's separate Serverless deployment login is a distinct flow documented by Telegram and is not represented as a Bot API credential here.

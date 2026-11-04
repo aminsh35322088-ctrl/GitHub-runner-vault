@@ -42,9 +42,11 @@ async function sessionHeader(d: RunnerDeps) {
   return `Bearer ${token}`
 }
 
-async function activeCredential(d: RunnerDeps, opts: { visible?: boolean } = {}) {
+async function activeCredential(d: RunnerDeps, opts: { visible?: boolean; service?: string; host?: string } = {}) {
   const name = uname()
-  const req = await requestRegistration(d.db, { name, service: 'Cloudflare', purpose: 'Deploy', doc, requestedBy: 'runner:x', now: d.now })
+  const service = opts.service ?? 'Cloudflare'
+  const host = opts.host ?? 'api.cloudflare.com'
+  const req = await requestRegistration(d.db, { name, service, purpose: 'Deploy', doc, requestedBy: 'runner:x', now: d.now })
   if (!req.ok) throw new Error(req.error)
   const stored = await storeCredentialValue(d.db, d.encryptionKey, {
     credentialId: req.value.credentialId, value: SECRET, lifetime: 'permanent', expiresAt: null, visible: opts.visible ?? true,
@@ -55,6 +57,23 @@ async function activeCredential(d: RunnerDeps, opts: { visible?: boolean } = {})
 }
 
 const call = { url: 'https://api.cloudflare.com/client/v4/user/tokens/verify', method: 'GET' }
+
+async function activeTelegramApiCredential(d: RunnerDeps) {
+  const name = uname()
+  const token = String(123456789) + ':' + 'A'.repeat(35)
+  const requested = await requestRegistration(d.db, {
+    name, service: 'Telegram Bot API', purpose: 'Call the Telegram Bot API', doc,
+    requestedBy: 'runner:telegram-test', now: d.now,
+  })
+  if (!requested.ok) throw new Error(requested.error)
+  const stored = await storeCredentialValue(d.db, d.encryptionKey, {
+    credentialId: requested.value.credentialId, value: token, lifetime: 'permanent',
+    expiresAt: null, visible: true, delivery: 'proxy', allowedHosts: ['api.telegram.org'],
+    authHeader: 'X-Telegram-Bot-Api-Token', authScheme: 'Raw', now: d.now,
+  })
+  if (!stored.ok) throw new Error(stored.error)
+  return { name, id: requested.value.credentialId, token }
+}
 
 function b64url(value: Uint8Array | string) {
   const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value
@@ -198,6 +217,147 @@ describe('registration requests', () => {
     expect((await requestCredential(d, header, { name: 'bad name', service: 'a', purpose: 'b', doc })).status).toBe(400)
     const existing = await activeCredential(d)
     expect((await requestCredential(d, header, { name: existing.name, service: 'a', purpose: 'b', doc })).status).toBe(409)
+  })
+})
+
+describe('runtime credential verification evidence', () => {
+  test('promotes Telegram Bot API only on ok=true and preserves valid status across rate limits', async () => {
+    let upstream = Response.json({ ok: true, result: { id: 123456789, is_bot: true } })
+    const seen: string[] = []
+    const d = await deps({
+      fetchFn: (async (url: string) => { seen.push(url); return upstream }) as unknown as typeof fetch,
+    })
+    const credential = await activeTelegramApiCredential(d)
+    const header = await sessionHeader(d)
+    const input = { name: credential.name, method: 'GET', url: 'https://api.telegram.org/getMe' }
+
+    expect((await useCredential(d, header, input)).status).toBe(200)
+    expect(seen[0]).toBe('https://api.telegram.org/bot' + credential.token + '/getMe')
+    let [row] = await d.db.select({ validationStatus: schema.credential.validationStatus })
+      .from(schema.credential).where(orm.eq(schema.credential.id, credential.id))
+    expect(row?.validationStatus).toBe('valid')
+
+    upstream = new Response(JSON.stringify({ ok: false, error_code: 429, description: 'Too Many Requests' }), { status: 429 })
+    expect((await useCredential(d, header, input)).status).toBe(200)
+    ;[row] = await d.db.select({ validationStatus: schema.credential.validationStatus })
+      .from(schema.credential).where(orm.eq(schema.credential.id, credential.id))
+    expect(row?.validationStatus).toBe('valid')
+
+    const history = await d.db.select().from(schema.credentialValidationHistory)
+      .where(orm.eq(schema.credentialValidationHistory.credentialId, credential.id))
+    expect(history.filter((entry) => entry.source === 'runtime' && entry.status === 'valid')).toHaveLength(1)
+  })
+
+  test('records Telegram rejection only for a definitive Bot API invalid-token response', async () => {
+    let upstream = new Response(JSON.stringify({ ok: false, error_code: 404, description: 'Not Found' }), { status: 404 })
+    const d = await deps({ fetchFn: (async () => upstream) as unknown as typeof fetch })
+    const credential = await activeTelegramApiCredential(d)
+    const header = await sessionHeader(d)
+    const input = { name: credential.name, method: 'GET', url: 'https://api.telegram.org/getMe' }
+    expect((await useCredential(d, header, input)).status).toBe(200)
+    let [row] = await d.db.select({ validationStatus: schema.credential.validationStatus })
+      .from(schema.credential).where(orm.eq(schema.credential.id, credential.id))
+    expect(row?.validationStatus).toBe('invalid')
+
+    upstream = new Response('temporarily unavailable', { status: 503 })
+    expect((await useCredential(d, header, input)).status).toBe(200)
+    ;[row] = await d.db.select({ validationStatus: schema.credential.validationStatus })
+      .from(schema.credential).where(orm.eq(schema.credential.id, credential.id))
+    expect(row?.validationStatus).toBe('invalid')
+  })
+
+  test('does not promote Cloudflare from a generic HTTP 200 response without its success marker', async () => {
+    const d = await deps({ fetchFn: (async () => Response.json({ ok: true })) as unknown as typeof fetch })
+    const credential = await activeCredential(d)
+    expect((await useCredential(d, await sessionHeader(d), { name: credential.name, ...call })).status).toBe(200)
+    const [row] = await d.db.select({ validationStatus: schema.credential.validationStatus })
+      .from(schema.credential).where(orm.eq(schema.credential.id, credential.id))
+    expect(row?.validationStatus).toBe('not_tested')
+  })
+})
+
+describe('multi-field provider connections through the runner', () => {
+  test('selects one named connection and injects only its declared encrypted fields', async () => {
+    const seen: Array<{ url: string; authorization: string | null; clientSecret: string | null; workspace: string | null }> = []
+    const d = await deps({
+      fetchFn: (async (url: string, init: RequestInit) => {
+        const headers = new Headers(init.headers)
+        seen.push({
+          url,
+          authorization: headers.get('authorization'),
+          clientSecret: headers.get('x-client-secret'),
+          workspace: headers.get('x-workspace-id'),
+        })
+        return Response.json({
+          echoedPrimary: headers.get('authorization'),
+          echoedClientSecret: headers.get('x-client-secret'),
+          echoedWorkspace: headers.get('x-workspace-id'),
+        })
+      }) as unknown as typeof fetch,
+    })
+    const name = uname()
+    const docWithoutNote = Object.fromEntries(Object.entries(doc).filter(([key]) => key !== 'unverified_note'))
+    const multiDoc = {
+      ...docWithoutNote,
+      verification: 'verified',
+      official_documentation_links: [{ title: 'Example API docs', url: 'https://example.com/docs' }],
+      service_adapter: {
+        api_base_url: 'https://api.example.com',
+        auth_header: 'Authorization',
+        auth_scheme: 'Bearer',
+        credential_fields: [
+          { id: 'client_secret', label: 'Client secret', required: true, secret: true },
+          { id: 'workspace_id', label: 'Workspace ID', required: false, secret: true },
+        ],
+        auth_field_headers: [
+          { field: 'client_secret', header: 'X-Client-Secret', scheme: 'Raw' },
+          { field: 'workspace_id', header: 'X-Workspace-ID', scheme: 'Raw' },
+        ],
+        cli_tools: [],
+      },
+    }
+    const requested = await requestRegistration(d.db, {
+      name, service: 'Example API', purpose: 'Use one account only', doc: multiDoc,
+      requestedBy: 'runner:multi-field', now: d.now,
+    })
+    if (!requested.ok) throw new Error(requested.error)
+    const primary = 'primary-example-token-value'
+    const clientSecret = 'client-secret-example-value'
+    const workspace = 'workspace-secret-example-value'
+    const stored = await storeCredentialValue(d.db, d.encryptionKey, {
+      credentialId: requested.value.credentialId, value: primary,
+      authFields: { client_secret: clientSecret, workspace_id: workspace },
+      authFieldIds: ['client_secret', 'workspace_id'],
+      requiredAuthFields: ['client_secret'],
+      connectionLabel: 'Production', providerAccountId: 'acct-9001',
+      lifetime: 'permanent', expiresAt: null, visible: true, delivery: 'proxy',
+      allowedHosts: ['api.example.com'], authHeader: 'Authorization', authScheme: 'Bearer', now: d.now,
+    }, { requirePending: true })
+    if (!stored.ok) throw new Error(stored.error)
+
+    const response = await useCredential(d, await sessionHeader(d), {
+      name, method: 'GET', url: 'https://api.example.com/me',
+    })
+    expect(response.status).toBe(200)
+    expect(seen).toEqual([{
+      url: 'https://api.example.com/me',
+      authorization: 'Bearer ' + primary,
+      clientSecret,
+      workspace,
+    }])
+    const responseText = JSON.stringify(response.body)
+    expect(responseText).not.toContain(primary)
+    expect(responseText).not.toContain(clientSecret)
+    expect(responseText).not.toContain(workspace)
+    expect(responseText).toContain('[REDACTED]')
+    const [metadata] = await d.db.select({
+      connectionLabel: schema.credential.connectionLabel,
+      providerAccountId: schema.credential.providerAccountId,
+      encrypted: schema.credential.valueEncrypted,
+    }).from(schema.credential).where(orm.eq(schema.credential.id, requested.value.credentialId))
+    expect(metadata).toMatchObject({ connectionLabel: 'Production', providerAccountId: 'acct-9001' })
+    expect(metadata?.encrypted).not.toContain(clientSecret)
+    expect(metadata?.encrypted).not.toContain(workspace)
   })
 })
 
