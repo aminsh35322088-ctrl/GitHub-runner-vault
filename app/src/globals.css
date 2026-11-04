@@ -315,6 +315,14 @@
     touch-action: manipulation;
   }
 
+  /* Flex/grid anchors are button-shaped links (section-card actions,
+     pagination, icon links): give them the same 44px touch height.
+     Inline-size is left alone so text links keep their natural width. */
+  :where(a[class~='inline-flex'], a[class~='flex'], a[class~='grid']) {
+    min-block-size: 2.75rem;
+    touch-action: manipulation;
+  }
+
   :where(input:not([type='checkbox']):not([type='radio']), select, textarea) {
     min-block-size: 2.75rem;
   }

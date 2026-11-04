@@ -32,6 +32,7 @@ import { KeyRound, LayoutDashboard, Plus, ChartNoAxesCombined, ShieldCheck, Sett
 import { getUsageAnalytics, listCredentialIntegrationMetadata, listNotifications, listCredentialValidationHistory, loadVaultPreferences, runScheduledCredentialValidation, unreadNotificationCount } from './lib/vault-observability.ts'
 import { SectionCard } from './components/ui/section-card.tsx'
 import { cleanupRunnerRateLimitEvents } from './lib/runner-rate-limit.ts'
+import { ORPHAN_SPAN_ANALYTICS, ORPHAN_SPAN_TO_SM, ORPHAN_SPAN_TO_XL, SUMMARY_GRID_3_SM, SUMMARY_GRID_3_XL, SUMMARY_GRID_4, SUMMARY_GRID_5 } from './lib/responsive.ts'
 import { applySecurityHeaders } from './lib/security-headers.ts'
 import { MobileNavigation } from './components/mobile-navigation.tsx'
 import { NotificationBell } from './components/notification-actions.tsx'
@@ -173,7 +174,7 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
                       <ChevronRight className="size-3.5 text-muted-foreground/60" />
                       <span className="truncate font-semibold text-foreground">{pageTitle}</span>
                     </div>
-                    <div className="min-w-0 lg:hidden">
+                    <div className="min-w-0 max-[479px]:hidden lg:hidden">
                       <p className="truncate text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">{pageTitle}</p>
                     </div>
                   </div>
@@ -581,7 +582,7 @@ export const app = new Spiceflow()
           </SectionCard>
         )}
 
-        <section aria-label="Credential summary" className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+        <section aria-label="Credential summary" className={SUMMARY_GRID_4}>
           {[
             { label: 'Total credentials', value: rows.length, note: rows.filter((row) => row.status === 'active').length + ' active', icon: KeyRound, tone: 'bg-slate-500/10 text-slate-600 dark:text-slate-300' },
             { label: 'Verified', value: validCount, note: healthRows.length ? percent(validCount) + '% of stored credentials' : 'No stored credentials yet', icon: CheckCircle2, tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' },
@@ -596,7 +597,7 @@ export const app = new Spiceflow()
                   <span className={cn('grid size-9 shrink-0 place-items-center rounded-xl', metric.tone)}><Icon className="size-[17px]" /></span>
                 </div>
                 <p className="mt-3 text-[1.85rem] font-semibold leading-none tracking-tight tabular-nums sm:text-3xl">{metric.value}</p>
-                <p className="mt-2 text-[11px] text-muted-foreground sm:text-xs">{metric.note}</p>
+                <p className="mt-2 text-xs text-muted-foreground">{metric.note}</p>
               </article>
             )
           })}
@@ -619,10 +620,10 @@ export const app = new Spiceflow()
                 {attentionCount > 0 && <span className="h-full bg-rose-500 transition-all" style={{ width: segmentPercent(attentionCount) + '%' }} />}
                 {reviewCount > 0 && <span className="h-full bg-amber-400 transition-all" style={{ width: segmentPercent(reviewCount) + '%' }} />}
               </div>
-              <div className="grid grid-cols-3 gap-3">
-                <div className="min-w-0"><div className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-emerald-500" /><span className="truncate text-[11px] text-muted-foreground">Verified</span></div><p className="mt-1.5 text-lg font-semibold tabular-nums">{validCount}</p></div>
-                <div className="min-w-0"><div className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-rose-500" /><span className="truncate text-[11px] text-muted-foreground">Attention</span></div><p className="mt-1.5 text-lg font-semibold tabular-nums">{attentionCount}</p></div>
-                <div className="min-w-0"><div className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-amber-400" /><span className="truncate text-[11px] text-muted-foreground">To review</span></div><p className="mt-1.5 text-lg font-semibold tabular-nums">{reviewCount}</p></div>
+              <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-3">
+                <div className="min-w-0"><div className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-emerald-500" /><span className="text-xs text-muted-foreground">Verified</span></div><p className="mt-1.5 text-lg font-semibold tabular-nums">{validCount}</p></div>
+                <div className="min-w-0"><div className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-rose-500" /><span className="text-xs text-muted-foreground">Attention</span></div><p className="mt-1.5 text-lg font-semibold tabular-nums">{attentionCount}</p></div>
+                <div className="min-w-0"><div className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-amber-400" /><span className="text-xs text-muted-foreground">To review</span></div><p className="mt-1.5 text-lg font-semibold tabular-nums">{reviewCount}</p></div>
               </div>
               <div className="flex items-start gap-2.5 rounded-xl border border-border/70 bg-muted/30 p-3">
                 <Clock3 className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
@@ -671,10 +672,10 @@ export const app = new Spiceflow()
             <form method="get" action="/vault" className="mb-4 flex flex-col gap-2 sm:flex-row">
               <label className="flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-xl border border-input bg-background px-3">
                 <Search className="size-4 shrink-0 text-muted-foreground" />
-                <input type="search" name="q" value={searchQuery} placeholder="Search credentials or providers…" className="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/70" />
+                <input type="search" name="q" value={searchQuery} placeholder="Search credentials or providers…" className="h-11 min-w-0 flex-1 bg-transparent text-base outline-none placeholder:text-muted-foreground/70 sm:h-10 sm:text-sm" />
               </label>
               <div className="flex gap-2">
-                <select name="health" defaultValue={healthFilter} aria-label="Filter credentials by verification state" className="h-10 min-w-0 flex-1 rounded-xl border border-input bg-background px-3 text-xs sm:w-44 sm:flex-none">
+                <select name="health" defaultValue={healthFilter} aria-label="Filter credentials by verification state" className="h-11 min-w-0 flex-1 rounded-xl border border-input bg-background px-3 text-base sm:h-10 sm:w-44 sm:flex-none sm:text-xs">
                   <option value="all">All states</option>
                   <option value="verified">Verified</option>
                   <option value="attention">Needs attention</option>
@@ -730,18 +731,9 @@ export const app = new Spiceflow()
                       <div className="min-w-0"><p className="break-all font-mono text-xs font-semibold">{credential.name}</p><p className="mt-1 text-xs text-muted-foreground">{credential.service}</p></div>
                       {validationBadge(credential.validationStatus)}
                     </div>
-                    <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-3">
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border/70 pt-3">
                       {statusBadge(credential, now)}
-                      <dl className="grid min-w-0 flex-1 grid-cols-2 gap-2 text-[11px] sm:max-w-[20rem]">
-                        <div className="min-w-0">
-                          <dt className="text-muted-foreground">Expires</dt>
-                          <dd className="mt-0.5 truncate">{credential.expiresAt ? <TimeAgo ts={credential.expiresAt} /> : credential.lifetime === 'permanent' ? 'Never' : '—'}</dd>
-                        </div>
-                        <div className="min-w-0">
-                          <dt className="text-muted-foreground">Last used</dt>
-                          <dd className="mt-0.5 truncate">{credential.lastUsedAt ? <TimeAgo ts={credential.lastUsedAt} /> : 'Never'}</dd>
-                        </div>
-                      </dl>
+                      <p className="text-xs text-muted-foreground">Last used {credential.lastUsedAt ? <TimeAgo ts={credential.lastUsedAt} /> : 'Never'}{credential.expiresAt ? <> · Expires <TimeAgo ts={credential.expiresAt} /></> : null}</p>
                     </div>
                   </a>
                 ))}
@@ -813,21 +805,21 @@ export const app = new Spiceflow()
           <Badge variant="outline" className="min-h-8 px-3">{inbox.total} awaiting owner</Badge>
         </div>
 
-        <section className="grid grid-cols-2 gap-3 sm:grid-cols-3" aria-label="Request summary">
+        <section className={SUMMARY_GRID_3_SM} aria-label="Request summary">
           <article className="rounded-2xl border border-border bg-card p-4 sm:p-5">
             <p className="text-xs font-medium text-muted-foreground">Awaiting owner</p>
             <p className="mt-3 text-3xl font-semibold tracking-tight tabular-nums">{inbox.total}</p>
-            <p className="mt-1.5 text-[11px] text-muted-foreground">Pending credentials · all pages</p>
+            <p className="mt-1.5 text-xs text-muted-foreground">Pending credentials · all pages</p>
           </article>
           <article className="rounded-2xl border border-border bg-card p-4 sm:p-5">
             <p className="text-xs font-medium text-muted-foreground">Active setup links</p>
             <p className="mt-3 text-3xl font-semibold tracking-tight tabular-nums">{requests.filter((item) => item.hasActiveLink).length}</p>
-            <p className="mt-1.5 text-[11px] text-muted-foreground">This page · single-use · 15 minutes</p>
+            <p className="mt-1.5 text-xs text-muted-foreground">This page · single-use · 15 minutes</p>
           </article>
-          <article className="col-span-2 rounded-2xl border border-border bg-muted/20 p-4 sm:col-span-1 sm:p-5">
+          <article className={cn('rounded-2xl border border-border bg-muted/20 p-4 sm:p-5', ORPHAN_SPAN_TO_SM)}>
             <p className="text-xs font-medium text-muted-foreground">Owner control</p>
             <p className="mt-3 text-sm font-semibold">Secrets stay owner-only</p>
-            <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">Runner requests cannot set API hosts, authentication rules or the token value.</p>
+            <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">Runner requests cannot set API hosts, authentication rules or the token value.</p>
           </article>
         </section>
 
@@ -1014,7 +1006,7 @@ export const app = new Spiceflow()
 
         <div className="grid min-w-0 gap-4 xl:grid-cols-[0.95fr_1.05fr]">
           <SectionCard title="Configuration" description="Read-only security and delivery metadata." icon={<KeyRound className="size-[18px]" />}>
-            <dl className="grid min-w-0 grid-cols-[7.25rem_minmax(0,1fr)] gap-x-3 text-xs sm:grid-cols-[9rem_minmax(0,1fr)]">
+            <dl className="grid min-w-0 grid-cols-[6rem_minmax(0,1fr)] gap-x-3 text-xs sm:grid-cols-[9rem_minmax(0,1fr)]">
               <dt className="border-b border-border/70 py-2.5 text-muted-foreground">Delivery</dt><dd className="min-w-0 border-b border-border/70 py-2.5 font-medium">{c.externallyManaged ? 'Managed elsewhere' : c.delivery}</dd>
               <dt className="border-b border-border/70 py-2.5 text-muted-foreground">Allowed hosts</dt><dd className="min-w-0 break-all border-b border-border/70 py-2.5 font-mono text-[11px]">{c.allowedHosts.join(', ') || '—'}</dd>
               <dt className="border-b border-border/70 py-2.5 text-muted-foreground">Authentication</dt><dd className="min-w-0 break-words border-b border-border/70 py-2.5 font-mono text-[11px]">{c.authHeader}: {c.authScheme}</dd>
@@ -1091,7 +1083,7 @@ export const app = new Spiceflow()
           <Badge variant="outline" className="min-h-8 px-3">Scheduled checks · every 15 minutes</Badge>
         </div>
 
-        <section aria-label="Verification summary" className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+        <section aria-label="Verification summary" className={SUMMARY_GRID_4}>
           {[
             { label: 'Verified', value: counts.valid, note: 'Provider confirmed', icon: CheckCircle2, tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' },
             { label: 'Needs attention', value: counts.attention, note: 'Invalid, expired or limited', icon: AlertTriangle, tone: 'bg-rose-500/10 text-rose-700 dark:text-rose-300' },
@@ -1102,7 +1094,7 @@ export const app = new Spiceflow()
             return <article key={metric.label} className="rounded-2xl border border-border bg-card p-4 sm:p-5">
               <div className="flex items-center justify-between gap-2"><p className="text-xs font-medium text-muted-foreground">{metric.label}</p><span className={cn('grid size-9 place-items-center rounded-xl', metric.tone)}><Icon className="size-[17px]" /></span></div>
               <p className="mt-3 text-3xl font-semibold tracking-tight tabular-nums">{metric.value}</p>
-              <p className="mt-1.5 text-[11px] text-muted-foreground">{metric.note}</p>
+              <p className="mt-1.5 text-xs text-muted-foreground">{metric.note}</p>
             </article>
           })}
         </section>
@@ -1115,10 +1107,10 @@ export const app = new Spiceflow()
           {rows.length > 0 && <form method="get" action="/vault/validation" className="mb-4 flex flex-col gap-2 sm:flex-row">
             <label className="flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-xl border border-input bg-background px-3">
               <Search className="size-4 shrink-0 text-muted-foreground" />
-              <input type="search" name="q" defaultValue={query} placeholder="Search credential or provider…" className="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/70" />
+              <input type="search" name="q" defaultValue={query} placeholder="Search credential or provider…" className="h-11 min-w-0 flex-1 bg-transparent text-base outline-none placeholder:text-muted-foreground/70 sm:h-10 sm:text-sm" />
             </label>
             <div className="flex gap-2">
-              <select name="status" defaultValue={selectedStatus} aria-label="Filter by validation status" className="h-10 min-w-0 flex-1 rounded-xl border border-input bg-background px-3 text-xs sm:w-48 sm:flex-none">
+              <select name="status" defaultValue={selectedStatus} aria-label="Filter by validation status" className="h-11 min-w-0 flex-1 rounded-xl border border-input bg-background px-3 text-base sm:h-10 sm:w-48 sm:flex-none sm:text-xs">
                 <option value="all">All statuses</option>
                 <option value="valid">Verified</option>
                 <option value="invalid">Invalid</option>
@@ -1171,12 +1163,11 @@ export const app = new Spiceflow()
                     <div className="min-w-0"><a href={'/vault/credentials/' + row.id} className="break-all font-mono text-xs font-semibold hover:text-primary">{row.name}</a><p className="mt-1 text-xs text-muted-foreground">{row.service}</p></div>
                     {validationBadge(row.validationStatus)}
                   </div>
-                  <div className="mt-3 grid grid-cols-2 gap-3 border-t border-border/70 pt-3 text-[11px]">
+                  <div className="mt-3 grid grid-cols-2 gap-3 border-t border-border/70 pt-3 text-xs">
                     <div className="min-w-0"><p className="text-muted-foreground">Last checked</p><p className="mt-1">{row.lastValidatedAt ? <TimeAgo ts={row.lastValidatedAt} /> : 'Never'}</p></div>
                     <div className="min-w-0"><p className="text-muted-foreground">Next check</p><p className="mt-1">{row.nextValidationAt ? <TimeAgo ts={row.nextValidationAt} /> : 'Not scheduled'}</p></div>
-                    <div className="min-w-0"><p className="text-muted-foreground">Failures</p><p className={cn('mt-1 tabular-nums', row.validationFailureCount > 0 && 'font-medium text-destructive')}>{row.validationFailureCount > 0 ? row.validationFailureCount + ' consecutive' : '—'}</p></div>
-                    {row.validationFailureCount > 0 && <div className="col-span-2 break-words text-destructive">First failure · <TimeAgo ts={row.firstValidationFailureAt ?? now} /></div>}
                   </div>
+                  {row.validationFailureCount > 0 && <p className="mt-2 text-xs font-medium text-destructive">{row.validationFailureCount} consecutive failures · first <TimeAgo ts={row.firstValidationFailureAt ?? now} /></p>}
                   {row.status === 'active' && row.hasValue && <div className="mt-3 border-t border-border/70 pt-3"><RunCredentialValidationButton id={row.id} /></div>}
                 </article>)}
               </div>
@@ -1234,19 +1225,19 @@ export const app = new Spiceflow()
           <Badge variant="outline" className="min-h-8 px-3">30-day window</Badge>
         </div>
 
-        <section aria-label="Usage summary" className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5">
+        <section aria-label="Usage summary" className={SUMMARY_GRID_5}>
           {[
             { label: 'Requests', value: number.format(analytics.totals.requests), note: 'Proxy calls', icon: Activity, tone: 'bg-slate-500/10 text-slate-600 dark:text-slate-300' },
             { label: 'Success rate', value: successRate + '%', note: number.format(analytics.totals.successes) + ' successful', icon: CheckCircle2, tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' },
             { label: 'Failed requests', value: number.format(analytics.totals.errors), note: 'Upstream failures', icon: AlertTriangle, tone: analytics.totals.errors ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300' : 'bg-slate-500/10 text-slate-500 dark:text-slate-300' },
             { label: 'Average latency', value: analytics.totals.requests ? analytics.totals.averageLatencyMs + ' ms' : '—', note: 'Per request', icon: Clock3, tone: 'bg-sky-500/10 text-sky-700 dark:text-sky-300' },
             { label: 'Peak latency', value: analytics.totals.requests ? analytics.totals.maxLatencyMs + ' ms' : '—', note: 'Highest observed', icon: Gauge, tone: 'bg-violet-500/10 text-violet-700 dark:text-violet-300' },
-          ].map((metric) => {
+          ].map((metric, index) => {
             const Icon = metric.icon
-            return <article key={metric.label} className="min-w-0 rounded-2xl border border-border bg-card p-4 sm:p-5">
+            return <article key={metric.label} className={cn('min-w-0 rounded-2xl border border-border bg-card p-4 sm:p-5', index === 4 && ORPHAN_SPAN_ANALYTICS)}>
               <div className="flex items-center justify-between gap-2"><p className="text-xs font-medium text-muted-foreground">{metric.label}</p><span className={cn('grid size-9 shrink-0 place-items-center rounded-xl', metric.tone)}><Icon className="size-[17px]" /></span></div>
-              <p className="mt-3 truncate text-[1.65rem] font-semibold tracking-tight tabular-nums sm:text-2xl">{metric.value}</p>
-              <p className="mt-1.5 text-[11px] text-muted-foreground">{metric.note}</p>
+              <p className="mt-3 break-words text-[1.65rem] font-semibold tracking-tight tabular-nums sm:text-2xl">{metric.value}</p>
+              <p className="mt-1.5 text-xs text-muted-foreground">{metric.note}</p>
             </article>
           })}
         </section>
@@ -1268,9 +1259,10 @@ export const app = new Spiceflow()
               <div className="flex h-44 items-end gap-1.5 rounded-xl border border-border/70 bg-muted/15 px-3 pb-3 pt-4 sm:gap-2 sm:px-4" role="img" aria-label="Hourly request volume chart for the last 24 hours">
                 {analytics.series.map((row) => {
                   const height = row.requests ? Math.max(5, row.requests / maxHourly * 100) : 2
-                  return <div key={row.windowStart} title={new Date(row.windowStart).toLocaleString('en-GB', { dateStyle: 'medium', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }) + ' UTC · ' + row.requests + ' requests'} className="group flex h-full min-w-0 flex-1 flex-col justify-end">
-                    <span className="mb-1 hidden text-center text-[9px] tabular-nums text-muted-foreground group-hover:block">{row.requests || ''}</span>
-                    <span className={cn('block w-full rounded-t-[4px] transition-opacity group-hover:opacity-100', row.requests ? 'bg-primary/75 group-hover:bg-primary' : 'bg-border/70')} style={{ height: height + '%' }} />
+                  const isPeak = row.requests > 0 && row.requests === maxHourly
+                  return <div key={row.windowStart} tabIndex={0} title={new Date(row.windowStart).toLocaleString('en-GB', { dateStyle: 'medium', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }) + ' UTC · ' + row.requests + ' requests'} className="group flex h-full min-w-0 flex-1 flex-col justify-end rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-primary/60">
+                    <span className={cn('mb-1 text-center text-[10px] tabular-nums text-muted-foreground', isPeak ? 'block font-semibold text-foreground' : 'hidden group-hover:block group-focus-within:block group-active:block')}>{row.requests || ''}</span>
+                    <span className={cn('block w-full rounded-t-[4px] transition-opacity group-hover:opacity-100 group-focus-within:opacity-100', row.requests ? 'bg-primary/75 group-hover:bg-primary group-focus-within:bg-primary' : 'bg-border/70')} style={{ height: height + '%' }} />
                   </div>
                 })}
               </div>
@@ -1288,10 +1280,10 @@ export const app = new Spiceflow()
                 {analytics.consumers.map((row) => <article key={row.consumer} className="rounded-xl border border-border p-3.5">
                   <div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="break-all font-mono text-sm font-semibold">{row.consumer === 'runner' ? 'Runner' : row.consumer.replace(/^cli:/, '')}</p><p className="mt-1 text-xs text-muted-foreground">{row.consumer === 'runner' ? 'Direct Runner proxy use' : 'CLI integration'}</p></div><Badge variant="outline">{consumerRate(row.successes, row.requests)}% success</Badge></div>
                   <div className="mt-3 grid grid-cols-2 gap-3 border-t border-border pt-3 sm:grid-cols-4">
-                    <div><p className="text-lg font-semibold tabular-nums">{number.format(row.requests)}</p><p className="text-[11px] text-muted-foreground">Requests</p></div>
-                    <div><p className="text-lg font-semibold tabular-nums">{number.format(row.errors)}</p><p className="text-[11px] text-muted-foreground">Errors</p></div>
-                    <div><p className="text-lg font-semibold tabular-nums">{row.averageLatencyMs} ms</p><p className="text-[11px] text-muted-foreground">Average</p></div>
-                    <div><p className="text-lg font-semibold tabular-nums">{row.maxLatencyMs} ms</p><p className="text-[11px] text-muted-foreground">Peak</p></div>
+                    <div><p className="text-lg font-semibold tabular-nums">{number.format(row.requests)}</p><p className="text-xs text-muted-foreground">Requests</p></div>
+                    <div><p className="text-lg font-semibold tabular-nums">{number.format(row.errors)}</p><p className="text-xs text-muted-foreground">Errors</p></div>
+                    <div><p className="text-lg font-semibold tabular-nums">{row.averageLatencyMs} ms</p><p className="text-xs text-muted-foreground">Average</p></div>
+                    <div><p className="text-lg font-semibold tabular-nums">{row.maxLatencyMs} ms</p><p className="text-xs text-muted-foreground">Peak</p></div>
                   </div>
                 </article>)}
               </div>
@@ -1321,11 +1313,7 @@ export const app = new Spiceflow()
                         </div>
                         <span className="shrink-0 rounded-full border border-border px-2 py-1 text-[10px] font-medium tabular-nums">{consumerRate(row.successes, row.requests)}% success</span>
                       </div>
-                      <div className="mt-3 grid grid-cols-3 gap-2 border-t border-border/70 pt-3">
-                        <div className="min-w-0"><p className="text-[10px] text-muted-foreground">Requests</p><p className="mt-1 truncate text-sm font-semibold tabular-nums">{number.format(row.requests)}</p></div>
-                        <div className="min-w-0"><p className="text-[10px] text-muted-foreground">Success</p><p className="mt-1 truncate text-sm font-semibold tabular-nums">{consumerRate(row.successes, row.requests)}%</p></div>
-                        <div className="min-w-0"><p className="text-[10px] text-muted-foreground">Avg. latency</p><p className="mt-1 truncate text-sm font-semibold tabular-nums">{row.averageLatencyMs} ms</p></div>
-                      </div>
+                      <p className="mt-3 border-t border-border/70 pt-3 text-xs text-muted-foreground">{number.format(row.requests)} requests · {row.averageLatencyMs} ms avg latency</p>
                     </a>
                   ))}
                 </div>
@@ -1355,17 +1343,17 @@ export const app = new Spiceflow()
           <a href="/vault/services" className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90"><Plus className="size-4" /> Add credential</a>
         </div>
 
-        <section className="grid grid-cols-2 gap-3 xl:grid-cols-3" aria-label="Integration summary">
+        <section className={SUMMARY_GRID_3_XL} aria-label="Integration summary">
           {[
             { label: 'Credentials', value: rows.length, note: 'With provider metadata', icon: KeyRound },
             { label: 'Active credentials', value: activeCount, note: 'Currently enabled', icon: CheckCircle2 },
             { label: 'CLI adapters', value: toolCount, note: configuredCount + ' credentials with a supported tool', icon: Workflow },
-          ].map((metric) => {
+          ].map((metric, index) => {
             const Icon = metric.icon
-            return <article key={metric.label} className="rounded-2xl border border-border bg-card p-4 sm:p-5">
+            return <article key={metric.label} className={cn('rounded-2xl border border-border bg-card p-4 sm:p-5', index === 2 && ORPHAN_SPAN_TO_XL)}>
               <div className="flex items-center justify-between gap-2"><p className="text-xs font-medium text-muted-foreground">{metric.label}</p><span className="grid size-9 place-items-center rounded-xl bg-primary/10 text-primary"><Icon className="size-[17px]" /></span></div>
               <p className="mt-3 text-3xl font-semibold tracking-tight tabular-nums">{metric.value}</p>
-              <p className="mt-1.5 text-[11px] text-muted-foreground">{metric.note}</p>
+              <p className="mt-1.5 text-xs text-muted-foreground">{metric.note}</p>
             </article>
           })}
         </section>
@@ -1432,14 +1420,14 @@ export const app = new Spiceflow()
           <Badge variant="outline" className="min-h-8 px-3">Latest {rows.length} events</Badge>
         </div>
 
-        <section className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        <section className={SUMMARY_GRID_3_SM}>
           {[
             { label: 'Recorded events', value: rows.length, icon: ClipboardList },
             { label: 'Actors', value: actors, icon: Fingerprint },
             { label: 'Credentials touched', value: credentials, icon: KeyRound },
-          ].map((metric) => {
+          ].map((metric, index) => {
             const Icon = metric.icon
-            return <article key={metric.label} className="rounded-2xl border border-border bg-card p-4 sm:p-5">
+            return <article key={metric.label} className={cn('rounded-2xl border border-border bg-card p-4 sm:p-5', index === 2 && ORPHAN_SPAN_TO_SM)}>
               <div className="flex items-center justify-between gap-2"><p className="text-xs font-medium text-muted-foreground">{metric.label}</p><span className="grid size-9 place-items-center rounded-xl bg-primary/10 text-primary"><Icon className="size-[17px]" /></span></div>
               <p className="mt-3 text-3xl font-semibold tracking-tight tabular-nums">{metric.value}</p>
             </article>
@@ -1471,7 +1459,7 @@ export const app = new Spiceflow()
         {keys.keySource === 'database' && <p role="alert" className="rounded-xl border border-warning/30 bg-warning/5 p-4 text-sm">The vault master key is still stored in D1 beside the encrypted credentials. New credential storage is paused. No manual key entry is needed: redeploy the Vault so the deploy pipeline can provision the <span className="font-mono">VAULT_MASTER_KEY</span> Worker secret automatically. If the new key differs, all credentials and the GitHub sign-in secret are migrated in one atomic database batch. If any value cannot be decrypted, the old key is preserved and migration stops instead of risking data loss.</p>}
         <VaultSettingsForm initial={preferences} />
         <SectionCard title="Runner connection" description="OIDC trust is pinned to the first valid workflow from the owner’s main branch." icon={<Workflow className="size-5"/>}>
-          {fixedByEnv ? <p className="text-sm text-muted-foreground">This deployment uses an explicit RUNNER_* trust policy.</p> : policy ? <dl className="grid grid-cols-[7.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-sm"><dt className="text-muted-foreground">Repository</dt><dd className="break-all font-mono">{policy.repository}</dd><dt className="text-muted-foreground">Repository ID</dt><dd className="font-mono">{policy.repositoryId}</dd><dt className="text-muted-foreground">Owner ID</dt><dd className="font-mono">{policy.repositoryOwnerId ?? 'legacy policy'}</dd><dt className="text-muted-foreground">Branch</dt><dd className="font-mono">{policy.branch}</dd><dt className="text-muted-foreground">Workflow</dt><dd className="break-all font-mono">{policy.workflowFile}</dd></dl> : <p className="rounded-xl bg-muted/50 p-3 text-sm text-muted-foreground">Waiting for the first valid owner-owned workflow run. Pull-request events are rejected.</p>}
+          {fixedByEnv ? <p className="text-sm text-muted-foreground">This deployment uses an explicit RUNNER_* trust policy.</p> : policy ? <dl className="grid grid-cols-1 gap-x-3 gap-y-2 text-sm min-[420px]:grid-cols-[7.5rem_minmax(0,1fr)]"><dt className="text-muted-foreground">Repository</dt><dd className="break-all font-mono">{policy.repository}</dd><dt className="text-muted-foreground">Repository ID</dt><dd className="font-mono">{policy.repositoryId}</dd><dt className="text-muted-foreground">Owner ID</dt><dd className="font-mono">{policy.repositoryOwnerId ?? 'legacy policy'}</dd><dt className="text-muted-foreground">Branch</dt><dd className="font-mono">{policy.branch}</dd><dt className="text-muted-foreground">Workflow</dt><dd className="break-all font-mono">{policy.workflowFile}</dd></dl> : <p className="rounded-xl bg-muted/50 p-3 text-sm text-muted-foreground">Waiting for the first valid owner-owned workflow run. Pull-request events are rejected.</p>}
         </SectionCard>
         <SectionCard title="Runner sessions" description="Sessions last 30 minutes. Revoking invalidates every session issued so far." icon={<ShieldCheck className="size-5"/>}>
           <RevokeSessionsButton />
