@@ -226,10 +226,27 @@ test('serve runs a Northflank loopback bridge without forwarding a CLI placehold
     assert.equal(seen[1].body.headers['content-type'], 'application/octet-stream')
     assert.deepEqual(seen[1].rawBody, deploymentPayload)
 
+    // Send this as a chunked stream (no Content-Length). The bridge must
+    // drain an oversized streamed body before returning 413; a fixed-length
+    // request is intentionally rejected before reading and may close the
+    // socket while fetch is still writing, which makes this test flaky.
+    let remainingUploadBytes = 10 * 1024 * 1024 + 1
+    const oversizedBody = new ReadableStream({
+      pull(controller) {
+        if (remainingUploadBytes <= 0) {
+          controller.close()
+          return
+        }
+        const size = Math.min(64 * 1024, remainingUploadBytes)
+        controller.enqueue(Buffer.alloc(size, 0xff))
+        remainingUploadBytes -= size
+      },
+    })
     const oversizedUpload = await fetch(`http://127.0.0.1:${port}/v1/deploy`, {
       method: 'POST',
       headers: { 'content-type': 'application/octet-stream' },
-      body: Buffer.alloc(10 * 1024 * 1024 + 1),
+      body: oversizedBody,
+      duplex: 'half',
     })
     assert.equal(oversizedUpload.status, 413)
     assert.equal(seen.length, 2, 'oversized payload is rejected before it reaches Vault')
