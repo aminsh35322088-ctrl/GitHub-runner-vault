@@ -77,8 +77,9 @@
 
   <section>
     <h2>Step 4 — Deploy</h2>
-    <p>Run the <strong>Deploy to Cloudflare</strong> workflow once. After that, every merge to
-    <code>main</code> redeploys automatically — you never repeat these steps to update.</p>
+    <p>Run the <strong>Deploy to Cloudflare</strong> workflow once. After that, merges to
+    <code>main</code> that change the Worker app, client, or root pnpm manifests redeploy
+    automatically. Documentation-only changes do not need a Worker deployment.</p>
     <a class="btn" id="deployLink" target="_blank" rel="noopener">Open the Deploy workflow</a>
   </section>
 

@@ -271,7 +271,7 @@ There is exactly one way to deploy: a setup wizard drives a GitHub Actions workf
 
 ### Updating
 
-Every merge to `main` redeploys automatically, and re-running the workflow by hand is always safe: the build, D1 provisioning and master-key provisioning are idempotent, and an upgrade keeps the existing D1 data, owner pin and credentials.
+Every merge to `main` that changes `app/**`, `client/**`, or the root pnpm manifests redeploys automatically; documentation-only changes do not. Re-running the workflow by hand is always safe: the build, D1 provisioning and master-key provisioning are idempotent, and an upgrade keeps the existing D1 data, owner pin and credentials.
 
 ### How it works
 
