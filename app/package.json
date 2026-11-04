@@ -11,7 +11,7 @@
   "scripts": {
     "dev": "vite dev",
     "build": "node scripts/embed-schema.mjs --check && vite build && node scripts/prepare-worker-entry.mjs",
-    "test": "node scripts/embed-schema.mjs --check && node --test scripts/deploy.check.mjs scripts/prepare-worker-entry.check.mjs && vitest run",
+    "test": "node scripts/embed-schema.mjs --check && node --test scripts/deploy.check.mjs scripts/deployment-info.check.mjs scripts/prepare-worker-entry.check.mjs && vitest run",
     "typecheck": "tsc --noEmit",
     "types": "wrangler types --env-file .dev.vars.example",
     "embed-schema": "node scripts/embed-schema.mjs",
