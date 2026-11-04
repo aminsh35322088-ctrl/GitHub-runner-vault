@@ -12,11 +12,20 @@ import { SCHEMA_MIGRATIONS } from './schema-sql.generated.ts'
 
 const db = getDb()
 const b64 = (n: number) => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(n))))
+/** Fixed test-only master key (bytes 0..31), matching wrangler.test.jsonc. */
+const TEST_MASTER = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8='
 
 beforeEach(async () => {
   resetVaultKeyCache()
   await db.delete(schema.vaultSetting)
 })
+
+async function readSetting(key: string) {
+  const [row] = await db.select({ value: schema.vaultSetting.value }).from(schema.vaultSetting)
+    .where(orm.eq(schema.vaultSetting.key, key))
+  return row?.value ?? null
+}
+
 
 describe('key derivation', () => {
   test('both keys derive from one master, deterministically and under different labels', async () => {
@@ -36,13 +45,40 @@ describe('key derivation', () => {
     await expect(keysFromMaster(b64(16))).rejects.toThrow()
   })
 
-  test('generates a master key once, stores it, and reuses it', async () => {
-    const first = await loadVaultKeys(db, {})
+  test('a fresh deployment without VAULT_MASTER_KEY fails closed instead of generating a database key', async () => {
+    await expect(loadVaultKeys(db, {})).rejects.toThrow(/VAULT_MASTER_KEY/)
+    expect(await db.select().from(schema.vaultSetting)).toHaveLength(0)
+  })
+
+  test('a pre-migration database-stored key keeps working in flagged database mode', async () => {
+    const stored = b64(32)
+    await putSetting(db, 'master_key', stored)
+    const keys = await loadVaultKeys(db, {})
+    expect(keys.keySource).toBe('database')
+    expect(keys.authSecret).toBe((await keysFromMaster(stored)).authSecret)
+  })
+
+  test('setting the secret to the stored value retires the database copy without re-encryption', async () => {
+    const stored = b64(32)
+    await putSetting(db, 'master_key', stored)
+    const keys = await loadVaultKeys(db, { VAULT_MASTER_KEY: stored })
+    expect(keys.keySource).toBe('secret')
+    expect(keys.authSecret).toBe((await keysFromMaster(stored)).authSecret)
+    expect(await db.select().from(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'master_key'))).toHaveLength(0)
+  })
+
+  test('setting a different secret reseals the GitHub client secret and retires the database key', async () => {
+    const stored = b64(32)
+    await putSetting(db, 'master_key', stored)
+    const oldKeys = await loadVaultKeys(db, {})
+    await saveGithubApp(db, oldKeys, { clientId: 'Iv1.migrate', clientSecret: 'migrate-secret-value', ownerId: '7' }, '7')
     resetVaultKeyCache()
-    const second = await loadVaultKeys(db, {})
-    expect(second.authSecret).toBe(first.authSecret)
-    const rows = await db.select().from(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'master_key'))
-    expect(rows).toHaveLength(1)
+    const newMaster = b64(32)
+    const newKeys = await loadVaultKeys(db, { VAULT_MASTER_KEY: newMaster })
+    expect(newKeys.keySource).toBe('secret')
+    expect(await db.select().from(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'master_key'))).toHaveLength(0)
+    expect(await loadGithubOAuth(db, {}, newKeys)).toEqual({ clientId: 'Iv1.migrate', clientSecret: 'migrate-secret-value' })
+    expect(await loadGithubOAuth(db, {}, oldKeys)).toBeNull()
   })
 
   test('an explicit VAULT_MASTER_KEY wins over the stored one', async () => {
@@ -61,11 +97,22 @@ describe('key derivation', () => {
   test('legacy secrets that are too weak fail closed', async () => {
     await expect(loadVaultKeys(db, { BETTER_AUTH_SECRET: 'short', ENCRYPTION_KEY: b64(32) })).rejects.toThrow()
   })
+  test('keeps the old D1 key when the GitHub App secret cannot be resealed', async () => {
+    const stored = b64(32)
+    await putSetting(db, 'master_key', stored)
+    const oldKeys = await loadVaultKeys(db, {})
+    await saveGithubApp(db, oldKeys, { clientId: 'Iv1.blocked', clientSecret: 'preserve-this-secret', ownerId: '7' }, '7')
+    await putSetting(db, 'github_client_secret', 'not-valid-sealed-json')
+    resetVaultKeyCache()
+    await expect(loadVaultKeys(db, { VAULT_MASTER_KEY: b64(32) })).rejects.toThrow(/migration blocked/)
+    expect(await readSetting('master_key')).toBe(stored)
+    expect(await readSetting('github_client_secret')).toBe('not-valid-sealed-json')
+  })
 })
 
 describe('GitHub app and owner storage', () => {
   test('stores the client secret encrypted and reads it back', async () => {
-    const keys = await loadVaultKeys(db, {})
+    const keys = await loadVaultKeys(db, { VAULT_MASTER_KEY: TEST_MASTER })
     await saveGithubApp(db, keys, { clientId: 'Iv1.abc', clientSecret: 'super-secret-client-value', ownerId: '318252513' }, '318252513')
     const raw = JSON.stringify(await db.select().from(schema.vaultSetting))
     expect(raw).not.toContain('super-secret-client-value')
@@ -74,7 +121,7 @@ describe('GitHub app and owner storage', () => {
   })
 
   test('deployment owner binding rejects missing and mismatched identities', async () => {
-    const keys = await loadVaultKeys(db, {})
+    const keys = await loadVaultKeys(db, { VAULT_MASTER_KEY: TEST_MASTER })
     const app = { clientId: 'Iv1.owner', clientSecret: 'secret', ownerId: '111' }
     await expect(saveGithubApp(db, keys, app, null)).rejects.toThrow(/not provisioned/)
     await expect(saveGithubApp(db, keys, app, '222')).rejects.toThrow(/does not match deployment owner/)
@@ -83,14 +130,14 @@ describe('GitHub app and owner storage', () => {
   })
 
   test('a ciphertext copied under another label does not decrypt', async () => {
-    const keys = await loadVaultKeys(db, {})
+    const keys = await loadVaultKeys(db, { VAULT_MASTER_KEY: TEST_MASTER })
     await saveGithubApp(db, keys, { clientId: 'id', clientSecret: 'secret-value', ownerId: '1' }, '1')
     await putSetting(db, 'github_client_secret', '{"e":"AAAA","i":"AAAA"}')
     expect(await loadGithubOAuth(db, {}, keys)).toBeNull()
   })
 
   test('refuses an invalid owner id and returns nothing before setup', async () => {
-    const keys = await loadVaultKeys(db, {})
+    const keys = await loadVaultKeys(db, { VAULT_MASTER_KEY: TEST_MASTER })
     await expect(saveGithubApp(db, keys, { clientId: 'a', clientSecret: 'b', ownerId: 'octocat' }, '5')).rejects.toThrow()
     expect(await loadGithubOAuth(db, {}, keys)).toBeNull()
     expect(await loadOwnerId(db, {})).toBeNull()
@@ -104,7 +151,7 @@ describe('GitHub app and owner storage', () => {
   })
 
   test('stored owner identity takes precedence over later build variables', async () => {
-    const keys = await loadVaultKeys(db, {})
+    const keys = await loadVaultKeys(db, { VAULT_MASTER_KEY: TEST_MASTER })
     await saveGithubApp(db, keys, { clientId: 'stored', clientSecret: 'stored-secret', ownerId: '5' }, '5')
     expect(await loadOwnerId(db, { OWNER_GITHUB_ID: '9' })).toBe('5')
     expect(await loadGithubOAuth(db, { GITHUB_CLIENT_ID: 'e', GITHUB_CLIENT_SECRET: 'f' }, keys)).toEqual({ clientId: 'e', clientSecret: 'f' })
@@ -126,7 +173,7 @@ describe('setup state', () => {
   })
 
   test('an interrupted setup can resume with the same GitHub App ID', async () => {
-    const keys = await loadVaultKeys(db, {})
+    const keys = await loadVaultKeys(db, { VAULT_MASTER_KEY: TEST_MASTER })
     await db.insert(schema.vaultSetting).values({ key: 'owner_github_id', value: '55', updatedAt: Date.now() })
     await db.insert(schema.vaultSetting).values({ key: 'github_client_id', value: 'Iv1.recovery', updatedAt: Date.now() })
 
@@ -145,7 +192,7 @@ describe('setup state', () => {
   })
 
   test('the first GitHub sign-in app claim wins and a second one is refused without overwriting', async () => {
-    const keys = await loadVaultKeys(db, {})
+    const keys = await loadVaultKeys(db, { VAULT_MASTER_KEY: TEST_MASTER })
     await saveGithubApp(db, keys, { clientId: 'first', clientSecret: 'first-secret', ownerId: '111', ownerLogin: 'alice' }, '111')
     await expect(saveGithubApp(db, keys, { clientId: 'second', clientSecret: 'second-secret', ownerId: '111', ownerLogin: 'mallory' }, '111'))
       .rejects.toThrow(/already has a sign-in app/)
@@ -155,7 +202,7 @@ describe('setup state', () => {
   })
 
   test('owner login is only kept when it is a valid GitHub login', async () => {
-    const keys = await loadVaultKeys(db, {})
+    const keys = await loadVaultKeys(db, { VAULT_MASTER_KEY: TEST_MASTER })
     await saveGithubApp(db, keys, { clientId: 'a', clientSecret: 'b', ownerId: '5', ownerLogin: '<script>' }, '5')
     expect(await loadOwnerLogin(db)).toBeNull()
     await putSetting(db, 'owner_github_login', 'bad login!')

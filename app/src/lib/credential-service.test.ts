@@ -4,7 +4,7 @@ import * as orm from 'drizzle-orm'
 import { importEncryptionKey } from './credential-crypto.ts'
 import {
   createCredential, deleteCredential, dismissPendingRegistrationRequest, getCredentialForOwner, listCredentialsForOwner, listPendingRegistrationRequestsForOwner, listRegistryForRunner,
-  readCredentialValue, registerExternallyManaged, renewRegistrationLink, requestRegistration, setEnabled, setVisibility,
+  readCredentialValue, reencryptStoredCredentials, registerExternallyManaged, renewRegistrationLink, requestRegistration, setEnabled, setVisibility,
   storeCredentialValue, MAX_TEMPORARY_MS,
 } from './credential-service.ts'
 import { consumeEnrollmentLink, listLatestRegistrationLinks, peekEnrollmentLink } from './enrollment.ts'
@@ -1056,6 +1056,49 @@ describe('reading a value for use', () => {
   })
 })
 
+
+describe('master-key migration', () => {
+  test('re-encrypts values so only the new key can decrypt them', async () => {
+    const { db, key, now, name } = await activeCredential()
+    const otherKey = await importEncryptionKey(btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))))
+    expect((await readCredentialValue(db, key, name, now)).ok).toBe(true)
+    const migrated = await reencryptStoredCredentials(db, key, otherKey)
+    expect(migrated.failedIds).toEqual([])
+    expect(migrated.migrated).toBeGreaterThanOrEqual(1)
+    const withNewKey = await readCredentialValue(db, otherKey, name, now)
+    expect(withNewKey.ok).toBe(true)
+    if (withNewKey.ok) expect(withNewKey.value).toBe(SECRET)
+    await expect(readCredentialValue(db, key, name, now)).rejects.toThrow(/could not be decrypted/)
+  })
+
+  test('one unreadable credential prevents every ciphertext from being rewritten', async () => {
+    const first = await activeCredential()
+    const second = await activeCredential()
+    const [beforeFirst] = await first.db.select({ valueEncrypted: schema.credential.valueEncrypted, valueIv: schema.credential.valueIv })
+      .from(schema.credential).where(orm.eq(schema.credential.id, first.id))
+    const [beforeSecond] = await second.db.select({ valueEncrypted: schema.credential.valueEncrypted, valueIv: schema.credential.valueIv })
+      .from(schema.credential).where(orm.eq(schema.credential.id, second.id))
+    if (!beforeFirst?.valueEncrypted || !beforeFirst.valueIv || !beforeSecond?.valueEncrypted || !beforeSecond.valueIv) throw new Error('test credentials are missing ciphertext')
+    await first.db.update(schema.credential).set({ valueEncrypted: 'corrupted-ciphertext' })
+      .where(orm.eq(schema.credential.id, first.id))
+    try {
+      const otherKey = await importEncryptionKey(btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))))
+      const result = await reencryptStoredCredentials(first.db, first.key, otherKey)
+      expect(result.migrated).toBe(0)
+      expect(result.failedIds).toContain(first.id)
+      const [afterFirst] = await first.db.select({ valueEncrypted: schema.credential.valueEncrypted, valueIv: schema.credential.valueIv })
+        .from(schema.credential).where(orm.eq(schema.credential.id, first.id))
+      const [afterSecond] = await first.db.select({ valueEncrypted: schema.credential.valueEncrypted, valueIv: schema.credential.valueIv })
+        .from(schema.credential).where(orm.eq(schema.credential.id, second.id))
+      expect(afterFirst).toMatchObject({ valueEncrypted: 'corrupted-ciphertext', valueIv: beforeFirst.valueIv })
+      expect(afterSecond).toEqual(beforeSecond)
+    } finally {
+      await first.db.update(schema.credential).set({ valueEncrypted: beforeFirst.valueEncrypted, valueIv: beforeFirst.valueIv })
+        .where(orm.eq(schema.credential.id, first.id))
+    }
+    expect((await readCredentialValue(first.db, first.key, first.name, first.now)).ok).toBe(true)
+  })
+})
 
 describe('credential usage analytics', () => {
   test('aggregates requests by credential and by consuming tool without storing request data', async () => {
