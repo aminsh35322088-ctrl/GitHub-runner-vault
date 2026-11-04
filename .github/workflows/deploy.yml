@@ -12,6 +12,10 @@ on:
     branches: [main]
     paths:
       - 'app/**'
+      - 'client/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
       - '.github/workflows/deploy.yml'
 
 permissions:
@@ -91,15 +95,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git add deployment.json
-          if git diff --cached --quiet -- deployment.json; then
-            echo "deployment.json is unchanged; nothing to publish."
-            exit 0
-          fi
+          # Preserve metadata for the exact deployed commit, then publish it
+          # onto the latest branch tip. Ordinary pushes may advance main while
+          # the Worker deploys; retry on a non-fast-forward race.
+          metadata_file="$RUNNER_TEMP/deployment.json"
+          cp deployment.json "$metadata_file"
+          deployment_branch="$GITHUB_REF_NAME"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'chore(deploy): publish deployment info [skip ci]'
-          git push
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "$deployment_branch:refs/remotes/origin/$deployment_branch"
+            git checkout -B deployment-metadata "origin/$deployment_branch"
+            cp "$metadata_file" deployment.json
+            git add deployment.json
+            if git diff --cached --quiet -- deployment.json; then
+              echo "deployment.json is already current; nothing to publish."
+              exit 0
+            fi
+            git commit -m 'chore(deploy): publish deployment info [skip ci]'
+            if git push origin "HEAD:refs/heads/$deployment_branch"; then
+              exit 0
+            fi
+            echo "::warning::The branch advanced during deployment-info publication (attempt $attempt/5); retrying against the latest tip."
+          done
+
+          echo "::error::Could not publish deployment.json after five attempts."
+          exit 1
 
       - name: Summarize
         shell: bash

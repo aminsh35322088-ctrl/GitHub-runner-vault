@@ -33,12 +33,12 @@ export function buildVaultUrl(worker, subdomain) {
 }
 
 export function buildDeploymentInfo({ worker, subdomain, clientRef, now = new Date() }) {
-  if (typeof clientRef !== 'string' || !clientRef.trim()) {
-    throw new Error('GITHUB_SHA is required to record the deployed client reference')
+  if (typeof clientRef !== 'string' || !/^[0-9a-f]{40}$/.test(clientRef)) {
+    throw new Error('GITHUB_SHA must be an immutable 40-character commit SHA')
   }
   return {
     url: buildVaultUrl(worker, subdomain),
-    clientRef: clientRef.trim(),
+    clientRef,
     worker,
     updatedAt: now.toISOString(),
   }
@@ -54,7 +54,12 @@ async function main() {
   const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/subdomain`, {
     headers: { Authorization: `Bearer ${token}` },
   })
-  const subdomain = parseWorkersSubdomain(await response.json().catch(() => null))
+  const body = await response.json().catch(() => null)
+  if (!response.ok) {
+    const detail = body?.errors?.find((item) => typeof item?.message === 'string')?.message
+    throw new Error('Cloudflare workers.dev lookup failed' + (detail ? ': ' + detail : ''))
+  }
+  const subdomain = parseWorkersSubdomain(body)
   const info = buildDeploymentInfo({ worker, subdomain, clientRef: process.env.GITHUB_SHA })
   writeFileSync(resolve(repoRoot, 'deployment.json'), JSON.stringify(info, null, 2) + '\n')
   console.log('[deployment-info] wrote deployment.json for ' + info.url)

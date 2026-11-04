@@ -34,6 +34,10 @@
   <h1>Runner Vault — one-click setup</h1>
   <p class="sub">This wizard deploys your credential vault to Cloudflare through GitHub Actions.
   You only make one token and paste it once — everything else is automatic.</p>
+  <p class="small"><strong>One-time prerequisite:</strong> in your repository, open
+  <strong>Settings → Pages</strong>, choose <strong>Deploy from a branch</strong>, then select
+  branch <code>main</code> and folder <code>/docs</code>. Save and reopen this page after GitHub
+  Pages publishes it.</p>
 
   <section>
     <h2>Your repository</h2>
@@ -64,7 +68,11 @@
     <h2>Step 3 — Save it as a repository secret</h2>
     <p>Open the prefilled secret form on GitHub and paste the same token as
     <code>CLOUDFLARE_API_TOKEN</code>.</p>
-    <a class="btn" id="secretLink" target="_blank" rel="noopener">Open the secret form</a>
+    <a class="btn" id="secretLink" target="_blank" rel="noopener">Save CLOUDFLARE_API_TOKEN</a>
+    <p>If the token check above lists <strong>more than one Cloudflare account</strong>, also save
+    the ID of the account you want to deploy into as <code>CLOUDFLARE_ACCOUNT_ID</code>.
+    This second secret is optional when exactly one account is visible to the token.</p>
+    <a class="btn" id="accountSecretLink" target="_blank" rel="noopener">Optional: set CLOUDFLARE_ACCOUNT_ID</a>
   </section>
 
   <section>
@@ -112,6 +120,7 @@ document.getElementById('tokenLink').href =
 function refreshLinks() {
   var base = 'https://github.com/' + repoPath();
   document.getElementById('secretLink').href = base + '/settings/secrets/actions/new?name=CLOUDFLARE_API_TOKEN';
+  document.getElementById('accountSecretLink').href = base + '/settings/secrets/actions/new?name=CLOUDFLARE_ACCOUNT_ID';
   document.getElementById('deployLink').href = base + '/actions/workflows/deploy.yml';
 }
 userEl.addEventListener('input', refreshLinks);

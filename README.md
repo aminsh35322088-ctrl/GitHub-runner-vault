@@ -262,11 +262,12 @@ There is exactly one way to deploy: a setup wizard drives a GitHub Actions workf
 ### Steps
 
 1. Fork this repository under the personal GitHub account that will own the vault (or use your existing copy of it).
-2. Open the wizard (button above) and enter your GitHub username.
-3. Create the Cloudflare token with the wizard's button — the permissions (`Workers Scripts: Edit`, `D1: Edit`, `Account Settings: Read`) and the token name are pre-selected; press **Create Token** and copy the value. The wizard then verifies the token in your browser; the token is never stored and is only ever sent to Cloudflare's API.
-4. Save the token as the `CLOUDFLARE_API_TOKEN` repository secret — the wizard links straight to the prefilled form.
-5. Run the **Deploy to Cloudflare** workflow from the Actions tab (the wizard links there too). When the run finishes, its summary shows your vault URL.
-6. Open the vault URL and finish setup below.
+2. Enable GitHub Pages once: **Settings → Pages → Deploy from a branch → main → /docs → Save**. The wizard then lives at https://aminsh35322088-ctrl.github.io/GitHub-runner-vault/.
+3. Open the wizard (button above) and enter your GitHub username and repository name.
+4. Create the Cloudflare token with the wizard's button — the permissions (Workers Scripts: Edit, D1: Edit, Account Settings: Read) and the token name are pre-selected; press **Create Token** and copy the value. The wizard verifies the token in your browser; the token is never stored and is only ever sent to Cloudflare's API.
+5. Save the token as the CLOUDFLARE_API_TOKEN repository secret — the wizard links straight to the prefilled form. If token verification lists multiple Cloudflare accounts, also save the 32-character ID of the intended account as the optional CLOUDFLARE_ACCOUNT_ID secret.
+6. Run the **Deploy to Cloudflare** workflow from the Actions tab (the wizard links there too). When the run finishes, its summary shows your vault URL.
+7. Open the vault URL and finish setup below.
 
 ### Updating
 

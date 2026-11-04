@@ -48,5 +48,6 @@ test('builds the deployment.json document shape', () => {
     worker: 'runner-vault',
     updatedAt: '2026-11-04T00:00:00.000Z',
   })
-  assert.throws(() => buildDeploymentInfo({ worker: 'runner-vault', subdomain: 'octocat', clientRef: '' }), /GITHUB_SHA/)
+  assert.throws(() => buildDeploymentInfo({ worker: 'runner-vault', subdomain: 'octocat', clientRef: '' }), /40-character commit SHA/)
+  assert.throws(() => buildDeploymentInfo({ worker: 'runner-vault', subdomain: 'octocat', clientRef: 'not-a-sha' }), /40-character commit SHA/)
 })
