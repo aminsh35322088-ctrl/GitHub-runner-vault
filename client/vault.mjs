@@ -206,6 +206,70 @@ function loopbackAddress(address) {
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
 }
 
+const CLOUDFLARE_API_HOST = 'api.cloudflare.com'
+const CLOUDFLARE_ASSET_SESSION_TTL_MS = 15 * 60_000
+
+export function cloudflareAssetUploadSessionInfo(target, method) {
+  if (method !== 'POST') return null
+  let url
+  try { url = new URL(target) } catch { return null }
+  if (url.protocol !== 'https:' || url.hostname !== CLOUDFLARE_API_HOST) return null
+  const match = url.pathname.match(/^\/client\/v4\/accounts\/([a-f0-9]{32})\/workers\/scripts\/([a-zA-Z0-9_-]{1,128})\/assets-upload-session$/)
+  return match ? { accountId: match[1], scriptName: match[2] } : null
+}
+
+export function cloudflareAssetUploadAccountId(target, method) {
+  if (method !== 'POST') return null
+  let url
+  try { url = new URL(target) } catch { return null }
+  if (
+    url.protocol !== 'https:' ||
+    url.hostname !== CLOUDFLARE_API_HOST ||
+    url.searchParams.get('base64') !== 'true' ||
+    [...url.searchParams.keys()].some((key) => key !== 'base64')
+  ) return null
+  const match = url.pathname.match(/^\/client\/v4\/accounts\/([a-f0-9]{32})\/workers\/assets\/upload$/)
+  return match?.[1] ?? null
+}
+
+export function cloudflareAssetUploadSessionJwt(body) {
+  let parsed = body
+  if (typeof body === 'string') {
+    try { parsed = JSON.parse(body) } catch { return null }
+  }
+  const jwt = parsed?.result?.jwt
+  return typeof jwt === 'string' && jwt.length >= 16 && jwt.length <= 8192 && !/[\r\n\u0000]/.test(jwt)
+    ? jwt
+    : null
+}
+
+/**
+ * Cloudflare's file-upload endpoint uses the short-lived JWT returned by
+ * assets-upload-session, not the account API token. Keep this exception scoped
+ * to the exact HTTPS upload endpoint and use the per-session JWT in memory.
+ */
+export async function forwardCloudflareAssetUpload(fetchUpstream, target, body, contentType, sessionJwt) {
+  const accountId = cloudflareAssetUploadAccountId(target, 'POST')
+  if (!accountId) throw new Error('invalid Cloudflare asset upload target')
+  if (!sessionJwt || typeof sessionJwt !== 'string' || sessionJwt.length < 16 || sessionJwt.length > 8192 || /[\r\n\u0000]/.test(sessionJwt)) {
+    throw new Error('invalid Cloudflare asset upload session')
+  }
+  if (typeof contentType !== 'string' || !/^multipart\/form-data(?:;|$)/i.test(contentType)) {
+    throw new Error('invalid Cloudflare asset upload content type')
+  }
+  return fetchUpstream(target, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer ' + sessionJwt,
+      accept: 'application/json',
+      'content-type': contentType,
+    },
+    body,
+    redirect: 'manual',
+    signal: AbortSignal.timeout(60_000),
+  })
+}
+
 export function mapLocalProxyTarget(apiBaseUrl, requestTarget) {
   const base = new URL(apiBaseUrl)
   if (base.protocol !== 'https:' || base.username || base.password || (base.port && base.port !== '443') || base.search || base.hash) {
@@ -225,7 +289,7 @@ export function mapLocalProxyTarget(apiBaseUrl, requestTarget) {
   return new URL(`${pathname}${incoming.search}`, base.origin)
 }
 
-async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPort) {
+export async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPort, { fetchUpstream = fetch } = {}) {
   const registry = await api(vaultOrigin, 'GET', '/api/runner/integrations')
   if (registry.status !== 200 || !Array.isArray(registry.body.integrations)) die(`could not read CLI integration registry (${registry.body.error ?? registry.status})`)
   const credential = registry.body.integrations.find((item) => item.name === credentialName)
@@ -252,6 +316,9 @@ async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPor
     if (upstreamBase.protocol !== 'https:' || upstreamBase.username || upstreamBase.password || (upstreamBase.port && upstreamBase.port !== '443')) throw new Error()
   } catch { die('the registered API origin is invalid') }
 
+  // Upload-session JWTs are short-lived and stay only in this process. The
+  // long-lived Cloudflare API token continues to be injected by the Vault.
+  const assetUploadSessions = new Map()
   const server = createServer(async (request, response) => {
     const reject = (status, message) => {
       const body = JSON.stringify({ error: message })
@@ -280,7 +347,40 @@ async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPor
         chunks.push(chunk)
       }
     } catch { return reject(400, 'invalid_body') }
-    const bodyText = total ? Buffer.concat(chunks).toString('utf8') : undefined
+    const requestBody = total ? Buffer.concat(chunks) : undefined
+    const bodyText = requestBody ? requestBody.toString('utf8') : undefined
+
+    const assetUploadAccountId = cloudflareAssetUploadAccountId(target, request.method)
+    if (assetUploadAccountId) {
+      const session = assetUploadSessions.get(assetUploadAccountId)
+      if (!session || session.expiresAt <= Date.now()) {
+        assetUploadSessions.delete(assetUploadAccountId)
+        return reject(401, 'asset_upload_session_unavailable')
+      }
+      try {
+        const uploaded = await forwardCloudflareAssetUpload(
+          fetchUpstream,
+          target.toString(),
+          requestBody,
+          request.headers['content-type'],
+          session.jwt,
+        )
+        const uploadedBody = await uploaded.text()
+        if (Buffer.byteLength(uploadedBody) > LOCAL_PROXY_RESPONSE_LIMIT) return reject(502, 'response_too_large')
+        if (uploaded.status === 401 || uploaded.status === 403) assetUploadSessions.delete(assetUploadAccountId)
+        const uploadHeaders = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }
+        for (const [key, value] of uploaded.headers.entries()) {
+          if (LOCAL_PROXY_RESPONSE_HEADERS.has(key.toLowerCase()) && value.length <= 2000) uploadHeaders[key.toLowerCase()] = value
+        }
+        response.writeHead(uploaded.status, uploadHeaders)
+        response.end(uploadedBody)
+      } catch {
+        reject(502, 'asset_upload_failed')
+      }
+      return
+    }
+
+    const assetSessionInfo = cloudflareAssetUploadSessionInfo(target, request.method)
     // Adapter-supplied headers are part of the reviewed provider contract.
     // CLI-provided values may add harmless headers but cannot override them.
     const headers = {}
@@ -308,6 +408,15 @@ async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPor
         return reject(502, 'invalid_vault_response')
       }
       if (Buffer.byteLength(proxied.body.body) > LOCAL_PROXY_RESPONSE_LIMIT) return reject(502, 'response_too_large')
+      if (assetSessionInfo && upstreamStatus >= 200 && upstreamStatus < 300) {
+        const uploadJwt = cloudflareAssetUploadSessionJwt(proxied.body.body)
+        if (uploadJwt) {
+          assetUploadSessions.set(assetSessionInfo.accountId, {
+            jwt: uploadJwt,
+            expiresAt: Date.now() + CLOUDFLARE_ASSET_SESSION_TTL_MS,
+          })
+        }
+      }
       const outHeaders = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }
       for (const [key, value] of Object.entries(proxied.body.headers ?? {})) {
         if (LOCAL_PROXY_RESPONSE_HEADERS.has(key.toLowerCase()) && typeof value === 'string' && value.length <= 2000) outHeaders[key.toLowerCase()] = value

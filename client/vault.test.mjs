@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
-import { parseArgs, parseHeaders, mapLocalProxyTarget, fetchWithTimeout } from './vault.mjs'
+import { parseArgs, parseHeaders, mapLocalProxyTarget, fetchWithTimeout, cloudflareAssetUploadSessionInfo, cloudflareAssetUploadAccountId, cloudflareAssetUploadSessionJwt, forwardCloudflareAssetUpload, startLocalProxy } from './vault.mjs'
 
 const SECRET = 'must-never-appear-anywhere'
 
@@ -48,6 +48,174 @@ function run(args, env, script = new URL('./vault.mjs', import.meta.url).pathnam
 test('parsing', () => {
   assert.deepEqual(parseArgs(['a', '--x', '1', '--header', 'A: b', 'c']), { positional: ['a', 'c'], flags: { x: '1' }, headers: ['A: b'] })
   assert.deepEqual(parseHeaders(['Accept: application/json', 'X-A:b:c']), { Accept: 'application/json', 'X-A': 'b:c' })
+})
+
+test('Cloudflare Wrangler asset upload session routing is restricted to exact API endpoints', () => {
+  const accountId = '91c5e9520d1aaea0b87f03442c88403f'
+  const sessionUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/runner-vault/assets-upload-session`
+  const uploadUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/assets/upload?base64=true`
+
+  assert.deepEqual(cloudflareAssetUploadSessionInfo(sessionUrl, 'POST'), {
+    accountId,
+    scriptName: 'runner-vault',
+  })
+  assert.equal(cloudflareAssetUploadSessionInfo(sessionUrl, 'GET'), null)
+  assert.equal(cloudflareAssetUploadSessionInfo(sessionUrl.replace('api.cloudflare.com', 'attacker.example'), 'POST'), null)
+  assert.equal(cloudflareAssetUploadAccountId(uploadUrl, 'POST'), accountId)
+  assert.equal(cloudflareAssetUploadAccountId(uploadUrl.replace('base64=true', 'base64=false'), 'POST'), null)
+  assert.equal(cloudflareAssetUploadAccountId(uploadUrl + '&target=https://attacker.example', 'POST'), null)
+})
+
+test('Cloudflare asset upload session parser accepts only a bounded result JWT', () => {
+  assert.equal(cloudflareAssetUploadSessionJwt(JSON.stringify({
+    success: true,
+    result: { jwt: 'short-lived-cloudflare-upload-jwt' },
+  })), 'short-lived-cloudflare-upload-jwt')
+  assert.equal(cloudflareAssetUploadSessionJwt({ result: { jwt: 'tiny' } }), null)
+  assert.equal(cloudflareAssetUploadSessionJwt({ result: { jwt: 'bad\nheader' } }), null)
+  assert.equal(cloudflareAssetUploadSessionJwt('{malformed'), null)
+})
+
+test('Cloudflare asset upload sends the scoped session JWT, not the stored API token', async () => {
+  const accountId = '91c5e9520d1aaea0b87f03442c88403f'
+  const target = `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/assets/upload?base64=true`
+  const sessionJwt = 'short-lived-cloudflare-upload-jwt'
+  const payload = Buffer.from('--vault-boundary\r\nContent-Disposition: form-data; name="asset"\r\n\r\nYWJj\r\n--vault-boundary--\r\n')
+  let observed
+  const response = await forwardCloudflareAssetUpload(async (url, init) => {
+    observed = { url, init }
+    return new Response(JSON.stringify({ success: true }), {
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+    })
+  }, target, payload, 'multipart/form-data; boundary=vault-boundary', sessionJwt)
+
+  assert.equal(response.status, 201)
+  assert.equal(observed.url, target)
+  assert.equal(observed.init.method, 'POST')
+  assert.equal(observed.init.redirect, 'manual')
+  assert.equal(observed.init.headers.authorization, 'Bearer ' + sessionJwt)
+  assert.equal(observed.init.headers['content-type'], 'multipart/form-data; boundary=vault-boundary')
+  assert.deepEqual(observed.init.body, payload)
+  assert.ok(!observed.init.headers.authorization.includes('vault-local-placeholder'))
+  await assert.rejects(
+    forwardCloudflareAssetUpload(async () => new Response(), target, payload, 'application/json', sessionJwt),
+    /content type/,
+  )
+})
+
+test('Wrangler bridge keeps the upload-session JWT in memory and uses it only for asset bytes', async () => {
+  const accountId = '91c5e9520d1aaea0b87f03442c88403f'
+  const storedApiToken = 'stored-cloudflare-api-token-must-stay-in-vault'
+  const uploadJwt = 'short-lived-cloudflare-upload-session-jwt'
+  const vaultRequests = []
+  let uploaded
+  const worker = http.createServer(async (req, res) => {
+    let raw = ''
+    for await (const chunk of req) raw += chunk
+    const json = (status, body) => {
+      res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      res.end(JSON.stringify(body))
+    }
+    if (req.url.startsWith('/oidc')) return json(200, { value: 'oidc-token-value' })
+    if (req.url === '/api/runner/session') return json(200, { token: 'rs1.cloudflare.session.token', expiresAt: Date.now() + 1_800_000 })
+    if (req.url === '/api/runner/integrations') return json(200, { integrations: [{
+      name: 'CLOUDFLARE_API_TOKEN',
+      service: 'Cloudflare',
+      adapter: {
+        apiBaseUrl: 'https://api.cloudflare.com/client/v4',
+        cliTools: [{
+          id: 'wrangler', label: 'Wrangler CLI', binary: 'wrangler',
+          integration: 'base-url-env', variable: 'CLOUDFLARE_API_BASE_URL',
+          tokenVariable: 'CLOUDFLARE_API_TOKEN',
+          setupHint: 'Use the Cloudflare Wrangler environment overrides.',
+        }],
+      },
+    }] })
+    if (req.url === '/api/runner/use') {
+      const body = JSON.parse(raw)
+      vaultRequests.push(body)
+      assert.equal(req.headers.authorization, 'Bearer rs1.cloudflare.session.token')
+      assert.equal(body.name, 'CLOUDFLARE_API_TOKEN')
+      if (body.url.endsWith('/assets-upload-session')) {
+        return json(200, {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ success: true, result: { jwt: uploadJwt } }),
+          truncated: false,
+          redacted: false,
+        })
+      }
+      return json(403, { error: 'unexpected_vault_request' })
+    }
+    return json(404, { error: 'not_found' })
+  })
+  await new Promise((resolve) => worker.listen(0, '127.0.0.1', resolve))
+  const workerPort = worker.address().port
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-wrangler-assets-'))
+  const previous = {
+    ACTIONS_ID_TOKEN_REQUEST_URL: process.env.ACTIONS_ID_TOKEN_REQUEST_URL,
+    ACTIONS_ID_TOKEN_REQUEST_TOKEN: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+    VAULT_SESSION_FILE: process.env.VAULT_SESSION_FILE,
+  }
+  process.env.ACTIONS_ID_TOKEN_REQUEST_URL = `http://127.0.0.1:${workerPort}/oidc`
+  process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = 'oidc-request-token'
+  process.env.VAULT_SESSION_FILE = path.join(dir, 'session.json')
+  let localProxy
+  try {
+    localProxy = await startLocalProxy('http://localhost:' + workerPort, 'CLOUDFLARE_API_TOKEN', 'wrangler', 0, {
+      fetchUpstream: async (url, init) => {
+        uploaded = { url, init }
+        return new Response(JSON.stringify({ success: true }), {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        })
+      },
+    })
+    const port = localProxy.address().port
+    const base = `http://127.0.0.1:${port}/client/v4/accounts/${accountId}`
+    const blocked = await fetch(base + '/workers/assets/upload?base64=true', {
+      method: 'POST',
+      headers: { 'content-type': 'multipart/form-data; boundary=x' },
+      body: '--x--',
+    })
+    assert.equal(blocked.status, 401)
+    assert.deepEqual(await blocked.json(), { error: 'asset_upload_session_unavailable' })
+
+    const session = await fetch(base + '/workers/scripts/runner-vault/assets-upload-session', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer vault-local-placeholder' },
+      body: '{}',
+    })
+    assert.equal(session.status, 200)
+    assert.deepEqual((await session.json()).result, { jwt: uploadJwt })
+
+    const assetBody = Buffer.from('--asset-boundary\r\nContent-Disposition: form-data; name="asset"\r\n\r\nYWJj\r\n--asset-boundary--\r\n')
+    const asset = await fetch(base + '/workers/assets/upload?base64=true', {
+      method: 'POST',
+      headers: {
+        'content-type': 'multipart/form-data; boundary=asset-boundary',
+        authorization: 'Bearer vault-local-placeholder',
+      },
+      body: assetBody,
+    })
+    assert.equal(asset.status, 201)
+    assert.deepEqual(await asset.json(), { success: true })
+    assert.equal(vaultRequests.length, 1)
+    assert.equal(vaultRequests[0].url, `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/runner-vault/assets-upload-session`)
+    assert.equal(uploaded.url, `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/assets/upload?base64=true`)
+    assert.equal(uploaded.init.headers.authorization, 'Bearer ' + uploadJwt)
+    assert.deepEqual(uploaded.init.body, assetBody)
+    assert.ok(!JSON.stringify(uploaded.init.headers).includes(storedApiToken))
+  } finally {
+    if (localProxy) await new Promise((resolve) => localProxy.close(resolve))
+    await new Promise((resolve) => worker.close(resolve))
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('local API proxy preserves provider base paths without allowing an absolute target host', () => {
