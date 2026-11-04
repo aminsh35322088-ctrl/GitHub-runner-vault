@@ -113,7 +113,13 @@ The actual token must never appear in the document, model output, shell argument
 
 - A credential that is missing, hidden, disabled or expired all answer `unavailable`.
 - Calls to a host the owner did not approve are refused (`host_not_allowed`).
-- Limits: 30 calls/min per credential, 256 KiB request, 1 MiB response and a configurable 5–30 s upstream timeout (20 s default).
+- Limits: 30 calls/min per credential, 512 KiB JSON request envelope, 10 MiB raw request body, 1 MiB response and a configurable 5–30 s upstream timeout (20 s default). Raw uploads are byte-preserving; at most 3 raw uploads can be active per Worker isolate, with additional uploads receiving `503 proxy_busy`.
+
+## Proxy payloads
+
+The `vault use` command and the local Northflank/Wrangler bridges send request payloads as raw bytes, not UTF-8 text. This preserves binary files and multipart boundaries without Base64 expansion. `--data-file` accepts regular files up to 10 MiB and checks the file size before reading it into memory; `--data` is encoded as UTF-8.
+
+Other clients may continue to use the JSON `POST /api/runner/use` envelope, which is capped at 512 KiB including JSON metadata. For raw uploads, the endpoint accepts `Content-Type: application/octet-stream` with a base64url JSON `X-Vault-Proxy-Metadata` header. The body is capped while being read even when `Content-Length` is absent or incorrect.
 
 ## Telegram Bot API
 

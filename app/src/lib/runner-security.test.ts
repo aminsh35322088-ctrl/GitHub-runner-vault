@@ -443,6 +443,24 @@ describe('proxy requests', () => {
     expect(await runProxy({ credential, value: SECRET, method: 'POST', url: 'https://api.cloudflare.com/x', body: 'x'.repeat(MAX_REQUEST_BODY + 1) }, fetchFn)).toMatchObject({ ok: false, error: 'body_too_large' })
   })
 
+  test('forwards raw binary request bytes unchanged and enforces the byte cap', async () => {
+    const seen: Seen[] = []
+    const fetchFn = stubFetch(() => new Response('ok'), seen)
+    const payload = new Uint8Array([0x00, 0xff, 0xc3, 0x28, 0x7b, 0x7d, 0x0d, 0x0a])
+    const result = await runProxy({
+      credential, value: SECRET, method: 'POST', url: 'https://api.cloudflare.com/upload', body: payload,
+    }, fetchFn)
+    expect(result).toMatchObject({ ok: true, status: 200 })
+    expect(seen[0]?.init.body).toBeInstanceOf(Uint8Array)
+    expect(new Uint8Array(seen[0]?.init.body as Uint8Array)).toEqual(payload)
+
+    const oversized = new Uint8Array(MAX_REQUEST_BODY + 1)
+    expect(await runProxy({
+      credential, value: SECRET, method: 'POST', url: 'https://api.cloudflare.com/upload', body: oversized,
+    }, fetchFn)).toMatchObject({ ok: false, error: 'body_too_large' })
+    expect(seen).toHaveLength(1)
+  })
+
   test('never follows a redirect and does not forward the secret elsewhere', async () => {
     const seen: Seen[] = []
     const fetchFn = stubFetch(() => new Response(null, { status: 302, headers: { Location: 'https://evil.example/steal' } }), seen)

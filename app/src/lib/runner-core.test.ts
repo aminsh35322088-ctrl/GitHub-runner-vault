@@ -5,13 +5,91 @@ import { importEncryptionKey } from './credential-crypto.ts'
 import { deleteCredential, requestRegistration, storeCredentialValue, setEnabled, setVisibility } from './credential-service.ts'
 import { GITHUB_OIDC_ISSUER, type OidcPolicy } from './oidc.ts'
 import { deriveSessionKey, issueRunnerSession, revokeRunnerSessions } from './runner-session.ts'
-import { bearer, createSession, registry, integrations, requestCredential, useCredential, USE_LIMIT_PER_MINUTE, type RunnerDeps } from './runner-core.ts'
+import { bearer, readBoundedRequestBody, tryAcquireProxyUploadSlot, MAX_CONCURRENT_PROXY_UPLOADS_PER_ISOLATE, createSession, registry, integrations, requestCredential, useCredential, USE_LIMIT_PER_MINUTE, type RunnerDeps } from './runner-core.ts'
 import { DEFAULT_VAULT_PREFERENCES } from './vault-observability.ts'
 import { cleanupRunnerRateLimitEvents, releaseRunnerRateLimitReservation, reserveRunnerRateLimit } from './runner-rate-limit.ts'
 
 const KEY_B64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
 const SECRET = 'cfut_END_TO_END_SECRET_0123456789'
 const SESSION_SECRET = 'session-secret-that-is-long-enough-123456'
+
+
+test('raw proxy upload slots cap concurrent buffered uploads per isolate', () => {
+  const releases = Array.from({ length: MAX_CONCURRENT_PROXY_UPLOADS_PER_ISOLATE }, () => tryAcquireProxyUploadSlot())
+  expect(releases.every((release) => typeof release === 'function')).toBe(true)
+  expect(tryAcquireProxyUploadSlot()).toBeNull()
+
+  const releaseFirst = releases[0]
+  releaseFirst?.()
+  releaseFirst?.()
+  const replacement = tryAcquireProxyUploadSlot()
+  expect(typeof replacement).toBe('function')
+  replacement?.()
+
+  for (const release of releases.slice(1)) release?.()
+  const finalRelease = tryAcquireProxyUploadSlot()
+  expect(typeof finalRelease).toBe('function')
+  finalRelease?.()
+})
+
+
+test('bounded request body reader grows only for received bytes and validates declared length', async () => {
+  const expected = new Uint8Array([0x00, 0xff, 0xc3, 0x28, 0x7b, 0x7d, 0x0d, 0x0a])
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(expected.subarray(0, 3))
+      controller.enqueue(expected.subarray(3))
+      controller.close()
+    },
+  })
+  const result = await readBoundedRequestBody(stream, 16, expected.byteLength)
+  expect(result).toEqual({ ok: true, body: expected })
+
+  const largeExpected = new Uint8Array(70 * 1024)
+  for (let index = 0; index < largeExpected.byteLength; index++) largeExpected[index] = index % 251
+  const largeStream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let offset = 0; offset < largeExpected.byteLength; offset += 16 * 1024) {
+        controller.enqueue(largeExpected.subarray(offset, offset + 16 * 1024))
+      }
+      controller.close()
+    },
+  })
+  const grown = await readBoundedRequestBody(largeStream, 80 * 1024, largeExpected.byteLength)
+  expect(grown).toEqual({ ok: true, body: largeExpected })
+
+  let mismatchCancelled = false
+  const mismatched = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.enqueue(new Uint8Array([1, 2, 3]))
+    },
+    cancel() {
+      mismatchCancelled = true
+    },
+  }, { highWaterMark: 0 })
+  expect(await readBoundedRequestBody(mismatched, 8, 2)).toEqual({ ok: false, error: 'invalid_body' })
+  expect(mismatchCancelled).toBe(true)
+
+  const oversized = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(5))
+      controller.enqueue(new Uint8Array(4))
+      controller.close()
+    },
+  })
+  expect(await readBoundedRequestBody(oversized, 8)).toEqual({ ok: false, error: 'body_too_large' })
+
+  let pulled = false
+  const untrustedLength = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulled = true
+      controller.enqueue(new Uint8Array([1]))
+      controller.close()
+    },
+  }, { highWaterMark: 0 })
+  expect(await readBoundedRequestBody(untrustedLength, 8, 9)).toEqual({ ok: false, error: 'body_too_large' })
+  expect(pulled).toBe(false)
+})
 
 const doc = {
   overview: 'Needed to deploy a Worker.', task: 'Deploy', token_type: 'API token', creation_steps: ['Open dashboard'],

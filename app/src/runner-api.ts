@@ -2,7 +2,7 @@
 // Mounted in app.tsx via .use(runnerApp).
 
 import { Spiceflow, json } from 'spiceflow'
-import { z } from 'zod'
+import { MAX_REQUEST_BODY } from './lib/proxy.ts'
 import { env } from 'cloudflare:workers'
 import { getDb } from 'db'
 import { loadVaultKeys, type VaultEnv } from './lib/vault-config.ts'
@@ -55,13 +55,71 @@ async function run(
   }
 }
 
-const anyBody = z.record(z.string(), z.unknown())
+const MAX_RUNNER_JSON_BODY = 512 * 1024
+const MAX_PROXY_METADATA_HEADER = 8 * 1024
 
-async function parseRunnerBody(request: Request): Promise<Record<string, unknown> | null> {
+type RunnerBodyParseResult =
+  | { ok: true; body: Record<string, unknown> }
+  | { ok: false; error: 'invalid_request' | 'body_too_large' }
+
+function contentLength(request: Request, maxBytes: number):
+  | { ok: true; length?: number }
+  | { ok: false; error: 'invalid_request' | 'body_too_large' } {
+  const raw = request.headers.get('content-length')
+  if (raw === null) return { ok: true }
+  if (!/^\d+$/.test(raw)) return { ok: false, error: 'invalid_request' }
+  const length = Number(raw)
+  if (!Number.isSafeInteger(length)) return { ok: false, error: 'invalid_request' }
+  if (length > maxBytes) return { ok: false, error: 'body_too_large' }
+  return { ok: true, length }
+}
+
+export async function parseRunnerBody(request: Request, maxBytes = MAX_RUNNER_JSON_BODY): Promise<RunnerBodyParseResult> {
+  const declared = contentLength(request, maxBytes)
+  if (!declared.ok) return declared
+  if (!request.body) return { ok: false, error: 'invalid_request' }
+
+  const reader = request.body.getReader()
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+  let total = 0
+  let text = ''
   try {
-    const body: unknown = await request.json()
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined)
+        return { ok: false, error: 'body_too_large' }
+      }
+      text += decoder.decode(value, { stream: true })
+    }
+    text += decoder.decode()
+    if (declared.length !== undefined && total !== declared.length) return { ok: false, error: 'invalid_request' }
+    const body: unknown = JSON.parse(text)
     return typeof body === 'object' && body !== null && !Array.isArray(body)
-      ? body as Record<string, unknown>
+      ? { ok: true, body: body as Record<string, unknown> }
+      : { ok: false, error: 'invalid_request' }
+  } catch {
+    return { ok: false, error: 'invalid_request' }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+function parseProxyMetadata(request: Request): Record<string, unknown> | null {
+  const encoded = request.headers.get('x-vault-proxy-metadata')
+  if (!encoded || encoded.length > MAX_PROXY_METADATA_HEADER || encoded.length % 4 === 1 || !/^[A-Za-z0-9_-]+$/.test(encoded)) {
+    return null
+  }
+  try {
+    const base64 = encoded.replace(/-/g, '+').replace(/_/g, '/')
+    const binary = atob(base64 + '='.repeat((4 - encoded.length % 4) % 4))
+    const bytes = new Uint8Array(binary.length)
+    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
+    const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown>
       : null
   } catch {
     return null
@@ -70,6 +128,10 @@ async function parseRunnerBody(request: Request): Promise<Record<string, unknown
 
 function invalidRequest() {
   return json({ error: 'invalid_request' }, { status: 400, headers: { 'Cache-Control': 'no-store' } })
+}
+
+function requestTooLarge() {
+  return json({ error: 'body_too_large' }, { status: 413, headers: { 'Cache-Control': 'no-store' } })
 }
 
 export const runnerApp = new Spiceflow()
@@ -101,10 +163,10 @@ export const runnerApp = new Spiceflow()
     method: 'POST',
     path: '/api/runner/registrations',
     detail: { tags: ['Runner'], summary: 'Ask the owner to register a credential; returns a one-time owner link' },
-    request: anyBody,
     async handler({ request }) {
-      const body = await parseRunnerBody(request)
-      if (!body) return invalidRequest()
+      const parsed = await parseRunnerBody(request)
+      if (!parsed.ok) return parsed.error === 'body_too_large' ? requestTooLarge() : invalidRequest()
+      const body = parsed.body
       return run(request, (deps) => requestCredential(deps, request.headers.get('authorization'), {
         name: body.name, service: body.service, purpose: body.purpose, doc: body.doc,
       }))
@@ -114,10 +176,28 @@ export const runnerApp = new Spiceflow()
     method: 'POST',
     path: '/api/runner/use',
     detail: { tags: ['Runner'], summary: 'Make an HTTPS call with a stored credential; the token is never returned' },
-    request: anyBody,
     async handler({ request, waitUntil }) {
-      const body = await parseRunnerBody(request)
-      if (!body) return invalidRequest()
+      const contentType = request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
+      if (contentType === 'application/octet-stream') {
+        const declared = contentLength(request, MAX_REQUEST_BODY)
+        if (!declared.ok) return declared.error === 'body_too_large' ? requestTooLarge() : invalidRequest()
+        const metadata = parseProxyMetadata(request)
+        if (!metadata) return invalidRequest()
+        return run(request, (deps) => useCredential(deps, request.headers.get('authorization'), {
+          name: metadata.name,
+          method: metadata.method,
+          url: metadata.url,
+          headers: metadata.headers,
+          purpose: metadata.purpose,
+          consumer: metadata.consumer,
+          bodyStream: request.body,
+          bodyLength: declared.length,
+        }), {}, waitUntil)
+      }
+
+      const parsed = await parseRunnerBody(request)
+      if (!parsed.ok) return parsed.error === 'body_too_large' ? requestTooLarge() : invalidRequest()
+      const body = parsed.body
       return run(request, (deps) => useCredential(deps, request.headers.get('authorization'), {
         name: body.name, method: body.method, url: body.url, headers: body.headers, body: body.body, purpose: body.purpose, consumer: body.consumer,
       }), {}, waitUntil)

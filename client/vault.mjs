@@ -163,6 +163,23 @@ async function api(base, method, route, payload) {
   return { status: res.status, body }
 }
 
+async function apiProxy(base, metadata, requestBody) {
+  const token = await session(base)
+  const encodedMetadata = Buffer.from(JSON.stringify(metadata), 'utf8').toString('base64url')
+  const res = await fetchWithTimeout(base + '/api/runner/use', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/octet-stream',
+      'X-Vault-Proxy-Metadata': encodedMetadata,
+    },
+    body: requestBody && requestBody.byteLength > 0 ? requestBody : undefined,
+  })
+  const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+  return { status: res.status, body }
+}
+
 export function parseArgs(argv) {
   const positional = []
   const flags = {}
@@ -254,9 +271,14 @@ async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPor
   } catch { die('the registered API origin is invalid') }
 
   const server = createServer(async (request, response) => {
-    const reject = (status, message) => {
+    const reject = (status, message, close = false) => {
       const body = JSON.stringify({ error: message })
-      response.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' })
+      response.writeHead(status, {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+        'cache-control': 'no-store',
+        ...(close ? { connection: 'close' } : {}),
+      })
       response.end(body)
     }
     if (!loopbackAddress(request.socket.remoteAddress)) return reject(403, 'loopback_only')
@@ -272,18 +294,32 @@ async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPor
     if (request.method === 'CONNECT' || request.method === 'TRACE') return reject(405, 'method_not_allowed')
     let target
     try { target = mapLocalProxyTarget(adapter.apiBaseUrl, request.url ?? '/') } catch { return reject(400, 'invalid_path') }
-    const declaredLength = Number(request.headers['content-length'])
-    if (Number.isFinite(declaredLength) && declaredLength > LOCAL_PROXY_BODY_LIMIT) return reject(413, 'body_too_large')
+    const rawDeclaredLength = request.headers['content-length']
+    let declaredLength
+    if (rawDeclaredLength !== undefined) {
+      const value = String(rawDeclaredLength)
+      if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) return reject(400, 'invalid_content_length', true)
+      declaredLength = Number(value)
+      if (declaredLength > LOCAL_PROXY_BODY_LIMIT) return reject(413, 'body_too_large', true)
+    }
     let total = 0
+    let tooLarge = false
     const chunks = []
     try {
       for await (const chunk of request) {
+        if (tooLarge) continue
         total += chunk.byteLength
-        if (total > LOCAL_PROXY_BODY_LIMIT) return reject(413, 'body_too_large')
+        if (total > LOCAL_PROXY_BODY_LIMIT) {
+          tooLarge = true
+          chunks.length = 0
+          continue
+        }
         chunks.push(chunk)
       }
-    } catch { return reject(400, 'invalid_body') }
-    const bodyText = total ? Buffer.concat(chunks).toString('utf8') : undefined
+    } catch { return reject(400, 'invalid_body', true) }
+    if (tooLarge) return reject(413, 'body_too_large', true)
+    if (declaredLength !== undefined && total !== declaredLength) return reject(400, 'invalid_body', true)
+    const bodyBytes = total ? Buffer.concat(chunks, total) : undefined
     // Adapter-supplied headers are part of the reviewed provider contract.
     // CLI-provided values may add harmless headers but cannot override them.
     const headers = {}
@@ -296,15 +332,14 @@ async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPor
     }
 
     try {
-      const proxied = await api(vaultOrigin, 'POST', '/api/runner/use', {
+      const proxied = await apiProxy(vaultOrigin, {
         name: credentialName,
         method: request.method ?? 'GET',
         url: target.toString(),
         headers,
-        body: bodyText,
-        consumer: `cli:${tool.id}`,
-        purpose: `CLI integration: ${tool.label}`,
-      })
+        consumer: 'cli:' + tool.id,
+        purpose: 'CLI integration: ' + tool.label,
+      }, bodyBytes)
       if (proxied.status !== 200) return reject(proxied.status, proxied.body.error ?? 'vault_proxy_failed')
       const upstreamStatus = Number(proxied.body.status)
       if (!Number.isInteger(upstreamStatus) || upstreamStatus < 100 || upstreamStatus > 599 || typeof proxied.body.body !== 'string') {
@@ -391,11 +426,21 @@ async function main() {
   if (command === 'use') {
     const [name, method, url] = positional
     if (!name || !method || !url) die('usage: vault use NAME METHOD URL [--purpose P] [--header "K: V"] [--data BODY | --data-file F]')
-    const data = flags['data-file'] ? fs.readFileSync(flags['data-file'], 'utf8') : flags.data
+    let data
+    if (flags['data-file']) {
+      let fileStat
+      try { fileStat = fs.statSync(flags['data-file']) } catch { die('--data-file could not be read') }
+      if (!fileStat.isFile()) die('--data-file must be a regular file')
+      if (fileStat.size > LOCAL_PROXY_BODY_LIMIT) die('request body exceeds the 10 MiB limit')
+      data = fs.readFileSync(flags['data-file'])
+    } else {
+      data = flags.data === undefined ? undefined : Buffer.from(flags.data, 'utf8')
+    }
+    if (data && data.byteLength > LOCAL_PROXY_BODY_LIMIT) die('request body exceeds the 10 MiB limit')
     const consumer = flags.consumer && /^cli:[a-z0-9._-]{1,40}$/i.test(flags.consumer) ? flags.consumer.toLowerCase() : undefined
-    const { status, body } = await api(base, 'POST', '/api/runner/use', {
-      name, method, url, purpose: flags.purpose, headers: parseHeaders(headers), body: data, consumer,
-    })
+    const { status, body } = await apiProxy(base, {
+      name, method, url, purpose: flags.purpose, headers: parseHeaders(headers), consumer,
+    }, data)
     if (status !== 200) die(`call refused (${body.error})`, 2)
     if (body.truncated) process.stderr.write('vault: response was truncated\n')
     process.stderr.write(`vault: upstream status ${body.status}\n`)
