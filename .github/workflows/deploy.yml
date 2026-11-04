@@ -16,7 +16,6 @@ on:
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
-      - '.github/workflows/deploy.yml'
 
 permissions:
   contents: write
@@ -56,26 +55,39 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          if [ -n "${CLOUDFLARE_ACCOUNT_ID}" ]; then
-            echo "account_id=${CLOUDFLARE_ACCOUNT_ID}" >> "$GITHUB_OUTPUT"
+          if [[ -z "$CLOUDFLARE_API_TOKEN" ]]; then
+            echo "::error::Missing required GitHub Actions secret CLOUDFLARE_API_TOKEN. Create a Cloudflare API token in the setup wizard and save it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          if [[ -n "$CLOUDFLARE_ACCOUNT_ID" ]]; then
+            if [[ ! "$CLOUDFLARE_ACCOUNT_ID" =~ ^[a-fA-F0-9]{32}$ ]]; then
+              echo "::error::CLOUDFLARE_ACCOUNT_ID must be the 32-character hexadecimal ID of the target Cloudflare account."
+              exit 1
+            fi
+            echo "account_id=$CLOUDFLARE_ACCOUNT_ID" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          response="$(curl -sS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+          response="$(curl --fail-with-body --silent --show-error --max-time 15 \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             'https://api.cloudflare.com/client/v4/accounts?per_page=50')"
           ACCOUNT_ID="$(printf '%s' "$response" | python3 -c '
-          import json, sys
+          import json, re, sys
           try:
               payload = json.load(sys.stdin)
               accounts = payload.get("result") or []
+              candidates = [item.get("id", "") for item in accounts if isinstance(item, dict)]
+              account_id = candidates[0] if payload.get("success") is True and len(candidates) == 1 else ""
+              if not re.fullmatch(r"[a-fA-F0-9]{32}", account_id):
+                  account_id = ""
           except Exception:
-              accounts = []
-          print(accounts[0]["id"] if len(accounts) == 1 else "")
+              account_id = ""
+          print(account_id)
           ')"
           if [ -z "$ACCOUNT_ID" ]; then
-            echo "::error::Could not resolve exactly one Cloudflare account from CLOUDFLARE_API_TOKEN (the token must see exactly one account). If your token can access several accounts, add a CLOUDFLARE_ACCOUNT_ID repository secret naming the account to deploy to."
+            echo "::error::Could not resolve exactly one valid Cloudflare account from CLOUDFLARE_API_TOKEN. If the token can access multiple accounts, add CLOUDFLARE_ACCOUNT_ID with the intended 32-character account ID."
             exit 1
           fi
-          echo "account_id=${ACCOUNT_ID}" >> "$GITHUB_OUTPUT"
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
 
       - name: Deploy the vault Worker
         env:
