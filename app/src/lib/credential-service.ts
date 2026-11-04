@@ -672,9 +672,10 @@ export async function reencryptStoredCredentials(
   const prepared = await prepareStoredCredentialReencryption(db, fromKey, toKey, credentialIds)
   if (prepared.failedIds.length) return { migrated: 0, failedIds: prepared.failedIds }
   if (prepared.updates.length) {
-    await db.batch(prepared.updates.map((row) => db.update(schema.credential)
+    const statements = prepared.updates.map((row) => db.update(schema.credential)
       .set({ valueEncrypted: row.valueEncrypted, valueIv: row.valueIv, updatedAt: row.updatedAt })
-      .where(orm.eq(schema.credential.id, row.id))))
+      .where(orm.eq(schema.credential.id, row.id)))
+    await db.batch(statements as [typeof statements[number], ...typeof statements[number][]])
   }
   return { migrated: prepared.updates.length, failedIds: [] }
 }
