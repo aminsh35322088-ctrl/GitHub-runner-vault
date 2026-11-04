@@ -262,3 +262,60 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Adaptive workspace foundations */
+@layer base {
+  html {
+    min-width: 320px;
+    scroll-padding-top: 5rem;
+  }
+
+  body {
+    min-width: 320px;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: pretty;
+  }
+
+  input[type='checkbox'],
+  input[type='radio'],
+  progress {
+    accent-color: var(--primary);
+  }
+
+  :where(a, button, input, select, textarea, summary) {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  :where(input, select, textarea) {
+    scroll-margin-block: 6rem;
+  }
+}
+
+/* Avoid mobile browser auto-zoom on focused text controls while keeping
+   desktop form typography compact. */
+@media (max-width: 639px) {
+  :where(input:not([type='checkbox']):not([type='radio']), select, textarea) {
+    font-size: 16px;
+  }
+
+  [data-slot='dialog-popup'] {
+    scroll-margin-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* Touch devices receive a forgiving target area even for icon-only controls. */
+@media (pointer: coarse) {
+  :where(button, [role='button'], [role='menuitem'], summary) {
+    min-block-size: 2.75rem;
+    min-inline-size: 2.75rem;
+    touch-action: manipulation;
+  }
+
+  :where(input:not([type='checkbox']):not([type='radio']), select, textarea) {
+    min-block-size: 2.75rem;
+  }
+}

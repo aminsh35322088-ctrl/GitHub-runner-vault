@@ -92,28 +92,28 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
         <a href="#main-content" className="sr-only z-[100] rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground focus:not-sr-only focus:fixed focus:left-3 focus:top-3">Skip to main content</a>
         {signedIn ? (
           <div className="flex h-full min-h-0 w-full">
-            <aside className="relative hidden h-full w-[258px] shrink-0 flex-col border-r border-white/[0.07] bg-[#111a16] text-slate-100 lg:flex">
-              <div className="flex h-[4.5rem] shrink-0 items-center gap-3 border-b border-white/[0.07] px-5">
+            <aside className="relative hidden h-full w-[76px] shrink-0 flex-col border-r border-white/[0.07] bg-[#111a16] text-slate-100 lg:flex xl:w-[258px]">
+              <div className="flex h-[4.5rem] shrink-0 items-center justify-center gap-3 border-b border-white/[0.07] px-0 xl:justify-start xl:px-5">
                 <span className="grid size-10 place-items-center rounded-[13px] bg-emerald-400 text-[#102018] shadow-lg shadow-emerald-950/20">
                   <KeyRound className="size-[19px]" strokeWidth={2.5} aria-hidden />
                 </span>
                 <span className="min-w-0">
-                  <span className="block text-[15px] font-semibold tracking-tight">Runner Vault</span>
-                  <span className="mt-0.5 block text-[9px] font-semibold tracking-[0.19em] text-emerald-300/75">CREDENTIAL CONTROL</span>
+                  <span className="hidden text-[15px] font-semibold tracking-tight xl:block">Runner Vault</span>
+                  <span className="mt-0.5 hidden text-[9px] font-semibold tracking-[0.19em] text-emerald-300/75 xl:block">CREDENTIAL CONTROL</span>
                 </span>
               </div>
 
-              <div className="px-4 pt-5">
-                <a href="/vault/services" className="group flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-400 px-3 text-sm font-semibold text-[#102018] shadow-lg shadow-emerald-950/20 transition hover:bg-emerald-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200">
-                  <Plus className="size-4 transition-transform group-hover:rotate-90" />
-                  Add credential
+              <div className="px-3 pt-5 xl:px-4">
+                <a href="/vault/services" aria-label="Add credential" title="Add credential" className="group flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-400 px-2 text-sm font-semibold text-[#102018] shadow-lg shadow-emerald-950/20 transition hover:bg-emerald-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 xl:px-3">
+                  <Plus className="size-4 shrink-0 transition-transform group-hover:rotate-90" />
+                  <span className="hidden xl:inline">Add credential</span>
                 </a>
               </div>
 
-              <nav aria-label="Main navigation" className="min-h-0 flex-1 space-y-7 overflow-y-auto px-3 pb-5 pt-7">
+              <nav aria-label="Main navigation" className="min-h-0 flex-1 space-y-7 overflow-y-auto px-2 pb-5 pt-7 xl:px-3">
                 {navGroups.map((group) => (
                   <div key={group.label}>
-                    <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">{group.label}</p>
+                    <p className="mb-2 hidden px-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500 xl:block">{group.label}</p>
                     <div className="space-y-1">
                       {group.items.map((item) => {
                         const Icon = item.icon
@@ -122,17 +122,19 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
                           <a
                             key={item.href}
                             href={item.href}
+                            aria-label={item.label}
+                            title={item.label}
                             aria-current={active ? 'page' : undefined}
                             className={cn(
-                              'group flex min-h-10 items-center gap-3 rounded-lg px-3 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70',
+                              'group flex min-h-11 items-center justify-center gap-3 rounded-lg px-2 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70 xl:justify-start xl:px-3',
                               active
                                 ? 'bg-emerald-400/[0.13] text-emerald-200 ring-1 ring-inset ring-emerald-300/15'
                                 : 'text-slate-400 hover:bg-white/[0.055] hover:text-slate-100',
                             )}
                           >
                             <Icon className={cn('size-[17px] shrink-0', active ? 'text-emerald-300' : 'text-slate-500 group-hover:text-slate-300')} aria-hidden />
-                            <span className="flex-1">{item.label}</span>
-                            {active && <span className="size-1.5 rounded-full bg-emerald-300" />}
+                            <span className="hidden flex-1 xl:block">{item.label}</span>
+                            {active && <span className="hidden size-1.5 rounded-full bg-emerald-300 xl:block" />}
                           </a>
                         )
                       })}
@@ -141,8 +143,8 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
                 ))}
               </nav>
 
-              <div className="shrink-0 border-t border-white/[0.07] p-3">
-                <div className="rounded-xl border border-white/[0.08] bg-white/[0.035] p-3">
+              <div className="shrink-0 border-t border-white/[0.07] p-2 xl:p-3">
+                <div className="hidden rounded-xl border border-white/[0.08] bg-white/[0.035] p-3 xl:block">
                   <div className="flex items-center gap-2">
                     <span className="grid size-7 place-items-center rounded-lg bg-emerald-400/10 text-emerald-300"><LockKeyhole className="size-3.5" /></span>
                     <span className="text-xs font-semibold text-slate-200">Protected workspace</span>
@@ -150,9 +152,9 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
                   </div>
                   <p className="mt-2 text-[11px] leading-relaxed text-slate-500">Secrets stay encrypted and masked. Access is mediated by the Vault runtime.</p>
                 </div>
-                <a href="/vault/settings" aria-current={isActive('/vault/settings') ? 'page' : undefined} className={cn('mt-2 flex min-h-10 items-center gap-3 rounded-lg px-3 text-[13px] font-medium transition-colors', isActive('/vault/settings') ? 'bg-white/[0.08] text-white' : 'text-slate-400 hover:bg-white/[0.055] hover:text-slate-100')}>
-                  <SettingsIcon className="size-[17px] text-slate-500" />
-                  Workspace settings
+                <a href="/vault/settings" aria-label="Workspace settings" aria-current={isActive('/vault/settings') ? 'page' : undefined} title="Workspace settings" className={cn('mt-2 flex min-h-11 items-center justify-center gap-3 rounded-lg px-2 text-[13px] font-medium transition-colors xl:justify-start xl:px-3', isActive('/vault/settings') ? 'bg-white/[0.08] text-white' : 'text-slate-400 hover:bg-white/[0.055] hover:text-slate-100')}>
+                  <SettingsIcon className="size-[17px] shrink-0 text-slate-500" />
+                  <span className="hidden xl:inline">Workspace settings</span>
                 </a>
               </div>
             </aside>
@@ -188,7 +190,7 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
               </header>
 
               <div className="min-h-0 flex-1 overflow-y-auto">
-                <main id="main-content" className="mx-auto min-h-full w-full max-w-[1480px] px-4 pb-28 pt-6 sm:px-6 sm:pt-7 sm:pb-10 lg:px-8 lg:pt-8">
+                <main id="main-content" className="mx-auto min-h-full w-full max-w-[1480px] px-4 pb-[calc(5.5rem+env(safe-area-inset-bottom))] pt-6 sm:px-6 sm:pt-7 lg:px-8 lg:pt-8 lg:pb-10">
                   {children}
                 </main>
               </div>
@@ -544,7 +546,9 @@ export const app = new Spiceflow()
               <ShieldCheck className="size-4 text-muted-foreground" /> Health center
             </a>
             <a href="/vault/services" className="inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 sm:flex-none">
-              <Plus className="size-4" /> Add credential
+              <Plus className="size-4 shrink-0" />
+              <span className="max-[360px]:hidden">Add credential</span>
+              <span className="hidden max-[360px]:inline">Add</span>
             </a>
           </div>
         </div>
@@ -660,7 +664,7 @@ export const app = new Spiceflow()
             <form method="get" action="/vault" className="mb-4 flex flex-col gap-2 sm:flex-row">
               <label className="flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-xl border border-input bg-background px-3">
                 <Search className="size-4 shrink-0 text-muted-foreground" />
-                <input type="search" name="q" value={searchQuery} placeholder="Search credentials or providers…" defaultValue={searchQuery} className="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/70" />
+                <input type="search" name="q" value={searchQuery} placeholder="Search credentials or providers…" className="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/70" />
               </label>
               <div className="flex gap-2">
                 <select name="health" defaultValue={healthFilter} aria-label="Filter credentials by verification state" className="h-10 min-w-0 flex-1 rounded-xl border border-input bg-background px-3 text-xs sm:w-44 sm:flex-none">
@@ -719,9 +723,18 @@ export const app = new Spiceflow()
                       <div className="min-w-0"><p className="break-all font-mono text-xs font-semibold">{credential.name}</p><p className="mt-1 text-xs text-muted-foreground">{credential.service}</p></div>
                       {validationBadge(credential.validationStatus)}
                     </div>
-                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border/70 pt-3">
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-3">
                       {statusBadge(credential, now)}
-                      <span className="text-[11px] text-muted-foreground">{credential.lastUsedAt ? <>Last used <TimeAgo ts={credential.lastUsedAt} /></> : 'Not used yet'}</span>
+                      <dl className="grid min-w-0 flex-1 grid-cols-2 gap-2 text-[11px] sm:max-w-[20rem]">
+                        <div className="min-w-0">
+                          <dt className="text-muted-foreground">Expires</dt>
+                          <dd className="mt-0.5 truncate">{credential.expiresAt ? <TimeAgo ts={credential.expiresAt} /> : credential.lifetime === 'permanent' ? 'Never' : '—'}</dd>
+                        </div>
+                        <div className="min-w-0">
+                          <dt className="text-muted-foreground">Last used</dt>
+                          <dd className="mt-0.5 truncate">{credential.lastUsedAt ? <TimeAgo ts={credential.lastUsedAt} /> : 'Never'}</dd>
+                        </div>
+                      </dl>
                     </div>
                   </a>
                 ))}
@@ -1152,9 +1165,10 @@ export const app = new Spiceflow()
                     {validationBadge(row.validationStatus)}
                   </div>
                   <div className="mt-3 grid grid-cols-2 gap-3 border-t border-border/70 pt-3 text-[11px]">
-                    <div><p className="text-muted-foreground">Last checked</p><p className="mt-1">{row.lastValidatedAt ? <TimeAgo ts={row.lastValidatedAt} /> : 'Never'}</p></div>
-                    <div><p className="text-muted-foreground">Next check</p><p className="mt-1">{row.nextValidationAt ? <TimeAgo ts={row.nextValidationAt} /> : 'Not scheduled'}</p></div>
-                    {row.validationFailureCount > 0 && <div className="col-span-2 text-destructive">{row.validationFailureCount} consecutive failures · first <TimeAgo ts={row.firstValidationFailureAt ?? now} /></div>}
+                    <div className="min-w-0"><p className="text-muted-foreground">Last checked</p><p className="mt-1">{row.lastValidatedAt ? <TimeAgo ts={row.lastValidatedAt} /> : 'Never'}</p></div>
+                    <div className="min-w-0"><p className="text-muted-foreground">Next check</p><p className="mt-1">{row.nextValidationAt ? <TimeAgo ts={row.nextValidationAt} /> : 'Not scheduled'}</p></div>
+                    <div className="min-w-0"><p className="text-muted-foreground">Failures</p><p className={cn('mt-1 tabular-nums', row.validationFailureCount > 0 && 'font-medium text-destructive')}>{row.validationFailureCount > 0 ? row.validationFailureCount + ' consecutive' : '—'}</p></div>
+                    {row.validationFailureCount > 0 && <div className="col-span-2 break-words text-destructive">First failure · <TimeAgo ts={row.firstValidationFailureAt ?? now} /></div>}
                   </div>
                   {row.status === 'active' && row.hasValue && <div className="mt-3 border-t border-border/70 pt-3"><RunCredentialValidationButton id={row.id} /></div>}
                 </article>)}
@@ -1213,7 +1227,7 @@ export const app = new Spiceflow()
           <Badge variant="outline" className="min-h-8 px-3">30-day window</Badge>
         </div>
 
-        <section aria-label="Usage summary" className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+        <section aria-label="Usage summary" className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5">
           {[
             { label: 'Requests', value: number.format(analytics.totals.requests), note: 'Proxy calls', icon: Activity, tone: 'bg-slate-500/10 text-slate-600 dark:text-slate-300' },
             { label: 'Success rate', value: successRate + '%', note: number.format(analytics.totals.successes) + ' successful', icon: CheckCircle2, tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' },
@@ -1504,13 +1518,13 @@ function AuditTable({ rows }: { rows: Awaited<ReturnType<typeof listAudit>> }) {
                 <p className="break-words text-sm font-semibold">{r.action}</p>
                 <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{r.credentialName || '—'}</p>
               </div>
-              <span className="shrink-0 rounded-full border border-border px-2 py-1 text-xs">{r.result || '—'}</span>
+              <span className="max-w-[45%] shrink-0 break-words rounded-full border border-border px-2 py-1 text-right text-xs">{r.result || '—'}</span>
             </div>
             <div className="grid grid-cols-2 gap-3 border-t border-border pt-3 text-xs">
               <div><p className="text-muted-foreground">When</p><p className="mt-1"><TimeAgo ts={r.at} /></p></div>
               <div className="min-w-0"><p className="text-muted-foreground">Actor</p><p className="mt-1 break-all">{r.actor}</p></div>
             </div>
-            {r.detail ? <p className="break-words border-t border-border pt-3 text-xs text-muted-foreground">{r.detail}</p> : null}
+            {r.detail ? <div className="space-y-1 border-t border-border pt-3"><p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Request detail</p><p className="break-words text-xs text-muted-foreground">{r.detail}</p></div> : null}
           </article>
         ))}
       </div>
