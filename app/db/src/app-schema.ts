@@ -171,6 +171,18 @@ export const runnerRateLimitEvent = sqliteCore.sqliteTable('runner_rate_limit_ev
   sqliteCore.index('runner_rate_limit_event_created_at_idx').on(table.createdAt),
 ])
 
+// Consumed GitHub OIDC token ids (jti). Inserting a verified token's jti is
+// what makes it single-use; the primary key rejects a replay atomically.
+export const oidcTokenUse = sqliteCore.sqliteTable('oidc_token_use', {
+  jti: sqliteCore.text('jti').primaryKey().notNull(),
+  subject: sqliteCore.text('subject').notNull().default(''),
+  expiresAt: epochMs('expires_at').notNull(),
+  createdAt: epochMs('created_at').notNull(),
+}, (table) => [
+  sqliteCore.index('oidc_token_use_expires_at_idx').on(table.expiresAt),
+])
+
+
 export const vaultNotification = sqliteCore.sqliteTable('vault_notification', {
   id: sqliteCore.text('id').primaryKey().notNull(),
   dedupeKey: sqliteCore.text('dedupe_key').notNull().unique(),

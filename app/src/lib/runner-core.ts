@@ -74,6 +74,26 @@ export async function createSession(deps: RunnerDeps, authorization: string | nu
     await audit(deps.db, { action: 'session_denied', actor: 'runner', result: 'denied', detail: verified.error, now: deps.now })
     return fail(401, 'unauthorized')
   }
+  // Consume the token id before anything is granted. A verified OIDC token
+  // stays a valid bearer credential until it expires (~10 minutes), so
+  // without this a captured token could be replayed for more sessions. The
+  // insert relies on the primary key: ON CONFLICT DO NOTHING inserts no row
+  // for an already-consumed jti, which means this token was presented before.
+  // Expired rows are pruned opportunistically; they can never verify again.
+  await deps.db.delete(schema.oidcTokenUse).where(orm.lt(schema.oidcTokenUse.expiresAt, deps.now))
+  const consumed = await deps.db.all<{ jti: string }>(orm.sql`
+    INSERT INTO oidc_token_use (jti, subject, expires_at, created_at)
+    VALUES (${verified.identity.jti}, ${verified.identity.sub}, ${verified.identity.expiresAt}, ${deps.now})
+    ON CONFLICT (jti) DO NOTHING
+    RETURNING jti
+  `)
+  if (consumed.length === 0) {
+    await audit(deps.db, {
+      action: 'session_denied', actor: `runner:${verified.identity.repository}`,
+      result: 'denied', detail: 'oidc_token_replay', now: deps.now,
+    })
+    return fail(401, 'unauthorized')
+  }
   if (deps.policy.bootstrap) {
     const branchPrefix = 'refs/heads/'
     const branch = verified.identity.ref.startsWith(branchPrefix)

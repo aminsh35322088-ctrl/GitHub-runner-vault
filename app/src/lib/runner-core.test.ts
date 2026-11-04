@@ -115,7 +115,7 @@ async function deps(overrides: Partial<RunnerDeps> = {}): Promise<RunnerDeps> {
 
 async function sessionHeader(d: RunnerDeps) {
   const { token } = await issueRunnerSession(d.sessionKey, {
-    repository: 'o/r', repositoryId: '1', repositoryOwnerId: '2', runId: '9', runAttempt: '1', ref: 'refs/heads/main', event: 'workflow_dispatch', workflow: 'w', workflowRef: 'o/r/.github/workflows/w.yml@refs/heads/main', sha: 's', jti: 'j',
+    repository: 'o/r', repositoryId: '1', repositoryOwnerId: '2', runId: '9', runAttempt: '1', ref: 'refs/heads/main', event: 'workflow_dispatch', workflow: 'w', workflowRef: 'o/r/.github/workflows/w.yml@refs/heads/main', sha: 's', jti: 'j', sub: 'repo:o/r:ref:refs/heads/main', expiresAt: d.now + 300_000,
   }, d.now)
   return `Bearer ${token}`
 }
@@ -160,12 +160,23 @@ function b64url(value: Uint8Array | string) {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
-async function signedOidcToken(now: number) {
-  const pair = await crypto.subtle.generateKey(
-    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
-    true, ['sign', 'verify'],
-  ) as CryptoKeyPair
-  const publicJwk = await crypto.subtle.exportKey('jwk', pair.publicKey)
+// One shared signing key for every fake token in this file: since verified
+// jtis are consumed, tests that exchange more than one token need distinct
+// tokens (claim overrides) that still verify against a single JWKS.
+let oidcSigner: Promise<{ pair: CryptoKeyPair; publicJwk: JsonWebKey }> | null = null
+function sharedOidcSigner() {
+  oidcSigner ??= (async () => {
+    const pair = await crypto.subtle.generateKey(
+      { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+      true, ['sign', 'verify'],
+    ) as CryptoKeyPair
+    return { pair, publicJwk: await crypto.subtle.exportKey('jwk', pair.publicKey) }
+  })()
+  return oidcSigner
+}
+
+async function signedOidcToken(now: number, overrides: Record<string, unknown> = {}) {
+  const { pair, publicJwk } = await sharedOidcSigner()
   const seconds = Math.floor(now / 1000)
   const header = b64url(JSON.stringify({ alg: 'RS256', kid: 'runner-core-test', typ: 'JWT' }))
   const claims = b64url(JSON.stringify({
@@ -174,6 +185,8 @@ async function signedOidcToken(now: number) {
     repository: 'o/r', repository_id: '1', repository_owner: 'o', repository_owner_id: '2',
     ref: 'refs/heads/main', event_name: 'workflow_dispatch', run_id: '987654321', run_attempt: '1',
     workflow_ref: 'o/r/.github/workflows/runner.yml@refs/heads/main', sha: 'test-sha', jti: 'runner-core-test-jti',
+    sub: 'repo:o/r:ref:refs/heads/main',
+    ...overrides,
   }))
   const input = `${header}.${claims}`
   const signature = new Uint8Array(await crypto.subtle.sign('RSASSA-PKCS1-v1_5', pair.privateKey, new TextEncoder().encode(input)))
@@ -226,20 +239,68 @@ describe('authentication', () => {
 
   test('uses the owner-configured OIDC session issuance limit', async () => {
     const now = Date.now() + 24 * 60 * 60_000
-    const signed = await signedOidcToken(now)
+    // Two distinct tokens: a verified token is single-use, so re-presenting
+    // the first one would be a replay denial, not the issuance limit.
+    const first = await signedOidcToken(now, { jti: 'session-limit-first' })
+    const second = await signedOidcToken(now, { jti: 'session-limit-second' })
     const d = await deps({
       now,
-      jwks: signed.jwks,
+      jwks: first.jwks,
       getVaultPreferences: async () => ({ ...DEFAULT_VAULT_PREFERENCES, runnerSessionsPerHour: 1 }),
     })
-    expect((await createSession(d, `Bearer ${signed.token}`)).status).toBe(200)
-    expect(await createSession(d, `Bearer ${signed.token}`)).toEqual({ status: 429, body: { error: 'rate_limited' } })
+    expect((await createSession(d, `Bearer ${first.token}`)).status).toBe(200)
+    expect(await createSession(d, `Bearer ${second.token}`)).toEqual({ status: 429, body: { error: 'rate_limited' } })
   })
 
   test('the issuer constant is the real GitHub one', () => {
     expect(GITHUB_OIDC_ISSUER).toBe('https://token.actions.githubusercontent.com')
   })
 })
+
+describe('OIDC tokens are single-use (jti consumption)', () => {
+  test('the same token cannot be exchanged twice, and the replay is audited', async () => {
+    const now = Date.now() + 48 * 60 * 60_000
+    const signed = await signedOidcToken(now, { jti: 'replay-test-token' })
+    const d = await deps({ now, jwks: signed.jwks })
+
+    expect((await createSession(d, `Bearer ${signed.token}`)).status).toBe(200)
+    expect(await createSession(d, `Bearer ${signed.token}`)).toEqual({ status: 401, body: { error: 'unauthorized' } })
+
+    const uses = await d.db.select().from(schema.oidcTokenUse)
+      .where(orm.eq(schema.oidcTokenUse.jti, 'replay-test-token'))
+    expect(uses).toHaveLength(1)
+    expect(uses[0]).toMatchObject({
+      subject: 'repo:o/r:ref:refs/heads/main',
+      expiresAt: (Math.floor(now / 1000) + 300) * 1000,
+      createdAt: now,
+    })
+    const denials = await d.db.select().from(schema.credentialAudit).where(orm.and(
+      orm.eq(schema.credentialAudit.action, 'session_denied'),
+      orm.eq(schema.credentialAudit.detail, 'oidc_token_replay'),
+    ))
+    expect(denials).toHaveLength(1)
+  })
+
+  test('a fresh token for the same workflow still works after another was consumed', async () => {
+    const now = Date.now() + 49 * 60 * 60_000
+    const first = await signedOidcToken(now, { jti: 'first-use-a' })
+    const second = await signedOidcToken(now, { jti: 'first-use-b' })
+    const d = await deps({ now, jwks: first.jwks })
+    expect((await createSession(d, `Bearer ${first.token}`)).status).toBe(200)
+    expect((await createSession(d, `Bearer ${second.token}`)).status).toBe(200)
+  })
+
+  test('a token whose subject names a different repository is denied before any session', async () => {
+    const now = Date.now() + 50 * 60 * 60_000
+    const signed = await signedOidcToken(now, { jti: 'subject-mismatch-token', sub: 'repo:attacker/other:ref:refs/heads/main' })
+    const d = await deps({ now, jwks: signed.jwks })
+    expect(await createSession(d, `Bearer ${signed.token}`)).toEqual({ status: 401, body: { error: 'unauthorized' } })
+    const uses = await d.db.select().from(schema.oidcTokenUse)
+      .where(orm.eq(schema.oidcTokenUse.jti, 'subject-mismatch-token'))
+    expect(uses).toHaveLength(0)
+  })
+})
+
 
 describe('session attempt limiting (pre-verification)', () => {
   const deniedCount = async (d: RunnerDeps) =>
