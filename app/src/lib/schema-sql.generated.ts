@@ -89,5 +89,16 @@ export const SCHEMA_MIGRATIONS: SchemaMigration[] = [
       "ALTER TABLE credential ADD COLUMN provider_account_id text NOT NULL DEFAULT '' CHECK (length(provider_account_id) <= 160)",
       "CREATE INDEX IF NOT EXISTS credential_provider_connection_idx ON credential (service, provider_account_id, connection_label)"
     ]
+  },
+  {
+    "id": "0009_session_attempt_rate_limit_scope",
+    "statements": [
+      "CREATE TABLE runner_rate_limit_event_new (\n  id text PRIMARY KEY NOT NULL,\n  scope text NOT NULL CHECK (scope IN ('session', 'session_attempt', 'registration', 'proxy')),\n  subject text NOT NULL CHECK (length(subject) BETWEEN 1 AND 160),\n  credential_id text,\n  created_at integer NOT NULL,\n  CONSTRAINT fk_runner_rate_limit_event_credential\n    FOREIGN KEY (credential_id) REFERENCES credential(id) ON DELETE CASCADE\n)",
+      "INSERT INTO runner_rate_limit_event_new (id, scope, subject, credential_id, created_at)\n  SELECT id, scope, subject, credential_id, created_at FROM runner_rate_limit_event",
+      "DROP TABLE runner_rate_limit_event",
+      "ALTER TABLE runner_rate_limit_event_new RENAME TO runner_rate_limit_event",
+      "CREATE INDEX runner_rate_limit_event_scope_subject_at_idx\n  ON runner_rate_limit_event (scope, subject, created_at)",
+      "CREATE INDEX runner_rate_limit_event_created_at_idx\n  ON runner_rate_limit_event (created_at)"
+    ]
   }
 ]
