@@ -32,6 +32,7 @@ import { KeyRound, LayoutDashboard, Plus, ChartNoAxesCombined, ShieldCheck, Sett
 import { getUsageAnalytics, listCredentialIntegrationMetadata, listNotifications, listCredentialValidationHistory, loadVaultPreferences, runScheduledCredentialValidation, unreadNotificationCount } from './lib/vault-observability.ts'
 import { SectionCard } from './components/ui/section-card.tsx'
 import { cleanupRunnerRateLimitEvents } from './lib/runner-rate-limit.ts'
+import { applySecurityHeaders } from './lib/security-headers.ts'
 import { MobileNavigation } from './components/mobile-navigation.tsx'
 import { NotificationBell } from './components/notification-actions.tsx'
 import { AddExternalForm, CredentialControls, DismissRunnerRequestButton, RenewRegistrationLinkButton, RevokeSessionsButton } from './components/credential-actions.tsx'
@@ -182,9 +183,11 @@ async function Shell({ request, children, signedIn }: { request: Request; childr
                     <a href="/vault/settings" aria-label="Settings" title="Settings" className="hidden size-9 place-items-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:grid">
                       <SettingsIcon className="size-[17px]" aria-hidden />
                     </a>
-                    <a href="/logout" aria-label="Sign out" title="Sign out" className="grid size-9 place-items-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:border-destructive/30 hover:bg-destructive/5 hover:text-destructive">
-                      <LogOut className="size-[17px]" aria-hidden />
-                    </a>
+                    <form method="post" action="/logout" className="flex">
+                      <button type="submit" aria-label="Sign out" title="Sign out" className="grid size-9 place-items-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:border-destructive/30 hover:bg-destructive/5 hover:text-destructive">
+                        <LogOut className="size-[17px]" aria-hidden />
+                      </button>
+                    </form>
                   </div>
                 </div>
               </header>
@@ -351,6 +354,8 @@ function Message({ title, text }: { title: string; text: string }) {
 const vaultEnv = () => env as unknown as VaultEnv
 
 export const app = new Spiceflow()
+  // Baseline headers apply to pages, redirects and runner API responses.
+  .use(async (_ctx, next) => applySecurityHeaders(await next()))
   // The vault creates its own tables on first request (no migration step).
   .use(async (_ctx, next) => {
     await ensureSchema(env.DB)
@@ -372,7 +377,8 @@ export const app = new Spiceflow()
 
   .get('/', ({ request }) => Response.redirect(new URL('/vault', request.url).toString(), 302))
 
-  .get('/logout', async ({ request }) => {
+  // Sign-out changes session state and is POST-only; a cross-site GET cannot log out the owner.
+  .post('/logout', async ({ request }) => {
     const origin = getRequestOrigin(request)
     const res = new Response(null, { status: 302, headers: { Location: new URL('/login', origin).toString() } })
     if (await getSession(request)) {
@@ -382,6 +388,7 @@ export const app = new Spiceflow()
     }
     return res
   })
+  .get('/logout', () => new Response(null, { status: 405, headers: { Allow: 'POST' } }))
 
   .page('/login', async ({ request, redirect }) => {
     const session = await getSession(request)

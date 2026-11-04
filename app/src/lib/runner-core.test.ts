@@ -5,7 +5,7 @@ import { importEncryptionKey } from './credential-crypto.ts'
 import { deleteCredential, requestRegistration, storeCredentialValue, setEnabled, setVisibility } from './credential-service.ts'
 import { GITHUB_OIDC_ISSUER, type OidcPolicy } from './oidc.ts'
 import { deriveSessionKey, issueRunnerSession, revokeRunnerSessions } from './runner-session.ts'
-import { bearer, readBoundedRequestBody, tryAcquireProxyUploadSlot, MAX_CONCURRENT_PROXY_UPLOADS_PER_ISOLATE, createSession, registry, integrations, requestCredential, useCredential, USE_LIMIT_PER_MINUTE, SESSION_ATTEMPT_LIMIT_PER_HOUR, type RunnerDeps } from './runner-core.ts'
+import { bearer, readBoundedRequestBody, tryAcquireProxyUploadSlot, MAX_CONCURRENT_PROXY_UPLOADS_PER_ISOLATE, createSession, registry, integrations, requestCredential, useCredential, USE_LIMIT_PER_MINUTE, READ_LIMIT_PER_MINUTE, SESSION_ATTEMPT_LIMIT_PER_HOUR, type RunnerDeps } from './runner-core.ts'
 import { DEFAULT_VAULT_PREFERENCES } from './vault-observability.ts'
 import { cleanupRunnerRateLimitEvents, releaseRunnerRateLimitReservation, reserveRunnerRateLimit } from './runner-rate-limit.ts'
 
@@ -354,6 +354,81 @@ describe('session attempt limiting (pre-verification)', () => {
     const d = await deps({ now, jwks: signed.jwks, clientIp: '203.0.113.99' })
     expect((await createSession(d, `Bearer ${signed.token}`)).status).toBe(200)
   })
+})
+
+type RepoTestIdentity = { repository: string; repositoryId: string; ownerId: string }
+const repoPolicy = ({ repository, repositoryId, ownerId }: RepoTestIdentity): OidcPolicy => ({
+  audience: policy.audience,
+  repository,
+  repositoryId,
+  repositoryOwnerId: ownerId,
+  allowedRefs: ['refs/heads/main'],
+  allowedEvents: ['workflow_dispatch'],
+  allowedWorkflowRefs: [repository + '/.github/workflows/runner.yml@refs/heads/main'],
+})
+
+async function repoOidcToken(now: number, identity: RepoTestIdentity, jti: string) {
+  const owner = identity.repository.split('/')[0]!
+  return signedOidcToken(now, {
+    repository: identity.repository,
+    repository_id: identity.repositoryId,
+    repository_owner: owner,
+    repository_owner_id: identity.ownerId,
+    workflow_ref: identity.repository + '/.github/workflows/runner.yml@refs/heads/main',
+    sub: 'repo:' + identity.repository + ':ref:refs/heads/main',
+    jti,
+  })
+}
+
+describe('per-repository rate limits', () => {
+  test('session issuance budgets are isolated by repository and retain a vault-wide backstop', async () => {
+    const now = Date.now() + 60 * 60 * 60_000
+    const a: RepoTestIdentity = { repository: 'o/r', repositoryId: '1', ownerId: '2' }
+    const b: RepoTestIdentity = { repository: 'x/y', repositoryId: '2', ownerId: '3' }
+    const preferences = async () => ({ ...DEFAULT_VAULT_PREFERENCES, runnerSessionsPerHour: 1 })
+    const a1 = await repoOidcToken(now, a, 'repo-a-first')
+    const a2 = await repoOidcToken(now, a, 'repo-a-second')
+    const da = await deps({ now, jwks: a1.jwks, policy: repoPolicy(a), getVaultPreferences: preferences })
+    expect((await createSession(da, 'Bearer ' + a1.token)).status).toBe(200)
+    expect(await createSession(da, 'Bearer ' + a2.token)).toEqual({ status: 429, body: { error: 'rate_limited' } })
+
+    const b1 = await repoOidcToken(now, b, 'repo-b-first')
+    const db = await deps({ now, jwks: b1.jwks, policy: repoPolicy(b), getVaultPreferences: preferences })
+    expect((await createSession(db, 'Bearer ' + b1.token)).status).toBe(200)
+  })
+
+  test('registration budgets are isolated by repository', async () => {
+    const d = await deps({
+      now: Date.now() + 61 * 60 * 60_000,
+      getVaultPreferences: async () => ({ ...DEFAULT_VAULT_PREFERENCES, runnerRegistrationsPerHour: 1 }),
+    })
+    const first = await issueRunnerSession(d.sessionKey, {
+      repository: 'o/r', repositoryId: '1', repositoryOwnerId: '2', runId: 'registration-a', runAttempt: '1',
+      ref: 'refs/heads/main', event: 'workflow_dispatch', workflow: 'w', workflowRef: 'o/r/.github/workflows/w.yml@refs/heads/main',
+      sha: 's', jti: 'j-a', sub: 'repo:o/r:ref:refs/heads/main', expiresAt: d.now + 300_000,
+    }, d.now)
+    const second = await issueRunnerSession(d.sessionKey, {
+      repository: 'x/y', repositoryId: '2', repositoryOwnerId: '3', runId: 'registration-b', runAttempt: '1',
+      ref: 'refs/heads/main', event: 'workflow_dispatch', workflow: 'w', workflowRef: 'x/y/.github/workflows/w.yml@refs/heads/main',
+      sha: 's', jti: 'j-b', sub: 'repo:x/y:ref:refs/heads/main', expiresAt: d.now + 300_000,
+    }, d.now)
+    expect((await requestCredential(d, 'Bearer ' + first.token, { name: uname(), service: 'Cloudflare', doc })).status).toBe(200)
+    expect((await requestCredential(d, 'Bearer ' + first.token, { name: uname(), service: 'GitHub', doc })).status).toBe(429)
+    expect((await requestCredential(d, 'Bearer ' + second.token, { name: uname(), service: 'GitHub', doc })).status).toBe(200)
+  })
+
+  test('registry and integrations share a quota scoped to each issued session', async () => {
+    const d = await deps({ now: Date.now() + 62 * 60 * 60_000 })
+    const issued = await issueRunnerSession(d.sessionKey, {
+      repository: 'o/r', repositoryId: '1', repositoryOwnerId: '2', runId: 'read-' + crypto.randomUUID(), runAttempt: '1',
+      ref: 'refs/heads/main', event: 'workflow_dispatch', workflow: 'w', workflowRef: 'o/r/.github/workflows/w.yml@refs/heads/main',
+      sha: 's', jti: 'read-test', sub: 'repo:o/r:ref:refs/heads/main', expiresAt: d.now + 300_000,
+    }, d.now)
+    const header = 'Bearer ' + issued.token
+    for (let i = 0; i < READ_LIMIT_PER_MINUTE; i += 1) expect((await registry(d, header)).status).toBe(200)
+    expect(await registry(d, header)).toEqual({ status: 429, body: { error: 'rate_limited' } })
+    expect(await integrations(d, header)).toEqual({ status: 429, body: { error: 'rate_limited' } })
+  }, 30_000)
 })
 
 describe('registry', () => {
