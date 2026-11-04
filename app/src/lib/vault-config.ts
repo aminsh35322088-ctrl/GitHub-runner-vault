@@ -185,7 +185,7 @@ async function retireStoredMasterKey(db: Db, stored: string, keys: VaultKeys): P
       .where(orm.eq(schema.vaultSetting.key, GITHUB_CLIENT_SECRET))]),
     db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, MASTER_KEY)),
   ]
-  await db.batch(statements)
+  await db.batch(statements as [typeof statements[number], ...typeof statements[number][]])
 }
 // ── GitHub sign-in app + owner ────────────────────────────────────
 
