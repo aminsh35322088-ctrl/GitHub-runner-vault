@@ -1059,7 +1059,7 @@ describe('reading a value for use', () => {
 
 describe('master-key migration', () => {
   test('re-encrypts values so only the new key can decrypt them', async () => {
-    const { db, key, now, name } = await activeCredential()
+    const { db, key, now, name, id } = await activeCredential()
     const otherKey = await importEncryptionKey(btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))))
     expect((await readCredentialValue(db, key, name, now)).ok).toBe(true)
     const migrated = await reencryptStoredCredentials(db, key, otherKey, [id])
