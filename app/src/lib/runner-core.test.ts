@@ -689,7 +689,9 @@ describe('use (proxy)', () => {
     const header = await sessionHeader(d)
     for (let i = 0; i < USE_LIMIT_PER_MINUTE; i++) expect((await useCredential(d, header, { name: cred.name, ...call })).status).toBe(200)
     expect((await useCredential(d, header, { name: cred.name, ...call })).status).toBe(429)
-  })
+    // The loop performs USE_LIMIT_PER_MINUTE full proxied calls; on shared
+    // CI runners that exceeds the default 5s test timeout.
+  }, 30_000)
 })
 
 

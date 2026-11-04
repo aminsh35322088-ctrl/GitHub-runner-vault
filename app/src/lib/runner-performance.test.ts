@@ -150,5 +150,7 @@ describe('runner hot-path performance diagnostics', () => {
       '[VAULT_PERF_LOCAL_WORKERD] authenticated_registry samples=' + routeSamples.length +
       ' p50_ms=' + routeP50.toFixed(2) + ' p95_ms=' + routeP95.toFixed(2),
     )
-  })
+    // 90+ D1-backed calls: on shared CI runners this exceeds the default 5s
+    // test timeout even though the test only reports the timings.
+  }, 30_000)
 })
