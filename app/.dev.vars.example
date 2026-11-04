@@ -1,5 +1,6 @@
-# Nothing is required. The vault generates its own keys and is configured in the browser (/setup).
+# Production deploys automatically provision VAULT_MASTER_KEY as a Worker secret.
+# For local development, create a 32-byte random base64 key and uncomment:
+# VAULT_MASTER_KEY=<openssl rand -base64 32>
 # Production Deploy to Cloudflare provisions OWNER_GITHUB_ID automatically.
 # For local development only, uncomment and set your numeric GitHub user ID:
 # OWNER_GITHUB_ID=12345678
-# Required for new deployments: VAULT_MASTER_KEY=<openssl rand -base64 32> keeps the master key out of the database.
