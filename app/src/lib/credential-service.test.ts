@@ -570,6 +570,34 @@ describe('provider connections and encrypted multi-field credentials', () => {
 })
 
 describe('storing a value', () => {
+  test('does not set lastValidatedAt when a credential is stored without running validation', async () => {
+    const { db, id, now } = await activeCredential()
+    expect(await getCredentialForOwner(db, id)).toMatchObject({
+      validationStatus: 'not_tested',
+      validation: 'not_tested',
+      lastValidatedAt: null,
+    })
+
+    const replaced = await storeCredentialValue(db, await importEncryptionKey(KEY_B64), {
+      credentialId: id,
+      value: 'replacement-primary-token-value',
+      lifetime: 'permanent',
+      expiresAt: null,
+      visible: true,
+      delivery: 'proxy',
+      allowedHosts: ['api.cloudflare.com'],
+      validation: 'not_tested',
+      validationStatus: 'not_tested',
+      now: now + 1,
+    })
+    expect(replaced.ok).toBe(true)
+    expect(await getCredentialForOwner(db, id)).toMatchObject({
+      validationStatus: 'not_tested',
+      validation: 'not_tested',
+      lastValidatedAt: null,
+    })
+  })
+
   test('encrypts at rest and never exposes the value in any listing', async () => {
     const { db, id, now, name } = await activeCredential()
     const [raw] = await db.select({ enc: schema.credential.valueEncrypted, iv: schema.credential.valueIv }).from(schema.credential).where(orm.eq(schema.credential.id, id))

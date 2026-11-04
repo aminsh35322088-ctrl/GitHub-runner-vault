@@ -11,7 +11,7 @@ import { env } from 'cloudflare:workers'
 import { getDb, getRequestOrigin, getSession } from './db.ts'
 import { loadVaultKeys, type VaultEnv } from './lib/vault-config.ts'
 import {
-  createCredential, deleteCredential, dismissPendingRegistrationRequest, getCredentialForOwner, registerExternallyManaged, renewRegistrationLink, setEnabled, setVisibility, storeCredentialValue, validateStoreInput,
+  createCredential, deleteCredential, dismissPendingRegistrationRequest, getCredentialForOwner, readCredentialValue, registerExternallyManaged, renewRegistrationLink, setEnabled, setVisibility, storeCredentialValue, validateStoreInput,
 } from './lib/credential-service.ts'
 import { consumeEnrollmentLink, peekEnrollmentLink, releaseEnrollmentLink } from './lib/enrollment.ts'
 import { revokeRunnerSessions } from './lib/runner-session.ts'
@@ -136,6 +136,21 @@ async function key() {
   return (await loadVaultKeys(getDb(), env as unknown as VaultEnv)).encryptionKey
 }
 
+async function mergeStoredAuthFieldsForValidation(
+  db: ReturnType<typeof getDb>,
+  credentialName: string,
+  incoming: Record<string, string>,
+  adapter: ReturnType<typeof serviceAdapterFor>,
+): Promise<Record<string, string>> {
+  const allowed = new Set(adapter?.credentialFields?.map((field) => field.id) ?? [])
+  const stored = await readCredentialValue(db, await key(), credentialName, Date.now(), { validation: true })
+  const merged = {
+    ...(stored.ok ? stored.authFields : {}),
+    ...incoming,
+  }
+  return Object.fromEntries(Object.entries(merged).filter(([field]) => allowed.has(field)))
+}
+
 /** Validate a provider token on demand; the submitted value is never returned. */
 export async function validateCredentialTokenAction(service: string, value: string, credentialId?: string, authFields: Record<string, string> = {}) {
   return captureCredentialAction(async () => {
@@ -153,7 +168,10 @@ export async function validateCredentialTokenAction(service: string, value: stri
     const policy = credentialPolicy(parsed.service, document)
     const declaredFields = new Set(adapter?.credentialFields?.map((field) => field.id) ?? [])
     if (Object.keys(parsed.authFields).some((field) => !declaredFields.has(field))) throw new Error('Undeclared credential field')
-    return validateProviderToken(parsed.service, parsed.value, fetch, Date.now(), undefined, adapter, policy.allowedHosts, parsed.authFields)
+    const effectiveFields = existing
+      ? await mergeStoredAuthFieldsForValidation(getDb(), existing.name, parsed.authFields, adapter)
+      : parsed.authFields
+    return validateProviderToken(parsed.service, parsed.value, fetch, Date.now(), undefined, adapter, policy.allowedHosts, effectiveFields)
   })
 }
 
@@ -279,7 +297,10 @@ export async function replaceCredentialAction(id: string, form: StoreForm) {
     if (!credential || credential.externallyManaged) throw new Error('Credential not found or is externally managed')
     const policy = credentialPolicy(credential.service, credential.doc)
     const adapter = serviceAdapterFromDocument(credential.doc) ?? serviceAdapterFor(credential.service)
-    const validation = await optionalSaveValidation(credential.service, parsed, policy, adapter)
+    const validationForm = parsed.validationRequested
+      ? { ...parsed, authFields: await mergeStoredAuthFieldsForValidation(db, credential.name, parsed.authFields, adapter) }
+      : parsed
+    const validation = await optionalSaveValidation(credential.service, validationForm, policy, adapter)
     const preferences = await loadVaultPreferences(db)
     const result = await storeCredentialValue(db, await key(), {
       credentialId: credential.id,

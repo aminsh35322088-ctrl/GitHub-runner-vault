@@ -425,7 +425,13 @@ export function CredentialForm({
                   spellCheck={false}
                   value={authFieldValues[field.id] ?? ''}
                   onChange={(event) => {
-                    setAuthFieldValues((current) => ({ ...current, [field.id]: event.target.value }))
+                    const nextValue = event.target.value
+                    setAuthFieldValues((current) => {
+                      const next = { ...current }
+                      if (nextValue === '') delete next[field.id]
+                      else next[field.id] = nextValue
+                      return next
+                    })
                     setValidation(null)
                     setTestRequested(false)
                     setLastChecked('')
