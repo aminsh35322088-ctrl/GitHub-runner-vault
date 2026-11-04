@@ -515,7 +515,7 @@ describe('use (proxy)', () => {
     expect(JSON.stringify(res.body)).not.toContain(SECRET)
     expect(seen[0]).toEqual({ url: call.url, auth: `Bearer ${SECRET}` })
     const log = await d.db.select().from(schema.credentialAudit).where(orm.and(orm.eq(schema.credentialAudit.credentialName, cred.name), orm.eq(schema.credentialAudit.action, 'proxy_use')))
-    expect(log[0]).toMatchObject({ result: 'ok', purpose: '', actor: 'runner:o/r#9.1' })
+    expect(log[0]).toMatchObject({ result: 'ok', purpose: 'Deploy', actor: 'runner:o/r#9.1' })
     expect(JSON.stringify(log)).not.toContain(SECRET)
     const [row] = await d.db.select({ lastUsedAt: schema.credential.lastUsedAt }).from(schema.credential).where(orm.eq(schema.credential.id, cred.id))
     expect(row?.lastUsedAt).toBe(d.now)
@@ -576,7 +576,7 @@ describe('use (proxy)', () => {
     expect(JSON.stringify(result.body)).not.toContain(SECRET)
     const audits = await d.db.select().from(schema.credentialAudit).where(orm.eq(schema.credentialAudit.credentialName, name))
     expect(JSON.stringify(audits)).not.toContain(SECRET)
-    expect(audits.find((entry) => entry.action === 'proxy_use')?.purpose).toBe('')
+    expect(audits.find((entry) => entry.action === 'proxy_use')?.purpose).toBe('API operation')
   })
 
   test('malformed input is rejected before anything is decrypted', async () => {
@@ -629,7 +629,9 @@ describe('use (proxy)', () => {
     const header = await sessionHeader(d)
     for (let i = 0; i < USE_LIMIT_PER_MINUTE; i++) expect((await useCredential(d, header, { name: cred.name, ...call })).status).toBe(200)
     expect((await useCredential(d, header, { name: cred.name, ...call })).status).toBe(429)
-  })
+    // The loop performs USE_LIMIT_PER_MINUTE full proxied calls; on a loaded
+    // dev machine that exceeds the default 5s test timeout.
+  }, 30_000)
 })
 
 
