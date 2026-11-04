@@ -382,7 +382,7 @@ async function repoOidcToken(now: number, identity: RepoTestIdentity, jti: strin
 
 describe('per-repository rate limits', () => {
   test('session issuance budgets are isolated by repository and retain a vault-wide backstop', async () => {
-    const now = Date.now() + 60 * 60 * 60_000
+    const now = Date.now() + 130 * 60 * 60_000
     const a: RepoTestIdentity = { repository: 'o/r', repositoryId: '1', ownerId: '2' }
     const b: RepoTestIdentity = { repository: 'x/y', repositoryId: '2', ownerId: '3' }
     const preferences = async () => ({ ...DEFAULT_VAULT_PREFERENCES, runnerSessionsPerHour: 1 })
@@ -399,7 +399,7 @@ describe('per-repository rate limits', () => {
 
   test('registration budgets are isolated by repository', async () => {
     const d = await deps({
-      now: Date.now() + 61 * 60 * 60_000,
+      now: Date.now() + 131 * 60 * 60_000,
       getVaultPreferences: async () => ({ ...DEFAULT_VAULT_PREFERENCES, runnerRegistrationsPerHour: 1 }),
     })
     const first = await issueRunnerSession(d.sessionKey, {
@@ -418,7 +418,7 @@ describe('per-repository rate limits', () => {
   })
 
   test('registry and integrations share a quota scoped to each issued session', async () => {
-    const d = await deps({ now: Date.now() + 62 * 60 * 60_000 })
+    const d = await deps({ now: Date.now() + 132 * 60 * 60_000 })
     const issued = await issueRunnerSession(d.sessionKey, {
       repository: 'o/r', repositoryId: '1', repositoryOwnerId: '2', runId: 'read-' + crypto.randomUUID(), runAttempt: '1',
       ref: 'refs/heads/main', event: 'workflow_dispatch', workflow: 'w', workflowRef: 'o/r/.github/workflows/w.yml@refs/heads/main',
@@ -468,7 +468,8 @@ describe('registration requests', () => {
 
   test('uses the owner-configured registration limit', async () => {
     const d = await deps({
-      now: Date.now() + 24 * 60 * 60_000,
+      // Keep this synthetic window after the per-repository fixtures above.
+      now: Date.now() + 133 * 60 * 60_000,
       getVaultPreferences: async () => ({ ...DEFAULT_VAULT_PREFERENCES, runnerRegistrationsPerHour: 1 }),
     })
     const header = await sessionHeader(d)
