@@ -6,200 +6,627 @@
 <meta name="robots" content="noindex">
 <title>Runner Vault — one-click setup</title>
 <style>
-  :root { color-scheme: light dark; --line: #8886; --accent: #2563eb; }
+  :root {
+    color-scheme: dark;
+    --bg: #0b0e13; --card: rgba(255,255,255,.045); --line: rgba(255,255,255,.09);
+    --line-soft: rgba(255,255,255,.06); --text: #eef1f5; --dim: #9aa5b1; --faint: #6b7684;
+    --orange: #f6821f; --orange2: #e8590c; --amber: #ffb347;
+    --green: #2fbf71; --red: #ff6b5e; --radius: 18px;
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 16px/1.5 system-ui, sans-serif; }
-  main { max-width: 40rem; margin: 0 auto; padding: 1rem 1rem 3rem; }
-  h1 { font-size: 1.4rem; margin: 0.5rem 0 0.25rem; }
-  h2 { font-size: 1.05rem; margin: 0 0 0.5rem; }
-  p { margin: 0.4rem 0; }
-  .sub { opacity: 0.75; margin-bottom: 1.25rem; }
-  section { border: 1px solid var(--line); border-radius: 0.75rem; padding: 1rem; margin: 0 0 1rem; }
-  label { display: block; font-weight: 600; margin: 0.6rem 0 0.25rem; }
-  input { width: 100%; padding: 0.6rem; font-size: 1rem; border: 1px solid var(--line); border-radius: 0.5rem; }
-  a.btn, button { display: inline-block; min-height: 44px; padding: 0.6rem 1rem; margin-top: 0.6rem;
-    border-radius: 0.5rem; border: 1px solid var(--accent); background: var(--accent); color: #fff;
-    font-size: 1rem; text-decoration: none; cursor: pointer; }
-  button[disabled] { opacity: 0.6; }
-  ul.checks { list-style: none; padding: 0; margin: 0.6rem 0 0; }
-  ul.checks li { padding: 0.2rem 0; }
-  .ok { color: #15803d; } .bad { color: #dc2626; }
-  small, .small { font-size: 0.85rem; opacity: 0.8; }
-  code { font-family: ui-monospace, monospace; font-size: 0.9em; }
-  #vaultLink { font-weight: 600; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; color: var(--text);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background:
+      radial-gradient(42rem 22rem at 50% -8rem, rgba(246,130,31,.20), rgba(246,130,31,0) 65%),
+      radial-gradient(30rem 16rem at 88% 4rem, rgba(255,179,71,.08), rgba(255,179,71,0) 70%),
+      var(--bg);
+    min-height: 100vh;
+  }
+  main { max-width: 42rem; margin: 0 auto; padding: 2rem 1rem 3rem; }
+  .hero { text-align: center; margin-bottom: 1.75rem; }
+  .mark {
+    width: 56px; height: 56px; margin: 0 auto .8rem; border-radius: 16px;
+    display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, rgba(246,130,31,.28), rgba(232,89,12,.14));
+    border: 1px solid rgba(246,130,31,.4); box-shadow: 0 8px 30px rgba(246,130,31,.22);
+  }
+  h1 { font-size: 1.55rem; line-height: 1.2; margin: 0 0 .4rem; letter-spacing: -.01em; }
+  .sub { color: var(--dim); margin: 0 auto; max-width: 30rem; }
+  /* progress */
+  .progress { display: flex; align-items: flex-start; margin: 0 auto 1.5rem; max-width: 32rem; padding: 0 .5rem; }
+  .pstep { flex: 0 0 auto; width: 5.6rem; text-align: center; }
+  .pdot {
+    width: 30px; height: 30px; margin: 0 auto .35rem; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    border: 1.5px solid var(--line); background: rgba(255,255,255,.04);
+    color: var(--faint); font-size: .85rem; font-weight: 700;
+  }
+  .pstep span { display: block; font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+  .plink { flex: 1 1 auto; height: 1.5px; margin-top: 15px; background: var(--line); border-radius: 2px; }
+  .pstep.current .pdot { border-color: var(--orange); color: var(--amber); box-shadow: 0 0 0 4px rgba(246,130,31,.15); }
+  .pstep.current span { color: var(--text); }
+  .pstep.done .pdot { border-color: var(--green); background: var(--green); color: #fff; }
+  .pstep.done span { color: var(--dim); }
+  .plink.done { background: var(--green); }
+  /* cards */
+  section.card {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 1.15rem 1.15rem 1.25rem; margin: 0 0 1rem;
+    box-shadow: 0 12px 32px rgba(0,0,0,.32); backdrop-filter: blur(6px);
+    transition: border-color .25s, opacity .25s, box-shadow .25s;
+  }
+  section.card.upcoming { opacity: .55; }
+  section.card.current { border-color: rgba(246,130,31,.55); box-shadow: 0 12px 32px rgba(0,0,0,.32), 0 0 0 1px rgba(246,130,31,.25), 0 6px 26px rgba(246,130,31,.10); }
+  section.card.done { border-color: rgba(47,191,113,.45); }
+  .chead { display: flex; align-items: center; gap: .6rem; margin-bottom: .35rem; }
+  .cicon { width: 34px; height: 34px; flex: 0 0 auto; border-radius: 10px; display: flex; align-items: center; justify-content: center;
+    background: rgba(246,130,31,.13); border: 1px solid rgba(246,130,31,.3); color: var(--amber); }
+  section.card.done .cicon { background: rgba(47,191,113,.13); border-color: rgba(47,191,113,.35); color: var(--green); }
+  .clabel { font-size: .7rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--faint); }
+  h2 { font-size: 1.12rem; margin: 0; }
+  .badge { margin-left: auto; flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%; background: var(--green);
+    color: #fff; display: none; align-items: center; justify-content: center; }
+  section.card.done .badge { display: flex; }
+  p { margin: .45rem 0; }
+  .dim { color: var(--dim); } .small { font-size: .86rem; color: var(--dim); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .88em;
+    background: rgba(255,255,255,.07); padding: .08em .35em; border-radius: 6px; }
+  /* buttons */
+  .btn {
+    display: flex; align-items: center; justify-content: center; gap: .5rem;
+    width: 100%; min-height: 50px; padding: .7rem 1rem; margin-top: .8rem;
+    border-radius: 13px; border: 1px solid transparent; cursor: pointer;
+    font-size: 1rem; font-weight: 650; text-decoration: none; text-align: center;
+    transition: transform .08s, filter .15s, background .15s, border-color .15s;
+  }
+  .btn.primary { background: linear-gradient(135deg, var(--orange), var(--orange2)); color: #fff;
+    box-shadow: 0 8px 22px rgba(232,89,12,.35); }
+  .btn.primary:hover { filter: brightness(1.07); }
+  .btn.ghost { background: rgba(255,255,255,.04); border-color: var(--line); color: var(--text); box-shadow: none; }
+  .btn.ghost:hover { border-color: rgba(255,255,255,.22); }
+  .btn:active { transform: scale(.985); }
+  .btn[disabled] { opacity: .6; pointer-events: none; }
+  @media (min-width: 560px) { .btn { width: auto; min-width: 15rem; } .btn.primary { padding-left: 1.6rem; padding-right: 1.6rem; } }
+  /* inputs */
+  label { display: block; font-weight: 600; font-size: .92rem; margin: .8rem 0 .3rem; }
+  input[type="text"], input[type="password"] {
+    width: 100%; padding: .7rem .8rem; font-size: 1rem; color: var(--text);
+    background: rgba(0,0,0,.32); border: 1px solid var(--line); border-radius: 11px; outline: none;
+  }
+  input:focus { border-color: var(--orange); box-shadow: 0 0 0 3px rgba(246,130,31,.18); }
+  /* lists and states */
+  ul.checks { list-style: none; padding: 0; margin: .7rem 0 0; }
+  ul.checks li { padding: .28rem 0; display: flex; gap: .5rem; align-items: baseline; }
+  ul.checks .ic { flex: 0 0 auto; width: 1.05rem; text-align: center; font-weight: 700; }
+  .ok { color: var(--green); } .bad { color: var(--red); } .warn { color: var(--amber); }
+  .msg { margin-top: .7rem; }
+  .msg.error { color: var(--red); } .msg.good { color: var(--green); }
+  .accounts { margin-top: .6rem; display: grid; gap: .5rem; }
+  .acct { display: flex; gap: .6rem; align-items: center; padding: .65rem .75rem; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 12px; background: rgba(0,0,0,.22); }
+  .acct:hover { border-color: rgba(255,255,255,.22); }
+  .acct input { accent-color: var(--orange); width: 1.1rem; height: 1.1rem; }
+  .acct .an { font-weight: 600; } .acct .ai { color: var(--faint); font-size: .8rem; word-break: break-all; }
+  .setupbox { border: 1px dashed rgba(255,179,71,.45); border-radius: 12px; padding: .8rem .9rem; margin-top: .6rem;
+    background: rgba(255,179,71,.05); }
+  .setupbox ol { margin: .4rem 0 .2rem; padding-left: 1.25rem; color: var(--dim); font-size: .92rem; }
+  .setupbox li { margin: .3rem 0; }
+  .vaultcard { margin-top: .8rem; border: 1px solid rgba(47,191,113,.5); border-radius: 14px; padding: 1rem;
+    background: linear-gradient(160deg, rgba(47,191,113,.14), rgba(47,191,113,.04)); text-align: center; }
+  .vaultcard .big { font-size: 1.05rem; font-weight: 700; margin-bottom: .2rem; }
+  .vaultcard a.url { color: var(--amber); font-weight: 600; word-break: break-all; }
+  details.adv { margin-top: 1.4rem; border-top: 1px solid var(--line-soft); padding-top: .9rem; }
+  details.adv summary { cursor: pointer; color: var(--faint); font-size: .86rem; }
+  details.adv .grid { margin-top: .4rem; }
+  footer { margin-top: 1.6rem; text-align: center; color: var(--faint); font-size: .84rem; }
+  footer a { color: var(--dim); }
+  .hidden { display: none !important; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 </head>
 <body>
 <main>
-  <h1>Runner Vault — one-click setup</h1>
-  <p class="sub">This wizard deploys your credential vault to Cloudflare through GitHub Actions.
-  You only make one token and paste it once — everything else is automatic.</p>
-  <p class="small"><strong>One-time prerequisite:</strong> in your repository, open
-  <strong>Settings → Pages</strong>, choose <strong>Deploy from a branch</strong>, then select
-  branch <code>main</code> and folder <code>/docs</code>. Save and reopen this page after GitHub
-  Pages publishes it.</p>
+  <header class="hero">
+    <div class="mark" aria-hidden="true">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffb347" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.6-3 7.7-7 9-4-1.3-7-4.4-7-9V6l7-3z"/><path d="M9.5 12l2 2 3.5-4"/></svg>
+    </div>
+    <h1>Runner Vault — one-click setup</h1>
+    <p class="sub">Deploy your credential vault to Cloudflare through GitHub Actions.
+    Three short steps — everything else is automatic.</p>
+  </header>
 
-  <section>
-    <h2>Your repository</h2>
-    <label for="user">GitHub username</label>
-    <input id="user" autocomplete="username" placeholder="e.g. octocat">
-    <label for="repo">Repository name</label>
-    <input id="repo" value="GitHub-runner-vault">
-    <p class="small">Use the account and repository that hold (or will hold) your vault fork.
-    Every link below follows these two fields.</p>
+  <nav class="progress" aria-hidden="true">
+    <div class="pstep" id="p1"><div class="pdot">1</div><span>Connect</span></div>
+    <div class="plink" id="pl1"></div>
+    <div class="pstep" id="p2"><div class="pdot">2</div><span>Token</span></div>
+    <div class="plink" id="pl2"></div>
+    <div class="pstep" id="p3"><div class="pdot">3</div><span>Deploy</span></div>
+  </nav>
+
+  <section class="card current" id="step1">
+    <div class="chead">
+      <div class="cicon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 18a4.5 4.5 0 0 0 .9-8.85A6 6 0 0 0 6.7 8.6 4.8 4.8 0 0 0 7 18h10.5z"/></svg></div>
+      <div><div class="clabel">Step 1</div><h2>Connect Cloudflare</h2></div>
+      <div class="badge"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg></div>
+    </div>
+    <div id="s1-login" class="hidden">
+      <p class="dim">Sign in with Cloudflare so the wizard can find your account and check it is ready.
+      The login is read-only — it cannot change anything.</p>
+      <button class="btn primary" id="loginBtn" type="button">Login with Cloudflare</button>
+      <p class="dim" style="font-size:.85em;margin-top:10px">Running a fork? The preconfigured login belongs to the original owner's Cloudflare account. Register your own client (README: “enable Cloudflare login”), or continue with a token in Step 2 — setup works fully either way.</p>
+    </div>
+    <div id="s1-setup" class="hidden">
+      <p class="dim">Login is not configured for this copy of the wizard yet. It takes a minute, once:</p>
+      <div class="setupbox">
+        <ol>
+          <li>In Cloudflare open <strong>Manage account → OAuth clients → Create client</strong> and name it <strong>Runner Vault Setup Wizard</strong>.</li>
+          <li>Choose a <strong>public</strong> client, token authentication <strong>None</strong> (PKCE), with the grants <strong>Authorization Code</strong> and <strong>Refresh Token</strong>; set the redirect URL to<br><code id="pageUrlCode"></code></li>
+          <li>Allow the scopes <strong>Account Settings: Read</strong>, <strong>D1: Read</strong> and <strong>Workers: Content Read-Only</strong> (there is no scope literally named “Workers Scripts” — that one is the Workers read scope; <code>offline_access</code> is added automatically with the Refresh Token grant).</li>
+          <li>Put your client ID in <code>docs/wizard-config.json</code> in this repository and reload this page.</li>
+        </ol>
+      </div>
+      <button class="btn ghost" id="skip1Btn" type="button">Continue with a token instead</button>
+    </div>
+    <div id="s1-result" class="hidden">
+      <p class="msg" id="s1-status"></p>
+      <button class="btn ghost hidden" id="resetOAuthBtn" type="button">Start over</button>
+      <div class="accounts hidden" id="accountPicker"></div>
+      <button class="btn primary hidden" id="useAccountBtn" type="button">Use this account</button>
+      <ul class="checks" id="s1-checks"></ul>
+    </div>
+    <p class="small hidden" id="s1-skipped">Skipped — continuing with a token only.
+      <a href="#" id="undoSkip">Set up login instead</a></p>
   </section>
 
-  <section>
-    <h2>Step 1 — Create your Cloudflare token</h2>
-    <p>Everything is pre-selected — just press <strong>Create Token</strong> and copy the value.</p>
-    <a class="btn" id="tokenLink" target="_blank" rel="noopener">Create the token on Cloudflare</a>
-  </section>
-
-  <section>
-    <h2>Step 2 — Check the token</h2>
-    <p>Paste the token to verify it here, in your browser, before saving it anywhere.</p>
-    <label for="token">Cloudflare API token</label>
-    <input id="token" type="password" autocomplete="off" placeholder="Paste the token">
-    <button id="verify" type="button">Check token</button>
+  <section class="card upcoming" id="step2">
+    <div class="chead">
+      <div class="cicon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4.5"/><path d="M11.2 11.8L20 3m-3.5 1.5L19 7m-5 .5L16.5 10"/></svg></div>
+      <div><div class="clabel">Step 2</div><h2>Create the deploy token</h2></div>
+      <div class="badge"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg></div>
+    </div>
+    <p class="dim">A login only lasts an hour, so GitHub Actions needs its own token that does not expire.
+    This one is pre-filled — just press <strong>Create Token</strong> and paste the value below.</p>
+    <a class="btn primary" id="tokenLink" target="_blank" rel="noopener">Create the deploy token</a>
+    <label for="token">Deploy token</label>
+    <input id="token" type="password" autocomplete="off" placeholder="Paste the token — it is checked automatically">
+    <button class="btn ghost" id="verifyBtn" type="button">Check token</button>
     <ul class="checks" id="checks"></ul>
   </section>
 
-  <section>
-    <h2>Step 3 — Save it as a repository secret</h2>
-    <p>Open the prefilled secret form on GitHub and paste the same token as
-    <code>CLOUDFLARE_API_TOKEN</code>.</p>
-    <a class="btn" id="secretLink" target="_blank" rel="noopener">Save CLOUDFLARE_API_TOKEN</a>
-    <p>If the token check above lists <strong>more than one Cloudflare account</strong>, also save
-    the ID of the account you want to deploy into as <code>CLOUDFLARE_ACCOUNT_ID</code>.
-    This second secret is optional when exactly one account is visible to the token.</p>
-    <a class="btn" id="accountSecretLink" target="_blank" rel="noopener">Optional: set CLOUDFLARE_ACCOUNT_ID</a>
+  <section class="card upcoming" id="step3">
+    <div class="chead">
+      <div class="cicon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 15c-1.5 1.2-2 5-2 5s3.8-.5 5-2M14 4c3-2 8-2 8-2s0 5-2 8l-8 8c-2.5-.5-5.5-3.5-6-6l8-8z"/><circle cx="15" cy="9" r="1.6"/></svg></div>
+      <div><div class="clabel">Step 3</div><h2>Save &amp; deploy</h2></div>
+      <div class="badge"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg></div>
+    </div>
+    <p class="dim">Save the token as a repository secret, then run the deploy once.
+    After that, every merge to <code>main</code> redeploys automatically.</p>
+    <a class="btn primary" id="secretLink" target="_blank" rel="noopener">Save CLOUDFLARE_API_TOKEN</a>
+    <div id="acctSecretWrap" class="hidden">
+      <p class="small" id="acctSecretText"></p>
+      <a class="btn ghost" id="accountSecretLink" target="_blank" rel="noopener">Also set CLOUDFLARE_ACCOUNT_ID</a>
+    </div>
+    <a class="btn ghost" id="deployLink" target="_blank" rel="noopener">Open the Deploy workflow</a>
+    <button class="btn ghost" id="checkDeployBtn" type="button">Check deployment</button>
+    <div id="deployResult"></div>
   </section>
 
-  <section>
-    <h2>Step 4 — Deploy</h2>
-    <p>Run the <strong>Deploy to Cloudflare</strong> workflow once. After that, merges to
-    <code>main</code> that change the Worker app, client, or root pnpm manifests redeploy
-    automatically. Documentation-only changes do not need a Worker deployment.</p>
-    <a class="btn" id="deployLink" target="_blank" rel="noopener">Open the Deploy workflow</a>
-  </section>
+  <details class="adv" id="advanced">
+    <summary>Advanced: different repository</summary>
+    <div class="grid">
+      <label for="user">GitHub username</label>
+      <input id="user" type="text" autocomplete="username" placeholder="e.g. octocat">
+      <label for="repo">Repository name</label>
+      <input id="repo" type="text" value="GitHub-runner-vault">
+      <p class="small">Links on this page normally follow the address you opened it at.
+      Change these only if your vault lives somewhere else.</p>
+    </div>
+  </details>
 
-  <section>
-    <h2>Step 5 — Finish</h2>
-    <p>After the workflow run turns green, check for your deployment:</p>
-    <button id="checkDeploy" type="button">Check deployment</button>
-    <p id="deployResult"></p>
-  </section>
-
-  <p class="small">Security: this page is open source (it lives in the vault repository under
-  <code>docs/</code>). Your token stays in this page's memory only — it is never stored and is sent
-  nowhere except Cloudflare's own API when you press “Check token”. You can revoke or rotate the
-  token any time in the Cloudflare dashboard.</p>
+  <footer>
+    <p>Open source — this page lives in the repository under <code>docs/</code>.
+    Your login and token only ever talk to Cloudflare and GitHub; nothing is stored.
+    <a id="readmeLink" target="_blank" rel="noopener" href="#">Deployment guide</a></p>
+  </footer>
 </main>
 
 <script>
 'use strict';
 var CF = 'https://api.cloudflare.com/client/v4';
-var params = new URLSearchParams(location.search);
-var userEl = document.getElementById('user');
-var repoEl = document.getElementById('repo');
-userEl.value = params.get('user') || '';
-if (params.get('repo')) repoEl.value = params.get('repo');
+var AUTH_URL = 'https://dash.cloudflare.com/oauth2/auth';
+var TOKEN_URL = 'https://dash.cloudflare.com/oauth2/token';
+var SCOPES_FULL = 'account-settings.read workers-scripts.read d1.read offline_access';
+var SCOPES_REDUCED = 'account-settings.read d1.read offline_access';
+var pageUrl = location.origin + location.pathname;
+var qs = new URLSearchParams(location.search);
+
+var store = {
+  get: function (k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+  set: function (k, v) { try { sessionStorage.setItem(k, v); } catch (e) {} },
+  del: function (k) { try { sessionStorage.removeItem(k); } catch (e) {} }
+};
+function $(id) { return document.getElementById(id); }
+
+/* ---------- repository derivation ---------- */
+var owner = qs.get('user') || '';
+var repo = qs.get('repo') || '';
+if (!owner && /\.github\.io$/i.test(location.hostname)) {
+  owner = location.hostname.split('.')[0];
+  var seg = location.pathname.split('/').filter(Boolean);
+  if (!repo && seg.length) repo = decodeURIComponent(seg[0]);
+}
+if (!repo) repo = 'GitHub-runner-vault';
+$('user').value = owner;
+$('repo').value = repo;
+if (!owner) $('advanced').open = true;
 
 function repoPath() {
-  return encodeURIComponent(userEl.value.trim()) + '/' + encodeURIComponent(repoEl.value.trim() || 'GitHub-runner-vault');
+  return encodeURIComponent(($('user').value || '').trim()) + '/' +
+         encodeURIComponent(($('repo').value || '').trim() || 'GitHub-runner-vault');
+}
+function refreshLinks() {
+  var base = 'https://github.com/' + repoPath();
+  $('secretLink').href = base + '/settings/secrets/actions/new?name=CLOUDFLARE_API_TOKEN';
+  $('accountSecretLink').href = base + '/settings/secrets/actions/new?name=CLOUDFLARE_ACCOUNT_ID';
+  $('deployLink').href = base + '/actions/workflows/deploy.yml';
+  $('readmeLink').href = base + '#deployment';
+}
+$('user').addEventListener('input', refreshLinks);
+$('repo').addEventListener('input', refreshLinks);
+
+/* ---------- step state ---------- */
+var state = { account: null, skipped1: false, step1Done: false, step2Done: false, tokenAccounts: [] };
+function setStep(n, st) {
+  var card = $('step' + n), p = $('p' + n);
+  card.classList.remove('current', 'done', 'upcoming');
+  card.classList.add(st);
+  p.classList.remove('current', 'done');
+  if (st !== 'upcoming') p.classList.add(st);
+  var dot = p.querySelector('.pdot');
+  dot.textContent = st === 'done' ? '✓' : String(n);
+  if (n < 3) $('pl' + n).classList.toggle('done', st === 'done');
+}
+function advance() {
+  if (state.step2Done) { setStep(1, 'done'); setStep(2, 'done'); setStep(3, 'current'); }
+  else if (state.step1Done || state.skipped1) { setStep(1, state.step1Done ? 'done' : 'upcoming'); setStep(2, 'current'); setStep(3, 'upcoming'); }
+  else { setStep(1, 'current'); setStep(2, 'upcoming'); setStep(3, 'upcoming'); }
 }
 
-var permissions = [
+/* ---------- helpers ---------- */
+function line(list, cls, sym, text) {
+  var li = document.createElement('li');
+  var ic = document.createElement('span');
+  ic.className = 'ic ' + cls; ic.textContent = sym;
+  li.appendChild(ic); li.appendChild(document.createTextNode(text));
+  list.appendChild(li);
+}
+function okLine(list, t) { line(list, 'ok', '✓', t); }
+function badLine(list, t) { line(list, 'bad', '✗', t); }
+function warnLine(list, t) { line(list, 'warn', '!', t); }
+function cf(token, path) {
+  return fetch(CF + path, { headers: { Authorization: 'Bearer ' + token } })
+    .then(function (res) { return res.json().catch(function () { return null; }).then(function (b) { return { status: res.status, body: b }; }); });
+}
+function b64url(bytes) {
+  var s = ''; bytes.forEach(function (b) { s += String.fromCharCode(b); });
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function randomB64url(n) { return b64url(crypto.getRandomValues(new Uint8Array(n))); }
+
+/* ---------- step 1: Cloudflare login (OAuth + PKCE) ---------- */
+var clientId = (qs.get('client_id') || '').trim();
+function showS1(which) {
+  $('s1-login').classList.toggle('hidden', which !== 'login');
+  $('s1-setup').classList.toggle('hidden', which !== 'setup');
+}
+function s1Status(text, cls) {
+  $('s1-result').classList.remove('hidden');
+  var el = $('s1-status'); el.textContent = text; el.className = 'msg ' + (cls || '');
+}
+function probeAccount(token, account, list) {
+  var workersJob = store.get('wiz_scope_set') === 'reduced'
+    ? Promise.resolve().then(function () {
+        warnLine(list, 'Workers check is not available with this login — the token check in Step 2 covers it.');
+      })
+    : cf(token, '/accounts/' + account.id + '/workers/scripts').then(function (r) {
+        if (r.body && r.body.success) okLine(list, 'Workers ready on ' + account.name + '.');
+        else warnLine(list, 'Workers could not be verified on ' + account.name + ' — the token check in Step 2 is the one that counts.');
+      });
+  var jobs = [
+    workersJob,
+    cf(token, '/accounts/' + account.id + '/d1/database').then(function (r) {
+      if (r.body && r.body.success) okLine(list, 'D1 ready on ' + account.name + '.');
+      else warnLine(list, 'D1 could not be verified on ' + account.name + ' — the token check in Step 2 is the one that counts.');
+    })
+  ];
+  return Promise.all(jobs).catch(function () {});
+}
+function completeStep1(token, account) {
+  showS1('none');
+  state.account = account; state.step1Done = true; state.skipped1 = false;
+  store.set('wiz_step1', JSON.stringify({ id: account.id, name: account.name }));
+  store.del('wiz_skip1');
+  $('s1-skipped').classList.add('hidden');
+  $('accountPicker').classList.add('hidden');
+  $('useAccountBtn').classList.add('hidden');
+  s1Status('Connected as account ' + account.name + '.', 'good');
+  refreshTokenLink();
+  advance();
+  probeAccount(token, account, $('s1-checks'));
+}
+function pickAccount(token, accounts) {
+  if (accounts.length === 1) { completeStep1(token, accounts[0]); return; }
+  s1Status('This login can see more than one Cloudflare account — pick the one your vault should live in:', '');
+  var box = $('accountPicker'); box.innerHTML = ''; box.classList.remove('hidden');
+  accounts.forEach(function (a, i) {
+    var lab = document.createElement('label'); lab.className = 'acct';
+    var r = document.createElement('input'); r.type = 'radio'; r.name = 'cfaccount'; r.value = a.id;
+    if (i === 0) r.checked = true;
+    var wrap = document.createElement('span');
+    var n = document.createElement('span'); n.className = 'an'; n.textContent = a.name;
+    var id = document.createElement('span'); id.className = 'ai'; id.textContent = ' ' + a.id;
+    wrap.appendChild(n); wrap.appendChild(id);
+    lab.appendChild(r); lab.appendChild(wrap); box.appendChild(lab);
+  });
+  var btn = $('useAccountBtn'); btn.classList.remove('hidden');
+  btn.onclick = function () {
+    var sel = box.querySelector('input[name="cfaccount"]:checked');
+    var found = accounts.filter(function (a) { return sel && a.id === sel.value; })[0];
+    if (found) completeStep1(token, found);
+  };
+}
+function loadAccounts(token) {
+  return cf(token, '/accounts').then(function (r) {
+    var found = (r.body && r.body.result) || [];
+    if (!r.body || !r.body.success || !found.length) {
+      s1Status('That login works, but no Cloudflare account is visible to it. Continue with a token instead.', 'error');
+      showS1('setup'); return;
+    }
+    pickAccount(token, found);
+  }).catch(function () {
+    s1Status('Could not reach the Cloudflare API — check your connection and try again.', 'error');
+  });
+}
+function startLogin(scopes) {
+  var verifier = randomB64url(32), stateVal = randomB64url(16);
+  store.set('wiz_verifier', verifier); store.set('wiz_state', stateVal);
+  store.set('wiz_scope_set', scopes === SCOPES_REDUCED ? 'reduced' : 'full');
+  crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)).then(function (buf) {
+    var url = AUTH_URL + '?response_type=code'
+      + '&client_id=' + encodeURIComponent(clientId)
+      + '&redirect_uri=' + encodeURIComponent(pageUrl)
+      + '&scope=' + encodeURIComponent(scopes)
+      + '&state=' + encodeURIComponent(stateVal)
+      + '&code_challenge=' + encodeURIComponent(b64url(new Uint8Array(buf)))
+      + '&code_challenge_method=S256';
+    location.href = url;
+  });
+}
+function handleOAuthReturn() {
+  var err = qs.get('error'), code = qs.get('code'), st = qs.get('state');
+  if (!err && !code) return false;
+  history.replaceState(null, '', pageUrl);
+  if (err) {
+    store.del('wiz_verifier'); store.del('wiz_state');
+    if (err === 'invalid_scope' && store.get('wiz_scope_retry') !== '1') {
+      store.set('wiz_scope_retry', '1');
+      s1Status('Cloudflare did not accept one of the permission names — retrying the login with a smaller permission set…', '');
+      startLogin(SCOPES_REDUCED);
+      return true;
+    }
+    showS1(clientId ? 'login' : 'setup');
+    s1Status('Cloudflare login did not finish (' + err + '). Nothing was changed — try again, start over, or continue with a token in Step 2. On a fork this usually means the configured login client belongs to another Cloudflare account — see the note under the login button.', 'error');
+    $('resetOAuthBtn').classList.remove('hidden');
+    return true;
+  }
+  var expected = store.get('wiz_state'), verifier = store.get('wiz_verifier');
+  store.del('wiz_verifier'); store.del('wiz_state');
+  if (!expected || !verifier || st !== expected) {
+    showS1(clientId ? 'login' : 'setup');
+    s1Status('That login reply could not be trusted (state mismatch) — nothing was changed. Please log in again.', 'error');
+    $('resetOAuthBtn').classList.remove('hidden');
+    return true;
+  }
+  s1Status('Finishing your Cloudflare login…', '');
+  var body = new URLSearchParams({
+    grant_type: 'authorization_code', code: code,
+    redirect_uri: pageUrl, client_id: clientId, code_verifier: verifier
+  });
+  fetch(TOKEN_URL, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
+    .then(function (res) { return res.json().catch(function () { return null; }); })
+    .then(function (tok) {
+      if (!tok || !tok.access_token) throw new Error('no token');
+      loadAccounts(tok.access_token);
+    })
+    .catch(function () {
+      showS1(clientId ? 'login' : 'setup');
+      s1Status('The login exchange failed — your browser may have blocked it. You can try again, or continue with a token in Step 2.', 'error');
+      $('resetOAuthBtn').classList.remove('hidden');
+    });
+  return true;
+}
+$('loginBtn').addEventListener('click', function () {
+  store.del('wiz_scope_retry');
+  $('resetOAuthBtn').classList.add('hidden');
+  startLogin(SCOPES_FULL);
+});
+$('resetOAuthBtn').addEventListener('click', function () {
+  ['wiz_verifier', 'wiz_state', 'wiz_scope_retry', 'wiz_scope_set', 'wiz_step1', 'wiz_skip1']
+    .forEach(function (k) { store.del(k); });
+  state.account = null; state.step1Done = false; state.skipped1 = false;
+  $('s1-checks').innerHTML = '';
+  $('accountPicker').classList.add('hidden');
+  $('useAccountBtn').classList.add('hidden');
+  $('s1-skipped').classList.add('hidden');
+  $('s1-result').classList.add('hidden');
+  $('resetOAuthBtn').classList.add('hidden');
+  showS1(clientId ? 'login' : 'setup');
+  refreshTokenLink();
+  advance();
+});
+$('skip1Btn').addEventListener('click', function () {
+  state.skipped1 = true; store.set('wiz_skip1', '1');
+  showS1('none'); $('s1-result').classList.add('hidden');
+  $('s1-skipped').classList.remove('hidden');
+  advance(); $('token').focus();
+});
+$('undoSkip').addEventListener('click', function (e) {
+  e.preventDefault();
+  state.skipped1 = false; store.del('wiz_skip1');
+  $('s1-skipped').classList.add('hidden');
+  showS1(clientId ? 'login' : 'setup');
+  advance();
+});
+
+/* ---------- step 2: deploy token ---------- */
+var tokenPerms = [
   { key: 'workers_scripts', type: 'edit' },
   { key: 'd1', type: 'edit' },
   { key: 'account_settings', type: 'read' }
 ];
-document.getElementById('tokenLink').href =
-  'https://dash.cloudflare.com/profile/api-tokens?name=Runner%20Vault%20Deploy&accountId=*&zoneId=all&permissionGroupKeys=' +
-  encodeURIComponent(JSON.stringify(permissions));
-
-function refreshLinks() {
-  var base = 'https://github.com/' + repoPath();
-  document.getElementById('secretLink').href = base + '/settings/secrets/actions/new?name=CLOUDFLARE_API_TOKEN';
-  document.getElementById('accountSecretLink').href = base + '/settings/secrets/actions/new?name=CLOUDFLARE_ACCOUNT_ID';
-  document.getElementById('deployLink').href = base + '/actions/workflows/deploy.yml';
+function refreshTokenLink() {
+  var acct = state.account ? state.account.id : '*';
+  $('tokenLink').href = 'https://dash.cloudflare.com/profile/api-tokens?name=Runner%20Vault%20Deploy'
+    + '&accountId=' + encodeURIComponent(acct) + '&zoneId=all&permissionGroupKeys='
+    + encodeURIComponent(JSON.stringify(tokenPerms));
 }
-userEl.addEventListener('input', refreshLinks);
-repoEl.addEventListener('input', refreshLinks);
-refreshLinks();
-
-function line(list, ok, text) {
-  var li = document.createElement('li');
-  li.className = ok ? 'ok' : 'bad';
-  li.textContent = (ok ? '✓ ' : '✗ ') + text;
-  list.appendChild(li);
-}
-
-function cf(token, path) {
-  return fetch(CF + path, { headers: { Authorization: 'Bearer ' + token } })
-    .then(function (res) { return res.json().catch(function () { return null; }); });
-}
-
-document.getElementById('verify').addEventListener('click', function () {
-  var token = document.getElementById('token').value.trim();
-  var list = document.getElementById('checks');
-  var button = document.getElementById('verify');
+var verifySeq = 0;
+function verifyToken() {
+  var token = $('token').value.trim();
+  var list = $('checks'); var btn = $('verifyBtn');
+  var seq = ++verifySeq;
   list.innerHTML = '';
-  if (!token) { line(list, false, 'Paste a token first.'); return; }
-  button.disabled = true;
-  cf(token, '/user/tokens/verify').then(function (verify) {
-    if (!verify || !verify.success || !verify.result || verify.result.status !== 'active') {
-      line(list, false, 'Token is not valid or not active — create it again in Step 1 and copy the full value.');
+  if (!token) { badLine(list, 'Paste a token first.'); return; }
+  btn.disabled = true;
+  cf(token, '/user/tokens/verify').then(function (v) {
+    if (seq !== verifySeq) return null;
+    if (!v.body || !v.body.success || !v.body.result || v.body.result.status !== 'active') {
+      badLine(list, 'Token is not valid or not active — create it again above and copy the full value.');
       return null;
     }
-    line(list, true, 'Token is valid and active.');
+    okLine(list, 'Token is valid and active.');
     return cf(token, '/accounts');
-  }).then(function (accounts) {
-    if (!accounts) return;
-    var found = (accounts.result || []);
-    if (!accounts.success || found.length === 0) {
-      line(list, false, 'No Cloudflare account is visible to this token — the Account Settings: Read permission is missing.');
+  }).then(function (r) {
+    if (!r || seq !== verifySeq) return;
+    var found = (r.body && r.body.result) || [];
+    if (!r.body || !r.body.success || !found.length) {
+      badLine(list, 'No Cloudflare account is visible to this token — the Account Settings: Read permission is missing.');
       return;
     }
-    found.forEach(function (account) {
-      line(list, true, 'Account found: ' + account.name + ' (' + account.id + ')');
-      cf(token, '/accounts/' + account.id + '/workers/scripts').then(function (scripts) {
-        if (scripts && scripts.success) line(list, true, 'Workers Scripts API reachable on ' + account.name + '.');
-        else line(list, false, 'Workers Scripts API not reachable on ' + account.name + ' — add Workers Scripts: Edit to the token.');
-      });
-      cf(token, '/accounts/' + account.id + '/d1/database').then(function (d1) {
-        if (d1 && d1.success) line(list, true, 'D1 API reachable on ' + account.name + '.');
-        else line(list, false, 'D1 API not reachable on ' + account.name + ' — add D1: Edit to the token.');
-      });
+    state.tokenAccounts = found;
+    var target = null;
+    if (state.account) {
+      target = found.filter(function (a) { return a.id === state.account.id; })[0] || null;
+      if (!target) {
+        badLine(list, 'This token cannot see the account you connected in Step 1 (' + state.account.name + '). Create the token while signed in to that account.');
+        return;
+      }
+      okLine(list, 'Token sees your connected account: ' + target.name + '.');
+    } else {
+      found.forEach(function (a) { okLine(list, 'Account found: ' + a.name + ' (' + a.id + ')'); });
+      target = found[0];
+    }
+    var pending = 2, passed = 0;
+    function probeDone(good) {
+      if (good) passed++;
+      if (--pending === 0 && seq === verifySeq) {
+        if (passed === 2) { state.step2Done = true; refreshStep3(); advance(); }
+        else badLine(list, 'The token is missing a permission above — recreate it from the pre-filled button so every permission is included.');
+      }
+    }
+    cf(token, '/accounts/' + target.id + '/workers/scripts').then(function (s) {
+      if (seq !== verifySeq) return;
+      if (s.body && s.body.success) { okLine(list, 'Workers Scripts: ready on ' + target.name + '.'); probeDone(true); }
+      else { badLine(list, 'Workers Scripts API not reachable on ' + target.name + ' — add Workers Scripts: Edit to the token.'); probeDone(false); }
+    });
+    cf(token, '/accounts/' + target.id + '/d1/database').then(function (d) {
+      if (seq !== verifySeq) return;
+      if (d.body && d.body.success) { okLine(list, 'D1: ready on ' + target.name + '.'); probeDone(true); }
+      else { badLine(list, 'D1 API not reachable on ' + target.name + ' — add D1: Edit to the token.'); probeDone(false); }
     });
   }).catch(function () {
-    line(list, false, 'Could not reach the Cloudflare API — check your connection and try again.');
-  }).finally(function () { button.disabled = false; });
+    if (seq === verifySeq) badLine(list, 'Could not reach the Cloudflare API — check your connection and try again.');
+  }).finally(function () { if (seq === verifySeq) btn.disabled = false; });
+}
+$('verifyBtn').addEventListener('click', verifyToken);
+var pasteTimer = null;
+$('token').addEventListener('paste', function () {
+  clearTimeout(pasteTimer);
+  pasteTimer = setTimeout(verifyToken, 60);
 });
+$('token').addEventListener('input', function () { state.step2Done = false; advance(); });
 
-document.getElementById('checkDeploy').addEventListener('click', function () {
-  var out = document.getElementById('deployResult');
-  out.textContent = 'Checking…';
+/* ---------- step 3 ---------- */
+function refreshStep3() {
+  var wrap = $('acctSecretWrap');
+  var multi = state.tokenAccounts.length > 1 && !state.account;
+  wrap.classList.toggle('hidden', !multi);
+  if (multi) {
+    var names = state.tokenAccounts.map(function (a) { return a.name + ' (' + a.id + ')'; }).join(', ');
+    $('acctSecretText').textContent = 'Your token can see more than one account: ' + names +
+      '. Also save the ID of the account the vault should live in as CLOUDFLARE_ACCOUNT_ID, so the deploy lands in the right place.';
+  }
+}
+$('checkDeployBtn').addEventListener('click', function () {
+  var out = $('deployResult');
+  out.innerHTML = '<p class="msg dim">Checking…</p>';
   fetch('https://api.github.com/repos/' + repoPath() + '/contents/deployment.json', {
     headers: { Accept: 'application/vnd.github+json' }, cache: 'no-store'
   }).then(function (res) {
-    if (res.status === 404) { out.textContent = 'Not deployed yet — run the Deploy workflow (Step 4) first.'; return null; }
-    if (!res.ok) { out.textContent = 'Could not check the deployment (GitHub answered ' + res.status + '). Check the username and repository above.'; return null; }
+    if (res.status === 404) {
+      out.innerHTML = '<p class="msg warn">Not yet — if you just started the deploy, give the run a minute and check again.</p>';
+      return null;
+    }
+    if (!res.ok) { out.innerHTML = '<p class="msg error">Could not check the deployment (GitHub answered ' + res.status + ').</p>'; return null; }
     return res.json();
   }).then(function (body) {
     if (!body || !body.content) return;
     var info = JSON.parse(atob(body.content.replace(/\s/g, '')));
     out.innerHTML = '';
-    var a = document.createElement('a');
-    a.id = 'vaultLink';
-    a.href = info.url;
-    a.textContent = info.url;
-    out.appendChild(a);
-    out.appendChild(document.createTextNode(' — open it and choose “Create the GitHub App” to finish. The Runner Lab finds this file automatically, so there is nothing else to configure.'));
+    var card = document.createElement('div'); card.className = 'vaultcard';
+    var big = document.createElement('div'); big.className = 'big'; big.textContent = '🎉 Your vault is live';
+    var a = document.createElement('a'); a.className = 'url'; a.href = info.url; a.textContent = info.url;
+    var p = document.createElement('p'); p.className = 'small';
+    p.textContent = 'Open it and choose “Create the GitHub App” to finish. The Runner Lab finds this deployment automatically — nothing else to configure.';
+    var open = document.createElement('a'); open.className = 'btn primary'; open.href = info.url;
+    open.target = '_blank'; open.rel = 'noopener'; open.textContent = 'Open your vault';
+    card.appendChild(big); card.appendChild(a); card.appendChild(p); card.appendChild(open);
+    out.appendChild(card);
+    setStep(3, 'done');
   }).catch(function () {
-    out.textContent = 'Could not reach GitHub — check your connection and try again.';
+    out.innerHTML = '<p class="msg error">Could not reach GitHub — check your connection and try again.</p>';
   });
 });
+
+/* ---------- init ---------- */
+$('pageUrlCode').textContent = pageUrl;
+refreshLinks();
+refreshTokenLink();
+var restored = null;
+try { restored = JSON.parse(store.get('wiz_step1') || 'null'); } catch (e) { restored = null; }
+if (restored && restored.id) {
+  state.account = { id: restored.id, name: restored.name || restored.id };
+  state.step1Done = true;
+  s1Status('Connected as account ' + state.account.name + ' (from your earlier login on this device).', 'good');
+  refreshTokenLink();
+}
+if (store.get('wiz_skip1') === '1' && !state.step1Done) {
+  state.skipped1 = true;
+  $('s1-skipped').classList.remove('hidden');
+}
+fetch('wizard-config.json', { cache: 'no-store' })
+  .then(function (r) { return r.ok ? r.json() : null; })
+  .catch(function () { return null; })
+  .then(function (cfg) {
+    if (!clientId && cfg && cfg.cloudflareOAuthClientId) clientId = String(cfg.cloudflareOAuthClientId).trim();
+    if (!handleOAuthReturn()) {
+      if (state.step1Done || state.skipped1) showS1('none');
+      else showS1(clientId ? 'login' : 'setup');
+    }
+    advance();
+  });
 </script>
 </body>
 </html>
