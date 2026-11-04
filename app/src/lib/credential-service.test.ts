@@ -1062,7 +1062,7 @@ describe('master-key migration', () => {
     const { db, key, now, name } = await activeCredential()
     const otherKey = await importEncryptionKey(btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))))
     expect((await readCredentialValue(db, key, name, now)).ok).toBe(true)
-    const migrated = await reencryptStoredCredentials(db, key, otherKey)
+    const migrated = await reencryptStoredCredentials(db, key, otherKey, [id])
     expect(migrated.failedIds).toEqual([])
     expect(migrated.migrated).toBeGreaterThanOrEqual(1)
     const withNewKey = await readCredentialValue(db, otherKey, name, now)
@@ -1083,7 +1083,7 @@ describe('master-key migration', () => {
       .where(orm.eq(schema.credential.id, first.id))
     try {
       const otherKey = await importEncryptionKey(btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))))
-      const result = await reencryptStoredCredentials(first.db, first.key, otherKey)
+      const result = await reencryptStoredCredentials(first.db, first.key, otherKey, [first.id, second.id])
       expect(result.migrated).toBe(0)
       expect(result.failedIds).toContain(first.id)
       const [afterFirst] = await first.db.select({ valueEncrypted: schema.credential.valueEncrypted, valueIv: schema.credential.valueIv })
