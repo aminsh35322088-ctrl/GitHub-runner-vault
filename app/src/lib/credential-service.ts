@@ -625,13 +625,21 @@ export async function prepareStoredCredentialReencryption(
   db: Db,
   fromKey: CryptoKey,
   toKey: CryptoKey,
+  credentialIds?: string[],
 ): Promise<PreparedCredentialReencryption> {
+  const valueFilter = orm.isNotNull(schema.credential.valueEncrypted)
   const rows = await db.select({
     id: schema.credential.id,
     keyVersion: schema.credential.keyVersion,
     valueEncrypted: schema.credential.valueEncrypted,
     valueIv: schema.credential.valueIv,
-  }).from(schema.credential).where(orm.isNotNull(schema.credential.valueEncrypted))
+  }).from(schema.credential).where(
+    credentialIds === undefined
+      ? valueFilter
+      : credentialIds.length === 0
+        ? orm.eq(schema.credential.id, '')
+        : orm.and(valueFilter, orm.inArray(schema.credential.id, credentialIds)),
+  )
   const updates: PreparedCredentialReencryption['updates'] = []
   const failedIds: string[] = []
   const updatedAt = Date.now()
@@ -659,8 +667,9 @@ export async function reencryptStoredCredentials(
   db: Db,
   fromKey: CryptoKey,
   toKey: CryptoKey,
+  credentialIds?: string[],
 ): Promise<{ migrated: number; failedIds: string[] }> {
-  const prepared = await prepareStoredCredentialReencryption(db, fromKey, toKey)
+  const prepared = await prepareStoredCredentialReencryption(db, fromKey, toKey, credentialIds)
   if (prepared.failedIds.length) return { migrated: 0, failedIds: prepared.failedIds }
   if (prepared.updates.length) {
     await db.batch(prepared.updates.map((row) => db.update(schema.credential)
