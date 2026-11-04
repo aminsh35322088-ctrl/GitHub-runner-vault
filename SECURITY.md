@@ -4,10 +4,12 @@
 
 - Secrets never leave the Worker in `proxy` mode; the Worker makes the call. Values are
   AES-256-GCM encrypted with the row id and key version as AAD; the 32-byte key is derived from a random master key
-  supplied as the `VAULT_MASTER_KEY` Worker secret. Fresh deployments without the secret fail closed. Deployments
-  created before the secret was required may still hold the key in D1 next to the ciphertext; they run in a flagged
-  legacy mode (new credential storage paused) until the owner sets the secret, which migrates all ciphertexts atomically and deletes the
-  database copy only after every credential and the GitHub App secret can be resealed.
+  supplied as the `VAULT_MASTER_KEY` Worker secret. The deploy helper provisions that secret on all supported deploy
+  routes, generating it for fresh deployments and copying the old D1 value verbatim on upgrades. If provisioning
+  cannot complete, a fresh deployment fails closed. Older deployments remain in flagged legacy mode (new credential
+  storage paused) until a redeploy provisions the secret. If the key differs, every credential and the GitHub App
+  secret is preflighted, then all ciphertext rewrites and key removal commit atomically; any unreadable value blocks
+  migration and preserves the old D1 key.
 - The runner is **not** a trust boundary: anything on it can use its own session. So the
   vault limits what a session can do: owner-approved hosts only, header allowlist, no redirects,
   response redaction, rate limits, 30-minute sessions, owner-side revoke, append-only audit.
