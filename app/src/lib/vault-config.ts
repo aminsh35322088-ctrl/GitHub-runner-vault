@@ -316,11 +316,24 @@ export async function loadOwnerLogin(db: Db): Promise<string | null> {
 
 // ── GitHub app manifest ───────────────────────────────────────────
 
+/**
+ * The sign-in app's name is deterministic: `Runner Vault <owner GitHub ID>`.
+ * GitHub App names are globally unique and GitHub IDs are too, so the name
+ * can only ever belong to this owner — and re-running setup (after deleting
+ * the old app, or on a fresh deployment of the same account) always asks for
+ * the same name instead of piling up a new randomly-named app each time.
+ * If the app still exists, GitHub refuses the duplicate name, which is the
+ * desired outcome: one sign-in app per owner, reused rather than recreated.
+ */
+export function manifestAppName(ownerId: string) {
+  // GitHub App names are global and at most 34 characters.
+  return `Runner Vault ${ownerId}`.slice(0, 34)
+}
+
 /** Manifest for a private (owner-only) GitHub App used purely for sign-in. */
-export function buildManifest(origin: string, suffix: string) {
+export function buildManifest(origin: string, ownerId: string) {
   return {
-    // GitHub App names are global and at most 34 characters.
-    name: `Runner Vault ${suffix}`.slice(0, 34),
+    name: manifestAppName(ownerId),
     url: origin,
     redirect_url: `${origin}/setup/github/callback`,
     callback_urls: [`${origin}/api/auth/callback/github`],

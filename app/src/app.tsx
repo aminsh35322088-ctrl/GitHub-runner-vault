@@ -467,9 +467,10 @@ export const app = new Spiceflow()
     const keys = await loadVaultKeys(db, e)
     const origin = getRequestOrigin(request)
     if (await isConfigured(db, e, keys)) return new Response(null, { status: 303, headers: { Location: new URL('/setup', origin).toString() } })
-    if (!await loadOwnerId(db, e)) return new Response(null, { status: 303, headers: { Location: new URL('/setup?error=provisioning', origin).toString(), 'Cache-Control': 'no-store' } })
+    const ownerId = await loadOwnerId(db, e)
+    if (!ownerId) return new Response(null, { status: 303, headers: { Location: new URL('/setup?error=provisioning', origin).toString(), 'Cache-Control': 'no-store' } })
     const state = newSetupState()
-    const manifest = buildManifest(origin, crypto.randomUUID().slice(0, 6))
+    const manifest = buildManifest(origin, ownerId)
     const attr = (v: string) => v.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     // GitHub needs the manifest as a form POST from the browser, so hand the browser a
     // tiny page that submits it. The state also goes in an HttpOnly cookie so the
