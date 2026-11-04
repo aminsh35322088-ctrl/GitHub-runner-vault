@@ -96,5 +96,16 @@ export const SCHEMA_MIGRATIONS: SchemaMigration[] = [
       "CREATE TABLE oidc_token_use (\n  jti text PRIMARY KEY NOT NULL,\n  subject text NOT NULL DEFAULT '',\n  expires_at integer NOT NULL,\n  created_at integer NOT NULL\n)",
       "CREATE INDEX oidc_token_use_expires_at_idx ON oidc_token_use (expires_at)"
     ]
+  },
+  {
+    "id": "0009_session_attempt_rate_limit_scope",
+    "statements": [
+      "CREATE TABLE runner_rate_limit_event_new (\n  id text PRIMARY KEY NOT NULL,\n  scope text NOT NULL CHECK (scope IN ('session', 'session_attempt', 'registration', 'proxy')),\n  subject text NOT NULL CHECK (length(subject) BETWEEN 1 AND 160),\n  credential_id text,\n  created_at integer NOT NULL,\n  CONSTRAINT fk_runner_rate_limit_event_credential\n    FOREIGN KEY (credential_id) REFERENCES credential(id) ON DELETE CASCADE\n)",
+      "INSERT INTO runner_rate_limit_event_new (id, scope, subject, credential_id, created_at)\n  SELECT id, scope, subject, credential_id, created_at FROM runner_rate_limit_event",
+      "DROP TABLE runner_rate_limit_event",
+      "ALTER TABLE runner_rate_limit_event_new RENAME TO runner_rate_limit_event",
+      "CREATE INDEX runner_rate_limit_event_scope_subject_at_idx\n  ON runner_rate_limit_event (scope, subject, created_at)",
+      "CREATE INDEX runner_rate_limit_event_created_at_idx\n  ON runner_rate_limit_event (created_at)"
+    ]
   }
 ]

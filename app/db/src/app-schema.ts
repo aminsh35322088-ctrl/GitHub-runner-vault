@@ -162,7 +162,7 @@ export const vaultSetting = sqliteCore.sqliteTable('vault_setting', {
 // current credential ID so deleting/replacing a credential cannot inherit its quota.
 export const runnerRateLimitEvent = sqliteCore.sqliteTable('runner_rate_limit_event', {
   id: sqliteCore.text('id').primaryKey().notNull(),
-  scope: sqliteCore.text('scope', { enum: ['session', 'registration', 'proxy'] }).notNull(),
+  scope: sqliteCore.text('scope', { enum: ['session', 'session_attempt', 'registration', 'proxy'] }).notNull(),
   subject: sqliteCore.text('subject').notNull(),
   credentialId: sqliteCore.text('credential_id').references(() => credential.id, { onDelete: 'cascade' }),
   createdAt: epochMs('created_at').notNull(),
@@ -181,6 +181,7 @@ export const oidcTokenUse = sqliteCore.sqliteTable('oidc_token_use', {
 }, (table) => [
   sqliteCore.index('oidc_token_use_expires_at_idx').on(table.expiresAt),
 ])
+
 
 export const vaultNotification = sqliteCore.sqliteTable('vault_notification', {
   id: sqliteCore.text('id').primaryKey().notNull(),

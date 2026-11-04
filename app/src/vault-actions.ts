@@ -11,14 +11,14 @@ import { env } from 'cloudflare:workers'
 import { getDb, getRequestOrigin, getSession } from './db.ts'
 import { loadVaultKeys, type VaultEnv } from './lib/vault-config.ts'
 import {
-  createCredential, deleteCredential, dismissPendingRegistrationRequest, getCredentialForOwner, readCredentialValue, registerExternallyManaged, renewRegistrationLink, setEnabled, setVisibility, storeCredentialValue, validateStoreInput,
+  createCredential, deleteCredential, dismissPendingRegistrationRequest, getCredentialForOwner, MAX_TEMPORARY_MS, readCredentialValue, registerExternallyManaged, renewRegistrationLink, setEnabled, setVisibility, storeCredentialValue, validateStoreInput,
 } from './lib/credential-service.ts'
 import { consumeEnrollmentLink, peekEnrollmentLink, releaseEnrollmentLink } from './lib/enrollment.ts'
 import { revokeRunnerSessions } from './lib/runner-session.ts'
 import { DEFAULT_EVENTS, resolveRepositoryId, saveRunnerPolicy } from './lib/runner-policy.ts'
 import { normalizeCredentialName } from './lib/credential-input.ts'
 import { defaultPurposeForService, presetForService } from './lib/presets.ts'
-import { adapterHost, serviceAdapterFor, serviceAdapterFromDocument } from './lib/service-adapter.ts'
+import { adapterHost, effectiveServiceAdapter, serviceAdapterFor, serviceAdapterFromDocument } from './lib/service-adapter.ts'
 import { validateProviderToken, type CredentialValidationReport } from './lib/credential-validation.ts'
 import { publicCredentialActionError } from './lib/public-action-error.ts'
 import { listUnreadRegistrationNotificationIds, loadVaultPreferences, markAllNotificationsRead, markNotificationIdsRead, markNotificationRead, markRegistrationNotificationsRead, saveVaultPreferences, validateStoredCredentialNow, type VaultPreferences } from './lib/vault-observability.ts'
@@ -56,6 +56,15 @@ const storeSchema = z.object({
   providerAccountId: z.string().max(160).default(''),
   authFields: z.record(z.string().regex(/^[a-z][a-z0-9_]{0,31}$/), z.string().max(4096)).refine((fields) => Object.keys(fields).length <= 12).default({}),
   validationRequested: z.boolean().default(false),
+}).superRefine((form, ctx) => {
+  // The service layer caps temporary credentials at MAX_TEMPORARY_MS; enforce
+  // the same bound here so the form fails fast instead of after submission.
+  if (form.lifetime !== 'temporary') return
+  if (form.expiresInHours === null) {
+    ctx.addIssue({ code: 'custom', path: ['expiresInHours'], message: 'Temporary credentials need an expiry.' })
+  } else if (form.expiresInHours * 3600_000 > MAX_TEMPORARY_MS) {
+    ctx.addIssue({ code: 'custom', path: ['expiresInHours'], message: `Temporary credentials can live at most ${MAX_TEMPORARY_MS / 3600_000} hours.` })
+  }
 })
 export type StoreForm = z.input<typeof storeSchema>
 
@@ -72,8 +81,15 @@ type CredentialPolicy = {
 }
 
 function credentialPolicy(service: string, document?: unknown): CredentialPolicy {
-  const adapter = serviceAdapterFromDocument(document) ?? serviceAdapterFor(service)
   const preset = presetForService(service)
+  const documentAdapter = serviceAdapterFromDocument(document)
+  if (preset && documentAdapter) {
+    const documentHost = adapterHost(documentAdapter)
+    if (!documentHost || !preset.hosts.includes(documentHost)) {
+      throw new Error('Service Adapter این سند با Host رسمی سرویس تطابق ندارد؛ Credential ذخیره نشد.')
+    }
+  }
+  const adapter = effectiveServiceAdapter(service, document)
   const host = adapter ? adapterHost(adapter) : preset?.hosts[0] ?? null
   if (!adapter && !preset) {
     throw new Error('این سرویس Adapter امن و مستند ندارد؛ از Runner یک لینک ثبت جدید با Service Adapter بساز.')
@@ -164,7 +180,7 @@ export async function validateCredentialTokenAction(service: string, value: stri
     const existing = parsed.credentialId ? await getCredentialForOwner(getDb(), parsed.credentialId) : null
     if (parsed.credentialId && !existing) throw new Error('Credential not found')
     const document = existing?.doc
-    const adapter = serviceAdapterFromDocument(document) ?? serviceAdapterFor(parsed.service)
+    const adapter = effectiveServiceAdapter(parsed.service, document)
     const policy = credentialPolicy(parsed.service, document)
     const declaredFields = new Set(adapter?.credentialFields?.map((field) => field.id) ?? [])
     if (Object.keys(parsed.authFields).some((field) => !declaredFields.has(field))) throw new Error('Undeclared credential field')
@@ -223,7 +239,7 @@ export async function submitRegistrationAction(token: string, form: StoreForm) {
       throw new Error('This registration is no longer available')
     }
     const policy = credentialPolicy(credential.service, credential.doc)
-    const adapter = serviceAdapterFromDocument(credential.doc) ?? serviceAdapterFor(credential.service)
+    const adapter = effectiveServiceAdapter(credential.service, credential.doc)
     const validationReport = await optionalSaveValidation(credential.service, parsed, policy, adapter)
     const preferences = await loadVaultPreferences(db)
     const storeInput = {
@@ -296,7 +312,7 @@ export async function replaceCredentialAction(id: string, form: StoreForm) {
     const credential = await getCredentialForOwner(db, idSchema.parse(id))
     if (!credential || credential.externallyManaged) throw new Error('Credential not found or is externally managed')
     const policy = credentialPolicy(credential.service, credential.doc)
-    const adapter = serviceAdapterFromDocument(credential.doc) ?? serviceAdapterFor(credential.service)
+    const adapter = effectiveServiceAdapter(credential.service, credential.doc)
     const validationForm = parsed.validationRequested
       ? { ...parsed, authFields: await mergeStoredAuthFieldsForValidation(db, credential.name, parsed.authFields, adapter) }
       : parsed

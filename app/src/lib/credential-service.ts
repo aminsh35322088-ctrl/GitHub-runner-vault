@@ -15,7 +15,7 @@ import { normalizeAllowedHosts, normalizeAuthStyle, readAllowedHosts, reservedNa
 import { availability, publicReason } from './credential-policy.ts'
 import { createEnrollmentLink, discardEnrollmentLink, type CreatedLink } from './enrollment.ts'
 import { defaultPurposeForService } from './presets.ts'
-import { adapterHost, serviceAdapterFor, serviceAdapterFromDocument } from './service-adapter.ts'
+import { adapterHost, effectiveServiceAdapter, serviceAdapterFor } from './service-adapter.ts'
 
 type Db = ReturnType<typeof getDb>
 
@@ -76,6 +76,7 @@ export async function audit(db: Db, entry: {
   credentialId?: string | null
   credentialName?: string
   requestId?: string
+  purpose?: string
   result?: string
   detail?: string
   now: number
@@ -87,11 +88,17 @@ export async function audit(db: Db, entry: {
     credentialId: entry.credentialId ?? null,
     credentialName: entry.credentialName ?? '',
     requestId: entry.requestId ?? '',
-    purpose: '',
+    purpose: (entry.purpose ?? '').slice(0, 300),
     result: (entry.result ?? '').slice(0, 60),
     reportedResult: '',
     detail: (entry.detail ?? '').slice(0, 500),
   })
+}
+
+/** A caller-supplied purpose wins over the generated default; blank means default. */
+function requestedPurpose(service: string, purpose?: string): string {
+  const trimmed = purpose?.trim()
+  return trimmed ? trimmed.slice(0, 300) : defaultPurposeForService(service)
 }
 
 // ── Registration requests (made through the runner API by a model) ─────────
@@ -128,7 +135,7 @@ export async function requestRegistration(db: Db, req: RegistrationRequest): Pro
   }
 
   const service = req.service.trim().slice(0, 80)
-  const purpose = defaultPurposeForService(service)
+  const purpose = requestedPurpose(service, req.purpose)
 
   let credentialId: string
   if (existing) {
@@ -185,7 +192,7 @@ export async function requestRegistration(db: Db, req: RegistrationRequest): Pro
     return { ok: false, error: 'exists' }
   }
 
-  await audit(db, { action: 'registration_requested', actor: req.requestedBy, credentialId, credentialName: req.name, result: 'ok', now: req.now })
+  await audit(db, { action: 'registration_requested', actor: req.requestedBy, credentialId, credentialName: req.name, purpose, result: 'ok', now: req.now })
   return { ok: true, value: { credentialId, link } }
 }
 
@@ -596,7 +603,7 @@ export async function registerExternallyManaged(db: Db, input: { name: string; s
   if (existing) return { ok: false, error: 'exists' }
   const id = crypto.randomUUID()
   await db.insert(schema.credential).values({
-    id, name: input.name, service: input.service.slice(0, 80), purpose: defaultPurposeForService(input.service),
+    id, name: input.name, service: input.service.slice(0, 80), purpose: requestedPurpose(input.service, input.purpose),
     status: 'active', visible: true, lifetime: 'permanent', delivery: 'proxy', externallyManaged: true,
     createdAt: input.now, updatedAt: input.now,
   })
@@ -608,7 +615,7 @@ export async function registerExternallyManaged(db: Db, input: { name: string; s
 
 export type ValueResult =
   | { ok: true; value: string; authFields: Record<string, string>; credential: {
-      id: string; name: string; service: string; connectionLabel: string; providerAccountId: string;
+      id: string; name: string; service: string; purpose: string; connectionLabel: string; providerAccountId: string;
       delivery: 'proxy'; allowedHosts: string[]; authHeader: string; authScheme: AuthScheme; valueIv: string;
       authFieldHeaders: Array<{ field: string; header: string; scheme: AuthScheme; required: boolean }>
     } }
@@ -628,7 +635,7 @@ export async function readCredentialValue(
   options: { validation?: boolean } = {},
 ): Promise<ValueResult> {
   const [row] = await db.select({
-    id: schema.credential.id, name: schema.credential.name, service: schema.credential.service, connectionLabel: schema.credential.connectionLabel, providerAccountId: schema.credential.providerAccountId, status: schema.credential.status, visible: schema.credential.visible,
+    id: schema.credential.id, name: schema.credential.name, service: schema.credential.service, purpose: schema.credential.purpose, connectionLabel: schema.credential.connectionLabel, providerAccountId: schema.credential.providerAccountId, status: schema.credential.status, visible: schema.credential.visible,
     expiresAt: schema.credential.expiresAt, externallyManaged: schema.credential.externallyManaged,
     delivery: schema.credential.delivery, allowedHosts: schema.credential.allowedHosts,
     authHeader: schema.credential.authHeader, authScheme: schema.credential.authScheme, docJson: schema.credential.docJson,
@@ -645,13 +652,13 @@ export async function readCredentialValue(
   if (row.externallyManaged || row.valueEncrypted === null || row.valueIv === null) return { ok: false, reason: 'unavailable' }
   const raw = await decryptCredentialValue(key, row.id, row.keyVersion, row.valueEncrypted, row.valueIv)
   const bundle = decodeCredentialBundle(raw)
-  const adapter = serviceAdapterFromDocument(readStoredDoc(row.docJson)) ?? serviceAdapterFor(row.service)
+  const adapter = effectiveServiceAdapter(row.service, readStoredDoc(row.docJson))
   return {
     ok: true,
     value: bundle.value,
     authFields: bundle.authFields,
     credential: {
-      id: row.id, name: row.name, service: row.service, connectionLabel: row.connectionLabel, providerAccountId: row.providerAccountId,
+      id: row.id, name: row.name, service: row.service, purpose: row.purpose, connectionLabel: row.connectionLabel, providerAccountId: row.providerAccountId,
       delivery: row.delivery, allowedHosts: readAllowedHosts(row.allowedHosts),
       authHeader: row.authHeader, authScheme: row.authScheme, valueIv: row.valueIv,
       authFieldHeaders: adapter?.authFieldHeaders ?? [],

@@ -16,6 +16,13 @@ type Db = ReturnType<typeof getDb>
 export const USE_LIMIT_PER_MINUTE = 30
 export const SESSION_LIMIT_PER_HOUR = 20
 export const REGISTRATION_LIMIT_PER_HOUR = 10
+/**
+ * Session attempts (successful or not) allowed per client IP per hour, checked
+ * before OIDC verification. Legit runners fetch a fresh token per job and retry
+ * rarely, so this is generous headroom over SESSION_LIMIT_PER_HOUR; its job is
+ * to bound the audit writes an unauthenticated flood can cause.
+ */
+export const SESSION_ATTEMPT_LIMIT_PER_HOUR = 120
 
 export type RunnerDeps = {
   db: Db
@@ -26,6 +33,8 @@ export type RunnerDeps = {
   origin: string
   fetchFn: typeof fetch
   now: number
+  /** Client IP as reported by the platform (cf-connecting-ip), when known. */
+  clientIp?: string
   proxyTimeoutMs?: number
   getProxyTimeoutMs?: () => Promise<number>
   getVaultPreferences?: () => Promise<VaultPreferences>
@@ -49,6 +58,17 @@ export async function createSession(deps: RunnerDeps, authorization: string | nu
   const token = bearer(authorization)
   if (!token) return fail(401, 'missing_token')
   if (!deps.policy) return fail(503, 'vault_not_configured')
+  // Bound unauthenticated work before identity verification: every attempt
+  // first reserves a per-IP slot. Without this, a flood of invalid tokens
+  // writes one audit row per request and can exhaust the D1 write budget on
+  // its own. Once the budget is spent the answer is 429 and no audit row is
+  // written. Post-verification denials below stay audited; they are bounded
+  // by this same reservation.
+  const attempt = await reserveRunnerRateLimit(deps.db, {
+    scope: 'session_attempt', subject: deps.clientIp ? `ip:${deps.clientIp}` : 'global',
+    now: deps.now, windowMs: 3600_000, limit: SESSION_ATTEMPT_LIMIT_PER_HOUR,
+  })
+  if (!attempt) return fail(429, 'rate_limited')
   const verified = await verifyGithubOidc(token, deps.policy, deps.jwks, deps.now)
   if (!verified.ok) {
     await audit(deps.db, { action: 'session_denied', actor: 'runner', result: 'denied', detail: verified.error, now: deps.now })
@@ -384,8 +404,11 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
     // Same answer for missing, hidden, disabled and expired: no probing for hidden names.
     return fail(404, 'unavailable')
   }
+  // Audits record the credential's owner-approved purpose (never the
+  // request-supplied one, which is untrusted runner input).
+  const identified = { ...common, credentialId: read.credential.id, purpose: read.credential.purpose }
   if (read.credential.delivery !== 'proxy') {
-    await scheduleBackgroundWrites(deps, [audit(deps.db, { ...common, credentialId: read.credential.id, action: 'proxy_use', result: 'wrong_delivery' })])
+    await scheduleBackgroundWrites(deps, [audit(deps.db, { ...identified, action: 'proxy_use', result: 'wrong_delivery' })])
     return fail(400, 'not_a_proxy_credential')
   }
 
@@ -395,7 +418,7 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
     limit: preferences?.proxyRequestsPerMinute ?? USE_LIMIT_PER_MINUTE,
   })
   if (!reservation) {
-    await scheduleBackgroundWrites(deps, [audit(deps.db, { ...common, credentialId: read.credential.id, action: 'proxy_use', result: 'rate_limited' })])
+    await scheduleBackgroundWrites(deps, [audit(deps.db, { ...identified, action: 'proxy_use', result: 'rate_limited' })])
     return fail(429, 'rate_limited')
   }
 
@@ -410,7 +433,7 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
     if (!releaseUploadSlot) {
       try { await releaseRunnerRateLimitReservation(deps.db, reservation) } catch { /* Keep the request failure generic. */ }
       await scheduleBackgroundWrites(deps, [
-        audit(deps.db, { ...common, credentialId: read.credential.id, action: 'proxy_use', result: 'proxy_busy' }),
+        audit(deps.db, { ...identified, action: 'proxy_use', result: 'proxy_busy' }),
         recordCredentialUsage(deps.db, { credentialId: read.credential.id, consumer, success: false, latencyMs: Date.now() - startedAt, now: deps.now }),
       ])
       return fail(503, 'proxy_busy')
@@ -424,7 +447,7 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
       if (!streamed.ok) {
         try { await releaseRunnerRateLimitReservation(deps.db, reservation) } catch { /* Keep the request failure generic. */ }
         await scheduleBackgroundWrites(deps, [
-          audit(deps.db, { ...common, credentialId: read.credential.id, action: 'proxy_use', result: streamed.error }),
+          audit(deps.db, { ...identified, action: 'proxy_use', result: streamed.error }),
           recordCredentialUsage(deps.db, { credentialId: read.credential.id, consumer, success: false, latencyMs: Date.now() - startedAt, now: deps.now }),
         ])
         return fail(streamed.error === 'body_too_large' ? 413 : 400, streamed.error)
@@ -448,7 +471,7 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
     // A D1 reservation is the authoritative quota counter; audit and aggregates
     // are now best-effort background metadata and never hold the API response open.
     await scheduleBackgroundWrites(deps, [
-      audit(deps.db, { ...common, credentialId: read.credential.id, action: 'proxy_use', result: result.error, detail: result.detail }),
+      audit(deps.db, { ...identified, action: 'proxy_use', result: result.error, detail: result.detail }),
       recordCredentialUsage(deps.db, { credentialId: read.credential.id, consumer, success: false, latencyMs: Date.now() - startedAt, now: deps.now }),
     ])
     return fail(PROXY_STATUS[result.error], result.error)
@@ -456,7 +479,7 @@ export async function useCredential(deps: RunnerDeps, authorization: string | nu
   const evidence = runtimeCredentialEvidence(read.credential.service, result.status, result.body, result.headers)
   const writes: Promise<unknown>[] = [
     audit(deps.db, {
-      ...common, credentialId: read.credential.id, action: 'proxy_use', result: 'ok',
+      ...identified, action: 'proxy_use', result: 'ok',
       detail: `${result.method} ${result.host}${result.path} -> ${result.status}${result.redactions ? ` (${result.redactions} redacted)` : ''}`,
     }),
     recordCredentialUsage(deps.db, { credentialId: read.credential.id, consumer, success: result.status < 400, latencyMs: Date.now() - startedAt, now: deps.now }),

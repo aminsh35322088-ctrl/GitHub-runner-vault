@@ -13,7 +13,7 @@ import { getDb, getAuth, getSession, getRequestOrigin, requirePageSession } from
 import { ensureSchema } from './lib/schema.ts'
 import { loadRunnerPolicyInput } from './lib/runner-policy.ts'
 import { presetForService } from './lib/presets.ts'
-import { serviceAdapterFor, serviceAdapterFromDocument } from './lib/service-adapter.ts'
+import { effectiveServiceAdapter, serviceAdapterFor } from './lib/service-adapter.ts'
 import {
   SETUP_STATE_COOKIE, SETUP_STATE_MAX_AGE_SECONDS, buildManifest, convertManifest, isConfigured, loadOwnerId, loadOwnerLogin, loadVaultKeys,
   newSetupState, saveGithubApp, setupStateMatches, type VaultEnv,
@@ -791,7 +791,7 @@ export const app = new Spiceflow()
       const linkStatus = !link ? 'No link issued'
         : link.usedAt !== null ? 'Used or replaced'
           : link.expiresAt <= now ? 'Expired' : 'Active'
-      const adapter = row.doc ? serviceAdapterFromDocument(row.doc) : serviceAdapterFor(row.service)
+      const adapter = effectiveServiceAdapter(row.service, row.doc)
       return { ...row, requestedBy: link?.requestedBy ?? 'Runner identity unavailable', requestedAt: row.updatedAt, linkExpiresAt: link?.expiresAt ?? null, hasActiveLink, linkStatus, apiBaseUrl: adapter?.apiBaseUrl ?? null }
     })
 
@@ -972,7 +972,7 @@ export const app = new Spiceflow()
           <p className="text-xs text-muted-foreground mt-1">Link expires in about {Math.max(1, Math.round((link.expiresAt - Date.now()) / 60_000))} min and works once.</p>
         </div>
         {credential.doc && <DocView doc={credential.doc} />}
-        <CredentialForm mode="register" token={params.token} credentialId={credential.id} serviceName={credential.service} credentialName={credential.name} credentialPurpose={credential.purpose} preset={preset ? { label: preset.label } : null} apiBaseUrl={serviceAdapterFromDocument(credential.doc)?.apiBaseUrl ?? serviceAdapterFor(credential.service)?.apiBaseUrl} credentialFields={(serviceAdapterFromDocument(credential.doc) ?? serviceAdapterFor(credential.service))?.credentialFields} defaults={{ visible: preferences.defaultVisible, lifetime: preferences.defaultLifetime }} />
+        <CredentialForm mode="register" token={params.token} credentialId={credential.id} serviceName={credential.service} credentialName={credential.name} credentialPurpose={credential.purpose} preset={preset ? { label: preset.label } : null} apiBaseUrl={effectiveServiceAdapter(credential.service, credential.doc)?.apiBaseUrl} credentialFields={effectiveServiceAdapter(credential.service, credential.doc)?.credentialFields} defaults={{ visible: preferences.defaultVisible, lifetime: preferences.defaultLifetime }} />
       </div>
     )
   })
@@ -1036,7 +1036,7 @@ export const app = new Spiceflow()
 
         {!c.externallyManaged && (
           <SectionCard title="Replace secret value" description="Submit a replacement token. The previous value is not displayed and cannot be recovered from the dashboard." icon={<LockKeyhole className="size-[18px]" />}>
-            <CredentialForm mode="replace" id={c.id} credentialId={c.id} serviceName={c.service} credentialName={c.name} credentialPurpose={c.purpose} apiBaseUrl={serviceAdapterFromDocument(c.doc)?.apiBaseUrl ?? serviceAdapterFor(c.service)?.apiBaseUrl} credentialFields={(serviceAdapterFromDocument(c.doc) ?? serviceAdapterFor(c.service))?.credentialFields} connectionLabel={c.connectionLabel} providerAccountId={c.providerAccountId} defaults={{ visible: c.visible, lifetime: c.lifetime }} />
+            <CredentialForm mode="replace" id={c.id} credentialId={c.id} serviceName={c.service} credentialName={c.name} credentialPurpose={c.purpose} apiBaseUrl={effectiveServiceAdapter(c.service, c.doc)?.apiBaseUrl} credentialFields={effectiveServiceAdapter(c.service, c.doc)?.credentialFields} connectionLabel={c.connectionLabel} providerAccountId={c.providerAccountId} defaults={{ visible: c.visible, lifetime: c.lifetime }} />
           </SectionCard>
         )}
 
