@@ -261,8 +261,8 @@ There is exactly one way to deploy: a setup wizard drives a GitHub Actions workf
 
 ### Steps
 
-1. Fork this repository under the personal GitHub account that will own the vault (or use your existing copy of it).
-2. Enable GitHub Pages once: **Settings → Pages → Deploy from a branch → main → /docs → Save**. The wizard then lives at https://aminsh35322088-ctrl.github.io/GitHub-runner-vault/.
+1. Fork this repository under the personal GitHub account that will own the vault (or use your existing copy of it). On a fork, GitHub leaves Actions off by default: open the **Actions** tab once and enable workflows, or the deploy in step 7 cannot run.
+2. Enable GitHub Pages once: **Settings → Pages → Deploy from a branch → main → /docs → Save**. The wizard then lives at `https://<you>.github.io/GitHub-runner-vault/`.
 3. Open the wizard (button above). It works out your GitHub username and repository name from its own address — there is nothing to type in.
 4. **Connect Cloudflare.** If login is enabled for your copy (see the next subsection), the wizard signs you in with Cloudflare, finds your account and checks that Workers and D1 are reachable. Otherwise it offers to continue with a token only.
 5. Create the deploy token with the wizard's button — the permissions (Workers Scripts: Edit, D1: Edit, Account Settings: Read) and the token name are pre-selected; press **Create Token** and paste the value back into the wizard. (A Cloudflare login only lasts an hour, so the long-lived token still does the actual deploying.) The wizard verifies the token in your browser; the token is never stored and is only ever sent to Cloudflare's API.
@@ -276,7 +276,7 @@ The wizard's first step can sign the owner in with Cloudflare (read-only: accoun
 
 1. In Cloudflare open **Manage account → OAuth clients → Create client**, name it **Runner Vault Setup Wizard**, and create a **public** client with token authentication **None** (PKCE) and the grants **Authorization Code** and **Refresh Token**.
 2. Set its redirect URL to your wizard address (`https://<you>.github.io/<repo>/`) and allow the scopes **Account Settings: Read**, **D1: Read** and **Workers: Content Read-Only** (the picker has no scope literally named "Workers Scripts" — that is the Workers read scope; `offline_access` is added automatically with the Refresh Token grant).
-3. Put the client ID in `docs/wizard-config.json` in your repository (`cloudflareOAuthClientId`) and commit. Until then the wizard simply skips login and works with the token alone.
+3. Put your client ID in `docs/wizard-config.json` in your repository (`cloudflareOAuthClientId`), replacing the inherited one, and commit. A fork inherits the upstream owner's client ID in that file, and only that owner's Cloudflare account can approve it — until you replace it (or empty the value to skip login entirely), the wizard's login cannot complete for you. The token path works fully regardless.
 
 ### Updating
 

@@ -155,6 +155,7 @@
       <p class="dim">Sign in with Cloudflare so the wizard can find your account and check it is ready.
       The login is read-only — it cannot change anything.</p>
       <button class="btn primary" id="loginBtn" type="button">Login with Cloudflare</button>
+      <p class="dim" style="font-size:.85em;margin-top:10px">Running a fork? The preconfigured login belongs to the original owner's Cloudflare account. Register your own client (README: “enable Cloudflare login”), or continue with a token in Step 2 — setup works fully either way.</p>
     </div>
     <div id="s1-setup" class="hidden">
       <p class="dim">Login is not configured for this copy of the wizard yet. It takes a minute, once:</p>
@@ -416,7 +417,7 @@ function handleOAuthReturn() {
       return true;
     }
     showS1(clientId ? 'login' : 'setup');
-    s1Status('Cloudflare login did not finish (' + err + '). Nothing was changed — try again, start over, or continue with a token in Step 2.', 'error');
+    s1Status('Cloudflare login did not finish (' + err + '). Nothing was changed — try again, start over, or continue with a token in Step 2. On a fork this usually means the configured login client belongs to another Cloudflare account — see the note under the login button.', 'error');
     $('resetOAuthBtn').classList.remove('hidden');
     return true;
   }
