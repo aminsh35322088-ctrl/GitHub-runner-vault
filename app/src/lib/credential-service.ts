@@ -611,6 +611,74 @@ export async function registerExternallyManaged(db: Db, input: { name: string; s
   return { ok: true, value: { id } }
 }
 
+/**
+ * Prepare every credential ciphertext for a master-key change without writing
+ * anything. One unreadable row blocks the whole plan; plaintext exists only in
+ * this function's stack and is never returned or persisted.
+ */
+export type PreparedCredentialReencryption = {
+  updates: Array<{ id: string; valueEncrypted: string; valueIv: string; updatedAt: number }>
+  failedIds: string[]
+}
+
+export async function prepareStoredCredentialReencryption(
+  db: Db,
+  fromKey: CryptoKey,
+  toKey: CryptoKey,
+  credentialIds?: string[],
+): Promise<PreparedCredentialReencryption> {
+  const valueFilter = orm.isNotNull(schema.credential.valueEncrypted)
+  const rows = await db.select({
+    id: schema.credential.id,
+    keyVersion: schema.credential.keyVersion,
+    valueEncrypted: schema.credential.valueEncrypted,
+    valueIv: schema.credential.valueIv,
+  }).from(schema.credential).where(
+    credentialIds === undefined
+      ? valueFilter
+      : credentialIds.length === 0
+        ? orm.eq(schema.credential.id, '')
+        : orm.and(valueFilter, orm.inArray(schema.credential.id, credentialIds)),
+  )
+  const updates: PreparedCredentialReencryption['updates'] = []
+  const failedIds: string[] = []
+  const updatedAt = Date.now()
+  for (const row of rows) {
+    if (row.valueEncrypted === null || row.valueIv === null) {
+      failedIds.push(row.id)
+      continue
+    }
+    try {
+      const plain = await decryptCredentialValue(fromKey, row.id, row.keyVersion, row.valueEncrypted, row.valueIv)
+      const sealed = await encryptCredentialValue(toKey, row.id, row.keyVersion, plain)
+      updates.push({ id: row.id, valueEncrypted: sealed.encrypted, valueIv: sealed.iv, updatedAt })
+    } catch {
+      failedIds.push(row.id)
+    }
+  }
+  return failedIds.length ? { updates: [], failedIds } : { updates, failedIds: [] }
+}
+
+/**
+ * Re-encrypt all stored credential values in one atomic D1 batch. A failed
+ * preflight leaves every existing ciphertext untouched.
+ */
+export async function reencryptStoredCredentials(
+  db: Db,
+  fromKey: CryptoKey,
+  toKey: CryptoKey,
+  credentialIds?: string[],
+): Promise<{ migrated: number; failedIds: string[] }> {
+  const prepared = await prepareStoredCredentialReencryption(db, fromKey, toKey, credentialIds)
+  if (prepared.failedIds.length) return { migrated: 0, failedIds: prepared.failedIds }
+  if (prepared.updates.length) {
+    const statements = prepared.updates.map((row) => db.update(schema.credential)
+      .set({ valueEncrypted: row.valueEncrypted, valueIv: row.valueIv, updatedAt: row.updatedAt })
+      .where(orm.eq(schema.credential.id, row.id)))
+    await db.batch(statements as [typeof statements[number], ...typeof statements[number][]])
+  }
+  return { migrated: prepared.updates.length, failedIds: [] }
+}
 // ── The only place a value is decrypted ───────────────────────────────
 
 export type ValueResult =

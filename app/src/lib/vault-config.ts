@@ -1,10 +1,16 @@
-// Self-configuration for the vault, so a deployment needs no hand-made secrets.
+// Self-configuration for the vault.
 //
-//  - Keys: one random master key is generated on first use and kept in D1 (or
-//    supplied as the optional VAULT_MASTER_KEY Worker secret, which wins). The
-//    session-signing secret and the AES-256 credential key are both derived from
-//    it with HKDF under separate labels. Explicit BETTER_AUTH_SECRET +
-//    ENCRYPTION_KEY secrets (older deployments) keep working unchanged.
+//  - Keys: the master key is supplied as the VAULT_MASTER_KEY Worker secret
+//    (base64-encoded 32 random bytes). The session-signing secret and the
+//    AES-256 credential key are both derived from it with HKDF under separate
+//    labels. Explicit BETTER_AUTH_SECRET + ENCRYPTION_KEY secrets (older
+//    deployments) keep working unchanged. Deployments created before the
+//    secret was required may still hold a master key in D1: they keep working
+//    in a flagged 'database' mode (storing new credentials is paused) until
+//    the owner sets VAULT_MASTER_KEY, at which point the stored key is
+//    retired — re-encrypting every sealed value first when the secret
+//    differs. A fresh deployment without the secret fails closed instead of
+//    generating a key into the same database it decrypts.
 //  - GitHub sign-in: created through GitHub's app-manifest flow from /setup. The
 //    client secret is stored encrypted; its creator must match the immutable owner
 //    ID derived by the Workers Builds repository bootstrap.
@@ -62,11 +68,15 @@ export async function deleteSetting(db: Db, key: string): Promise<void> {
 
 // ── keys ──────────────────────────────────────────────────────────
 
+export type VaultKeySource = 'secret' | 'legacy' | 'database'
+
 export interface VaultKeys {
   /** Secret for BetterAuth cookies and runner-session signing (>= 32 chars). */
   authSecret: string
   /** AES-256-GCM key for stored credential values. */
   encryptionKey: CryptoKey
+  /** Where the master key lives. 'database' is the pre-migration legacy mode. */
+  keySource: VaultKeySource
 }
 
 async function derive(master: Uint8Array<ArrayBuffer>, label: string): Promise<Uint8Array<ArrayBuffer>> {
@@ -85,7 +95,7 @@ export async function keysFromMaster(masterBase64: string): Promise<VaultKeys> {
   if (master.byteLength !== 32) throw new Error('master key must be exactly 32 bytes')
   const auth = await derive(master, 'better-auth-secret')
   const encryption = await derive(master, 'credential-encryption')
-  return { authSecret: toB64(auth), encryptionKey: await importEncryptionKey(toB64(encryption)) }
+  return { authSecret: toB64(auth), encryptionKey: await importEncryptionKey(toB64(encryption)), keySource: 'secret' }
 }
 
 let cachedKeys: Promise<VaultKeys> | null = null
@@ -108,22 +118,75 @@ async function resolveKeys(db: Db, e: VaultEnv): Promise<VaultKeys> {
   const legacyKey = nonEmpty(e.ENCRYPTION_KEY)
   if (legacyAuth && legacyKey) {
     if (legacyAuth.length < 32) throw new Error('BETTER_AUTH_SECRET must be at least 32 characters')
-    return { authSecret: legacyAuth, encryptionKey: await importEncryptionKey(legacyKey) }
+    return { authSecret: legacyAuth, encryptionKey: await importEncryptionKey(legacyKey), keySource: 'legacy' }
   }
   const supplied = nonEmpty(e.VAULT_MASTER_KEY)
-  if (supplied) return keysFromMaster(supplied)
-
-  let stored = await getSetting(db, MASTER_KEY)
-  if (!stored) {
-    const fresh = toB64(crypto.getRandomValues(new Uint8Array(32)))
-    // Two cold starts may race; the first insert wins and both read it back.
-    await db.insert(schema.vaultSetting).values({ key: MASTER_KEY, value: fresh, updatedAt: Date.now() }).onConflictDoNothing()
-    stored = await getSetting(db, MASTER_KEY)
+  const stored = await getSetting(db, MASTER_KEY)
+  if (supplied) {
+    const keys = await keysFromMaster(supplied)
+    if (stored) await retireStoredMasterKey(db, stored, keys)
+    return keys
   }
-  if (!stored) throw new Error('could not initialise the vault key')
-  return keysFromMaster(stored)
+  if (stored) {
+    // Pre-migration deployment: the master key still lives in D1. Keep the
+    // vault readable, flag the mode so the UI can warn and the actions can
+    // pause new credential storage until the owner sets the secret.
+    return { ...(await keysFromMaster(stored)), keySource: 'database' }
+  }
+  throw new Error('VAULT_MASTER_KEY is not configured: set it as a Worker secret (base64-encoded 32 random bytes); the vault no longer generates a master key into its own database')
 }
 
+/**
+ * Remove the D1-stored master key once a VAULT_MASTER_KEY secret exists.
+ * Same value: deleting the row is the whole migration. Different value:
+ * every sealed credential and the sealed GitHub client secret are
+ * re-encrypted under the new key first, so nothing becomes unreadable.
+ */
+async function retireStoredMasterKey(db: Db, stored: string, keys: VaultKeys): Promise<void> {
+  const old = await keysFromMaster(stored)
+  if (old.authSecret === keys.authSecret) {
+    await deleteSetting(db, MASTER_KEY)
+    return
+  }
+
+  // Dynamic import: credential-service reaches this module through db.ts,
+  // so a static import would close a module cycle.
+  const { prepareStoredCredentialReencryption } = await import('./credential-service.ts')
+  const prepared = await prepareStoredCredentialReencryption(db, old.encryptionKey, keys.encryptionKey)
+  if (prepared.failedIds.length) {
+    console.error('[vault] master-key migration blocked: ' + prepared.failedIds.length + ' credential value(s) could not be decrypted; D1 master key retained. Credential IDs: ' + prepared.failedIds.join(', '))
+    throw new Error('VAULT_MASTER_KEY migration blocked: one or more stored credentials could not be decrypted with the existing database key. The old key was retained; repair the affected data, then retry.')
+  }
+
+  // The sealed GitHub App secret is part of the same migration and must be
+  // readable before any ciphertext or key row is changed.
+  let resealedGithubSecret: string | null = null
+  const sealedRaw = await getSetting(db, GITHUB_CLIENT_SECRET)
+  if (sealedRaw) {
+    try {
+      const parsed = JSON.parse(sealedRaw) as { e?: unknown; i?: unknown }
+      if (typeof parsed.e !== 'string' || typeof parsed.i !== 'string') throw new Error('invalid sealed secret')
+      const plain = await decryptCredentialValue(old.encryptionKey, SECRET_AAD_ID, 1, parsed.e, parsed.i)
+      const resealed = await encryptCredentialValue(keys.encryptionKey, SECRET_AAD_ID, 1, plain)
+      resealedGithubSecret = JSON.stringify({ e: resealed.encrypted, i: resealed.iv })
+    } catch {
+      throw new Error('VAULT_MASTER_KEY migration blocked: the stored GitHub App secret could not be decrypted and resealed. The old database key was retained; repair the sign-in secret, then retry.')
+    }
+  }
+
+  // D1 batch is transactional: all credential rewrites, the GitHub App
+  // secret reseal, and removal of the old key commit or roll back together.
+  const statements = [
+    ...prepared.updates.map((row) => db.update(schema.credential)
+      .set({ valueEncrypted: row.valueEncrypted, valueIv: row.valueIv, updatedAt: row.updatedAt })
+      .where(orm.eq(schema.credential.id, row.id))),
+    ...(resealedGithubSecret === null ? [] : [db.update(schema.vaultSetting)
+      .set({ value: resealedGithubSecret, updatedAt: Date.now() })
+      .where(orm.eq(schema.vaultSetting.key, GITHUB_CLIENT_SECRET))]),
+    db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, MASTER_KEY)),
+  ]
+  await db.batch(statements as [typeof statements[number], ...typeof statements[number][]])
+}
 // ── GitHub sign-in app + owner ────────────────────────────────────
 
 export interface GithubOAuth { clientId: string; clientSecret: string }

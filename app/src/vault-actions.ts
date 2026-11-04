@@ -152,6 +152,13 @@ async function key() {
   return (await loadVaultKeys(getDb(), env as unknown as VaultEnv)).encryptionKey
 }
 
+async function storageKey() {
+  const keys = await loadVaultKeys(getDb(), env as unknown as VaultEnv)
+  if (keys.keySource === 'database') {
+    throw new Error('ذخیره Credential تا تکمیل مهاجرت امن کلید اصلی متوقف است؛ کلید قدیمی در دیتابیس حفظ شده تا تمام داده‌ها با موفقیت بازرمزگذاری شوند. پس از رفع خطای مهاجرت، Deploy را دوباره اجرا کنید.')
+  }
+  return keys.encryptionKey
+}
 async function mergeStoredAuthFieldsForValidation(
   db: ReturnType<typeof getDb>,
   credentialName: string,
@@ -214,7 +221,7 @@ export async function createCredentialAction(input: { name: string; service: str
     const now = Date.now()
     const db = getDb()
     const preferences = await loadVaultPreferences(db)
-    const result = await createCredential(db, await key(), {
+    const result = await createCredential(db, await storageKey(), {
       name, service: parsed.service, purpose: defaultPurposeForService(parsed.service),
       ...toStoreInput(parsed.form, now, policy, validation, preferences.validationIntervalHours, adapter),
     })
@@ -248,7 +255,7 @@ export async function submitRegistrationAction(token: string, form: StoreForm) {
     }
     const validation = validateStoreInput(storeInput)
     if (!validation.ok) fail(validation)
-    const encryptionKey = await key()
+    const encryptionKey = await storageKey()
 
     const link = await consumeEnrollmentLink(db, parsedToken, now)
     if (!link || link.id !== info.id || link.credentialId !== info.credentialId || link.kind !== 'register') {
@@ -318,7 +325,7 @@ export async function replaceCredentialAction(id: string, form: StoreForm) {
       : parsed
     const validation = await optionalSaveValidation(credential.service, validationForm, policy, adapter)
     const preferences = await loadVaultPreferences(db)
-    const result = await storeCredentialValue(db, await key(), {
+    const result = await storeCredentialValue(db, await storageKey(), {
       credentialId: credential.id,
       ...toStoreInput(parsed, Date.now(), policy, validation, preferences.validationIntervalHours, adapter),
     })

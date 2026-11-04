@@ -3,8 +3,11 @@
 **Goal:** a compromised or prompt-injected model on the runner cannot read a stored secret.
 
 - Secrets never leave the Worker in `proxy` mode; the Worker makes the call. Values are
-  AES-256-GCM encrypted with the row id and key version as AAD; the 32-byte key is derived from a random master key (generated on first use, or
-  supplied as `VAULT_MASTER_KEY`). Without `VAULT_MASTER_KEY` the master key sits in D1 next to the ciphertext.
+  AES-256-GCM encrypted with the row id and key version as AAD; the 32-byte key is derived from a random master key
+  supplied as the `VAULT_MASTER_KEY` Worker secret. Fresh deployments without the secret fail closed. Deployments
+  created before the secret was required may still hold the key in D1 next to the ciphertext; they run in a flagged
+  legacy mode (new credential storage paused) until the owner sets the secret, which migrates all ciphertexts atomically and deletes the
+  database copy only after every credential and the GitHub App secret can be resealed.
 - The runner is **not** a trust boundary: anything on it can use its own session. So the
   vault limits what a session can do: owner-approved hosts only, header allowlist, no redirects,
   response redaction, rate limits, 30-minute sessions, owner-side revoke, append-only audit.
