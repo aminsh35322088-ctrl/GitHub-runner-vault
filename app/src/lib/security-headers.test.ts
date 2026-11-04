@@ -23,10 +23,25 @@ describe('security headers', () => {
     expect(res.headers.get('strict-transport-security')).toBe('max-age=31536000; includeSubDomains')
   })
 
-  test('never overwrites a header a route set explicitly', () => {
+  test('preserves route headers', () => {
     const res = new Response(null, { headers: { 'Referrer-Policy': 'same-origin' } })
-    applySecurityHeaders(res)
-    expect(res.headers.get('referrer-policy')).toBe('same-origin')
-    expect(res.headers.get('content-security-policy')).toBe(CONTENT_SECURITY_POLICY)
+    const secured = applySecurityHeaders(res)
+    expect(secured.headers.get('referrer-policy')).toBe('same-origin')
+    expect(secured.headers.get('content-security-policy')).toBe(CONTENT_SECURITY_POLICY)
+  })
+
+  test('adds baseline headers to immutable redirect responses', () => {
+    const location = 'https://vault.example/login'
+    const redirect = Response.redirect(location, 302)
+
+    const secured = applySecurityHeaders(redirect)
+
+    expect(secured).not.toBe(redirect)
+    expect(secured.status).toBe(302)
+    expect(secured.headers.get('location')).toBe(location)
+    for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+      expect(secured.headers.get(name)).toBe(value)
+    }
+    expect(redirect.headers.has('content-security-policy')).toBe(false)
   })
 })
