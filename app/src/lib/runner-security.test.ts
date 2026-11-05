@@ -34,6 +34,7 @@ const policy: OidcPolicy = {
   allowedRefs: ['refs/heads/main'],
   allowedEvents: ['workflow_dispatch', 'schedule', 'push'],
   allowedWorkflowRefs: ['example-org/runner-project/.github/workflows/runner.yml@refs/heads/main'],
+  repositoryOwnerId: '65',
 }
 
 function goodClaims(overrides: Record<string, unknown> = {}) {
@@ -63,6 +64,26 @@ describe('GitHub OIDC verification', () => {
     expect(result).toMatchObject({ ok: true, identity: { runId: '12345', repository: 'example-org/runner-project', ref: 'refs/heads/main' } })
   })
 
+  test('accepts GitHub immutable subject claims bound to signed owner and repository IDs', async () => {
+    const { privateKey, jwk } = await makeKeyPair()
+    const claims = goodClaims({ sub: 'repo:example-org@65/runner-project@999:ref:refs/heads/main' })
+    const result = await verifyGithubOidc(await sign(privateKey, claims), policy, async () => ({ keys: [jwk] }), NOW)
+    expect(result).toMatchObject({
+      ok: true,
+      identity: { repository: 'example-org/runner-project', repositoryId: '999', repositoryOwnerId: '65' },
+    })
+  })
+
+  test('accepts an exact environment context with GitHub colon escaping', async () => {
+    const { privateKey, jwk } = await makeKeyPair()
+    const claims = goodClaims({
+      environment: 'Production:V2',
+      sub: 'repo:example-org@65/runner-project@999:environment:Production%3AV2',
+    })
+    const result = await verifyGithubOidc(await sign(privateKey, claims), policy, async () => ({ keys: [jwk] }), NOW)
+    expect(result.ok).toBe(true)
+  })
+
   test('automatically bootstraps only an owner-owned main-branch Lab workflow', async () => {
     const { privateKey, jwk } = await makeKeyPair()
     const bootstrap: OidcPolicy = {
@@ -70,7 +91,10 @@ describe('GitHub OIDC verification', () => {
       allowedEvents: ['workflow_dispatch', 'schedule', 'push'], allowedWorkflowRefs: [],
       bootstrap: { ownerId: '65', branch: 'main', workflowFile: 'rdc-lab.yml', allowedEvents: ['workflow_dispatch', 'schedule', 'push'] },
     }
-    const claims = goodClaims({ workflow_ref: 'example-org/runner-project/.github/workflows/rdc-lab.yml@refs/heads/main' })
+    const claims = goodClaims({
+      sub: 'repo:example-org@65/runner-project@999:ref:refs/heads/main',
+      workflow_ref: 'example-org/runner-project/.github/workflows/rdc-lab.yml@refs/heads/main',
+    })
     const result = await verifyGithubOidc(await sign(privateKey, claims), bootstrap, async () => ({ keys: [jwk] }), NOW)
     expect(result).toMatchObject({
       ok: true,
@@ -120,6 +144,11 @@ describe('GitHub OIDC verification', () => {
     ['missing run id', { run_id: undefined }, 'missing run id'],
     ['non-numeric run id', { run_id: 'abc' }, 'missing run id'],
     ['subject names a different repository', { sub: 'repo:attacker/other:ref:refs/heads/main' }, 'subject mismatch'],
+    ['immutable subject has a different owner id', { sub: 'repo:example-org@66/runner-project@999:ref:refs/heads/main' }, 'subject mismatch'],
+    ['immutable subject has a different repository id', { sub: 'repo:example-org@65/runner-project@1000:ref:refs/heads/main' }, 'subject mismatch'],
+    ['subject context differs from the signed ref', { sub: 'repo:example-org/runner-project:ref:refs/heads/other' }, 'subject mismatch'],
+    ['repository owner name claim disagrees', { repository_owner: 'attacker' }, 'wrong repository owner'],
+    ['repository owner id claim is missing', { repository_owner_id: undefined }, 'wrong repository'],
     ['missing subject', { sub: undefined }, 'subject mismatch'],
     ['missing token id', { jti: undefined }, 'missing token id'],
   ]

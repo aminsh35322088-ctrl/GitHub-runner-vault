@@ -17,11 +17,9 @@
 //   VAULT_URL                  vault origin, e.g. https://runner-vault.example.workers.dev
 //   ACTIONS_ID_TOKEN_REQUEST_URL / ACTIONS_ID_TOKEN_REQUEST_TOKEN
 //                              set by GitHub Actions when the job has `permissions: id-token: write`
-//   VAULT_SESSION_FILE         optional cache path for the 30 minute session (default under $XDG_RUNTIME_DIR or /tmp)
+//   Runner Sessions are process-local only; raw session tokens are never persisted to disk.
 
 import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:http'
 
@@ -63,56 +61,6 @@ function origin() {
   return url.origin
 }
 
-function sessionFile() {
-  const uid = os.userInfo().uid
-  const privateDir = env.XDG_RUNTIME_DIR || path.join(os.tmpdir(), 'runner-vault-' + uid)
-  return env.VAULT_SESSION_FILE || path.join(privateDir, 'session-' + uid + '.json')
-}
-
-function openNoFollow(file, flags, mode) {
-  const noFollow = fs.constants.O_NOFOLLOW ?? 0
-  return fs.openSync(file, flags | noFollow, mode)
-}
-
-function readCachedSession(base) {
-  let fd
-  try {
-    fd = openNoFollow(sessionFile(), fs.constants.O_RDONLY)
-    const stat = fs.fstatSync(fd)
-    if (!stat.isFile() || stat.uid !== os.userInfo().uid) return null
-    if ((stat.mode & 0o077) !== 0) fs.fchmodSync(fd, 0o600)
-    const cached = JSON.parse(fs.readFileSync(fd, 'utf8'))
-    if (
-      cached.origin === base &&
-      typeof cached.token === 'string' &&
-      cached.token.length >= 10 &&
-      Number.isFinite(cached.expiresAt) &&
-      cached.expiresAt - Date.now() > 60_000
-    ) return cached
-  } catch { /* no cache; symlinks and unsafe files are ignored */ }
-  finally { if (fd !== undefined) fs.closeSync(fd) }
-  return null
-}
-
-function writeCachedSession(base, token, expiresAt) {
-  let fd
-  try {
-    const file = sessionFile()
-    const directory = path.dirname(file)
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
-    const dirStat = fs.lstatSync(directory)
-    if (!dirStat.isDirectory() || dirStat.isSymbolicLink() || dirStat.uid !== os.userInfo().uid) return
-    if ((dirStat.mode & 0o077) !== 0) fs.chmodSync(directory, 0o700)
-
-    fd = openNoFollow(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC, 0o600)
-    const stat = fs.fstatSync(fd)
-    if (!stat.isFile() || stat.uid !== os.userInfo().uid) return
-    fs.fchmodSync(fd, 0o600)
-    fs.writeFileSync(fd, JSON.stringify({ origin: base, token, expiresAt }))
-  } catch { /* cache is optional; never follow a pre-existing symlink */ }
-  finally { if (fd !== undefined) fs.closeSync(fd) }
-}
-
 async function getOidcToken(base) {
   const url = env.ACTIONS_ID_TOKEN_REQUEST_URL
   const bearer = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN
@@ -134,19 +82,12 @@ async function session(base) {
   if (memorySession && memorySessionExpiresAt - Date.now() > 60_000) return memorySession
   if (sessionInFlight) return sessionInFlight
   sessionInFlight = (async () => {
-    const cached = readCachedSession(base)
-    if (cached) {
-      memorySession = cached.token
-      memorySessionExpiresAt = cached.expiresAt
-      return cached.token
-    }
     const oidc = await getOidcToken(base)
     const res = await fetchWithTimeout(`${base}/api/runner/session`, { method: 'POST', headers: { Authorization: `Bearer ${oidc}` } })
     const body = await res.json().catch(() => ({}))
     if (!res.ok) die(`vault refused the session (${body.error ?? res.status})`)
     memorySession = body.token
     memorySessionExpiresAt = Number(body.expiresAt) || Date.now() + 25 * 60_000
-    writeCachedSession(base, body.token, body.expiresAt)
     return body.token
   })()
   try { return await sessionInFlight } finally { sessionInFlight = null }

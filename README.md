@@ -63,17 +63,15 @@ See `SECURITY.md` for the short version.
 ## How it works
 
 ```
- Runner (GitHub Actions job)                 Cloudflare Worker (this repo)               Upstream
+ Trusted Runner step (not Agent)           Cloudflare Worker (this repo)               Upstream
  ┌──────────────────────────┐   OIDC token   ┌───────────────────────────────┐
- │ agent → client/vault.mjs │ ─────────────▶ │ POST /api/runner/session      │  verify RS256 JWT vs GitHub JWKS,
- │                          │ ◀───────────── │   → 30-min signed session     │  repo id / ref / event pinned
- │                          │                │                               │
- │   use NAME GET <url>     │ ─────────────▶ │ POST /api/runner/use          │
- │                          │                │   decrypt token (in memory)   │ ──── HTTPS + token ───▶ api.example.com
- │   ◀ response (redacted)  │ ◀───────────── │   redact echoed token         │ ◀──────────────────────
- │                          │                │                               │
- │   request --doc doc.json │ ─────────────▶ │ POST /api/runner/registrations│
- │   ◀ one-time owner link  │ ◀───────────── │   creates pending entry + link│
+ │ client/vault.mjs         │ ─────────────▶ │ POST /api/runner/session      │  verify RS256 JWT vs GitHub JWKS,
+ │ memory-only session      │ ◀───────────── │   → 30-min signed session     │  repo id / ref / event pinned
+ │ (destroyed at exit)      │                │                               │
+ │ metadata-only registry   │ ─────────────▶ │ GET /api/runner/registry      │
+ │                         │ ◀───────────── │ no secret values returned     │
+ │                         │                │                               │
+ │ Agent operations         │ ── disabled ─▶│ broker not deployed yet       │
  └──────────────────────────┘                └───────────────▲───────────────┘
                                                              │ GitHub OAuth (owner only)
                                               Owner browser ─┘  /vault  requests · register · detail · audit · settings
@@ -196,9 +194,12 @@ Every call is audited with the worker-observed result, the purpose the agent gav
 
 ## Runner client
 
-`client/vault.mjs` is one zero-dependency file (Node 18+). It reads `VAULT_URL` and, inside a GitHub Actions job with
-`permissions: id-token: write`, uses `ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN` to get an OIDC token and caches the 30-minute
-session in a `0600` file.
+`client/vault.mjs` is one zero-dependency file (Node 18+). It reads `VAULT_URL` and, inside a trusted GitHub Actions
+step with `permissions: id-token: write`, uses `ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN` to get an OIDC token. The resulting
+30-minute Runner Session exists only in that CLI process's memory and is never read from or written to disk. Each new
+CLI process must establish its own session through the trusted OIDC requester or a future credential broker. A
+`0600` file is not an isolation boundary when RDC/Agent processes share the same Unix UID, so persistent session caching
+has been removed.
 
 ```bash
 export VAULT_URL=https://<your-vault-origin>
@@ -292,7 +293,7 @@ Every merge to `main` that changes `app/**`, `client/**`, or the root pnpm manif
 
 1. Open the Worker URL (`https://<name>.<you>.workers.dev`) and choose *Create the GitHub App* using the personal GitHub account that owns the deployed repository (or matches the explicitly configured owner ID). The app is always named `Runner Vault <your numeric GitHub ID>` — the name is fixed per account, so setup never creates a differently-named app on a later run. If GitHub reports that the name is taken, the app already exists under your account: delete it under **GitHub Settings → Developer settings → GitHub Apps** and run setup again, and it is recreated under the same name.
 2. Sign in to the owner dashboard. No Runner repository form is required: the first valid OIDC run from the owner's `main/.github/workflows/rdc-lab.yml` workflow proves the owner identity and atomically pins the repository ID. Later runs must match the pinned repository, owner, branch, event and workflow. Pull-request events are refused.
-3. Nothing to configure in the Runner Lab: its workflow reads `deployment.json` from this repository and connects automatically — see the [Runner Lab README](https://github.com/aminsh35322088-ctrl/GitHub-Runner-Lab). The Lab downloads the client at the commit recorded in `deployment.json`, obtains an OIDC token, establishes a short-lived session and reads the registry before starting RDC. No runner token or manual policy value is needed.
+3. Nothing to configure in the Runner Lab: its workflow reads `deployment.json` from this repository and connects automatically — see the [Runner Lab README](https://github.com/aminsh35322088-ctrl/GitHub-Runner-Lab). The trusted Lab step obtains an OIDC token, establishes a short-lived memory-only session and reads metadata. `start-rdc.sh` scrubs the OIDC requester before RDC starts; no session file is shared with RDC. Until a separately verified credential broker is deployed, Agent-side Vault operations remain unavailable by design. No runner PAT or manual policy value is needed.
 
 ### Where the key lives
 
