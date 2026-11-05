@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest'
 import * as orm from 'drizzle-orm'
 import { getDb, schema } from 'db'
 import { app } from './app.tsx'
-import { saveVaultAccessEnabled } from './lib/vault-observability.ts'
+import { loadVaultAccessState, saveVaultAccessEnabled } from './lib/vault-observability.ts'
 import { parseRunnerBody } from './runner-api.ts'
 import { MAX_REQUEST_BODY } from './lib/proxy.ts'
 
@@ -39,6 +39,8 @@ describe('runner HTTP surface', () => {
       .where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled')).limit(1)
     const [previousRevocation] = await db.select().from(schema.vaultSetting)
       .where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before')).limit(1)
+    const [previousEpoch] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'vault_access_epoch')).limit(1)
     const now = Date.now()
     const metadata = btoa(JSON.stringify({
       name: 'CF_TOKEN', method: 'GET', url: 'https://api.cloudflare.com/client/v4/user',
@@ -73,8 +75,60 @@ describe('runner HTTP surface', () => {
     } finally {
       await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled'))
       await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before'))
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_epoch'))
       if (previousAccess) await db.insert(schema.vaultSetting).values(previousAccess)
       if (previousRevocation) await db.insert(schema.vaultSetting).values(previousRevocation)
+      if (previousEpoch) await db.insert(schema.vaultSetting).values(previousEpoch)
+    }
+  })
+
+  test('global access epoch advances on disable and survives re-enable', async () => {
+    const db = getDb()
+    const keys = ['vault_access_enabled', 'runner_revoked_before', 'vault_access_epoch']
+    const previous = await db.select().from(schema.vaultSetting).where(orm.inArray(schema.vaultSetting.key, keys))
+    const now = Date.now()
+    try {
+      const before = await loadVaultAccessState(db)
+      await saveVaultAccessEnabled(db, false, now)
+      const disabled = await loadVaultAccessState(db)
+      expect(disabled).toEqual({ enabled: false, epoch: before.epoch + 1 })
+
+      await saveVaultAccessEnabled(db, true, now + 1)
+      const reenabled = await loadVaultAccessState(db)
+      expect(reenabled).toEqual({ enabled: true, epoch: disabled.epoch })
+
+      await saveVaultAccessEnabled(db, false, now + 2)
+      const disabledAgain = await loadVaultAccessState(db)
+      expect(disabledAgain).toEqual({ enabled: false, epoch: disabled.epoch + 1 })
+    } finally {
+      await db.delete(schema.vaultSetting).where(orm.inArray(schema.vaultSetting.key, keys))
+      if (previous.length) await db.insert(schema.vaultSetting).values(previous)
+    }
+  })
+
+  test('a malformed Vault access epoch fails the Runner gate closed', async () => {
+    const db = getDb()
+    const [previousAccess] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled')).limit(1)
+    const [previousEpoch] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'vault_access_epoch')).limit(1)
+    try {
+      await saveVaultAccessEnabled(db, true, Date.now())
+      await db.insert(schema.vaultSetting).values({
+        key: 'vault_access_epoch', value: 'not-an-integer', updatedAt: Date.now(),
+      }).onConflictDoUpdate({
+        target: schema.vaultSetting.key,
+        set: { value: 'not-an-integer', updatedAt: Date.now() },
+      })
+      const res = await app.handle(new Request('https://vault.test/api/runner/registry'))
+      expect(res.status).toBe(503)
+      expect(res.headers.get('cache-control')).toBe('no-store')
+      expect(await res.json()).toEqual({ error: 'vault_access_unavailable' })
+    } finally {
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled'))
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_epoch'))
+      if (previousAccess) await db.insert(schema.vaultSetting).values(previousAccess)
+      if (previousEpoch) await db.insert(schema.vaultSetting).values(previousEpoch)
     }
   })
 

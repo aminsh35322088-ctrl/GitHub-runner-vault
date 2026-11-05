@@ -13,7 +13,7 @@
 - The runner is **not** a trust boundary: anything on it can use its own session. So the
   vault limits what a session can do: owner-approved hosts only, header allowlist, no redirects,
   response redaction, rate limits, 30-minute sessions, owner-side revoke, append-only audit.
-- The owner can disable all Runner API access with the global Vault Access setting. The Worker checks this flag directly from D1 on every Runner request (not through the preferences cache); a failed setting read denies access. Disabling atomically advances the existing Session revocation cutoff, so re-enabling never revives previously issued Sessions. Owner dashboard access remains available while Runner access is disabled.
+- The owner can disable all Runner API access with the global Vault Access setting. The Worker reads the enabled flag and monotonic access epoch together from D1 on every Runner request (not through the preferences cache); a failed or malformed read denies access. Disabling atomically advances the access epoch and the existing Session revocation cutoff. Every issued Session is signed with its epoch, so sessions from before a disable remain invalid after re-enable, including when different Worker isolates have skewed clocks. Owner dashboard access remains available while Runner access is disabled.
 - Runner identity is GitHub OIDC (RS256 only) restricted by repository id, ref and event.
   It authenticates the workflow run, not an individual process.
 - The only supported deployment route is the repository's **Deploy to Cloudflare** GitHub Actions workflow,

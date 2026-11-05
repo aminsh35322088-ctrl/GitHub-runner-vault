@@ -79,6 +79,8 @@ export type RunnerDeps = {
   origin: string
   fetchFn: typeof fetch
   now: number
+  /** Monotonic global Vault-access generation read by the uncached HTTP gate. */
+  vaultAccessEpoch?: number
   /** Client IP as reported by the platform (cf-connecting-ip), when known. */
   clientIp?: string
   proxyTimeoutMs?: number
@@ -170,7 +172,7 @@ export async function createSession(deps: RunnerDeps, authorization: string | nu
   })
   if (!reservation) return fail(429, 'rate_limited')
 
-  const issued = await issueRunnerSession(deps.sessionKey, verified.identity, deps.now)
+  const issued = await issueRunnerSession(deps.sessionKey, verified.identity, deps.now, deps.vaultAccessEpoch ?? 0)
   await scheduleBackgroundWrites(deps, [audit(deps.db, {
     action: 'session_issued', actor: issued.session.sub, result: 'ok',
     detail: `${verified.identity.event} ${verified.identity.ref} run ${verified.identity.runId}`, now: deps.now,
@@ -188,7 +190,11 @@ async function authenticate(deps: RunnerDeps, authorization: string | null): Pro
     getRunnerRevokedBefore(deps.db),
     verifyRunnerSessionSignature(deps.sessionKey, token, deps.now),
   ])
-  if (!result.ok || result.session.iat <= revokedBefore) return { ok: false, res: fail(401, 'unauthorized') }
+  if (!result.ok
+    || result.session.accessEpoch !== (deps.vaultAccessEpoch ?? 0)
+    || result.session.iat <= revokedBefore) {
+    return { ok: false, res: fail(401, 'unauthorized') }
+  }
   return { ok: true, session: result.session }
 }
 

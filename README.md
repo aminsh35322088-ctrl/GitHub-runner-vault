@@ -341,7 +341,7 @@ A deployment needs exactly one GitHub repository secret (`CLOUDFLARE_API_TOKEN`)
 
 ## Operations
 
-- **Disable all Runner access:** `/vault/settings` → *Vault Access* → *Disable Vault Access*. This blocks new Runner API requests and revokes every existing Session. Re-enabling does not restore old Sessions; the Runner must authenticate again.
+- **Disable all Runner access:** `/vault/settings` → *Vault Access* → *Disable Vault Access*. This blocks Runner API requests and atomically advances the global access epoch plus the Session revocation cutoff. Re-enabling does not restore old Sessions; each Runner must authenticate again and obtain a Session for the current epoch.
 - **Revoke runner sessions only:** `/vault/settings` → *Runner sessions* → *Revoke all runner sessions*. Use this when you need to invalidate Sessions without disabling the Vault.
 - **Rotate a credential:** open it → *Replace value*. The old value is overwritten.
 - **Disable one credential:** open it → *Disable* or *Hide*. The change takes effect on the next request.

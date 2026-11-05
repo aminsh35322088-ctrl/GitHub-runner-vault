@@ -4,7 +4,7 @@ import {
   cachedJwksSource, GITHUB_OIDC_ISSUER, policyFromEnv, verifyGithubOidc, type JwksSource, type OidcPolicy, resetOidcVerificationKeyCache,
 } from './oidc.ts'
 import {
-  deriveSessionKey, getRunnerRevokedBefore, issueRunnerSession, revokeRunnerSessions, SESSION_TTL_MS, verifyRunnerSession, resetRunnerSessionKeyCache,
+  deriveSessionKey, getRunnerRevokedBefore, issueRunnerSession, revokeRunnerSessions, SESSION_TTL_MS, verifyRunnerSession, verifyRunnerSessionSignature, resetRunnerSessionKeyCache,
 } from './runner-session.ts'
 import { MAX_REQUEST_BODY, MAX_RESPONSE_BODY, redact, runProxy, secretForms, validateTarget } from './proxy.ts'
 
@@ -277,6 +277,30 @@ describe('runner sessions', () => {
     expect(expiresAt).toBe(NOW + SESSION_TTL_MS)
     const verified = await verifyRunnerSession(key, token, NOW + 1000, 0)
     expect(verified).toMatchObject({ ok: true, session: { repository: 'a/b', runId: '55', sub: 'runner:a/b#55.2' } })
+  })
+
+  test('embeds the global Vault access epoch in the signed session', async () => {
+    const key = await deriveSessionKey(SECRET_32)
+    const issued = await issueRunnerSession(key, identity, NOW, 3)
+    const verified = await verifyRunnerSessionSignature(key, issued.token, NOW + 1)
+    expect(verified.ok && verified.session.accessEpoch).toBe(3)
+  })
+
+  test('legacy sessions default to epoch zero and malformed epochs are rejected', async () => {
+    const key = await deriveSessionKey(SECRET_32)
+    const legacy = await issueRunnerSession(key, identity, NOW, 0)
+    const [prefix, payload] = legacy.token.split('.')
+    const parsed = JSON.parse(atob(payload!.replace(/-/g, '+').replace(/_/g, '/')))
+    delete parsed.accessEpoch
+    const legacyPayload = b64url(JSON.stringify(parsed))
+    const legacySignature = b64url(new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(legacyPayload))))
+    const legacyVerified = await verifyRunnerSessionSignature(key, `${prefix}.${legacyPayload}.${legacySignature}`, NOW + 1)
+    expect(legacyVerified.ok && legacyVerified.session.accessEpoch).toBe(0)
+
+    const malformedPayload = b64url(JSON.stringify({ ...parsed, accessEpoch: -1 }))
+    const malformedSignature = b64url(new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(malformedPayload))))
+    expect(await verifyRunnerSessionSignature(key, `${prefix}.${malformedPayload}.${malformedSignature}`, NOW + 1))
+      .toEqual({ ok: false, error: 'invalid session' })
   })
 
   test('expires after the ttl', async () => {

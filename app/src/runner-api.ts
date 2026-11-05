@@ -12,7 +12,7 @@ import { deriveSessionKey } from './lib/runner-session.ts'
 import { createSession, registry, integrations, requestCredential, useCredential, type RunnerDeps } from './lib/runner-core.ts'
 import { CLOUDFLARE_IP_ADDRESS_HEADERS } from './lib/auth-config.ts'
 import { getRequestOrigin } from './db.ts'
-import { loadVaultAccessEnabled, loadVaultPreferences } from './lib/vault-observability.ts'
+import { loadVaultAccessState, loadVaultPreferences } from './lib/vault-observability.ts'
 
 const jwks = cachedJwksSource()
 
@@ -30,7 +30,7 @@ function clientIp(request: Request): string | undefined {
   return undefined
 }
 
-async function buildDeps(request: Request, includeOidcPolicy: boolean, waitUntil: RunnerDeps['waitUntil'] | undefined, db: ReturnType<typeof getDb>, now: number): Promise<RunnerDeps> {
+async function buildDeps(request: Request, includeOidcPolicy: boolean, waitUntil: RunnerDeps['waitUntil'] | undefined, db: ReturnType<typeof getDb>, now: number, vaultAccessEpoch: number): Promise<RunnerDeps> {
   const e = env as unknown as Record<string, unknown>
   const origin = getRequestOrigin(request)
   const keys = await loadVaultKeys(db, e as VaultEnv)
@@ -44,6 +44,7 @@ async function buildDeps(request: Request, includeOidcPolicy: boolean, waitUntil
     origin,
     fetchFn: fetch,
     now,
+    vaultAccessEpoch,
     ...(ip ? { clientIp: ip } : {}),
     getVaultPreferences: () => loadVaultPreferences(db),
     ...(waitUntil ? { waitUntil } : {}),
@@ -58,16 +59,16 @@ async function run(
   options: { includeOidcPolicy?: boolean } = {},
   waitUntil?: RunnerDeps['waitUntil'],
 ) {
-  // Capture the request time before the access read. If disable races with a
-  // session exchange, its revocation cutoff is later than (or equal to) this
-  // timestamp, so that in-flight exchange cannot mint a surviving Session.
   const requestNow = Date.now()
   let db: ReturnType<typeof getDb>
+  let vaultAccessEpoch = 0
   try {
     db = getDb()
-    if (!await loadVaultAccessEnabled(db)) {
+    const access = await loadVaultAccessState(db)
+    if (!access.enabled) {
       return json({ error: 'vault_disabled' }, { status: 403, headers: { 'Cache-Control': 'no-store' } })
     }
+    vaultAccessEpoch = access.epoch
   } catch {
     // Availability-control reads must fail closed, never assume enabled.
     return json({ error: 'vault_access_unavailable' }, { status: 503, headers: { 'Cache-Control': 'no-store' } })
@@ -75,7 +76,7 @@ async function run(
 
   let deps: RunnerDeps
   try {
-    deps = await buildDeps(request, options.includeOidcPolicy === true, waitUntil, db, requestNow)
+    deps = await buildDeps(request, options.includeOidcPolicy === true, waitUntil, db, requestNow, vaultAccessEpoch)
   } catch {
     return json({ error: 'vault_not_configured' }, { status: 503, headers: { 'Cache-Control': 'no-store' } })
   }

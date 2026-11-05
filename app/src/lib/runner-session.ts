@@ -25,6 +25,8 @@ export type RunnerSession = {
   workflow: string
   iat: number
   exp: number
+  /** Monotonic global Vault-access generation; legacy tokens are generation zero. */
+  accessEpoch: number
 }
 
 function b64url(bytes: Uint8Array): string {
@@ -69,7 +71,9 @@ export async function issueRunnerSession(
   key: CryptoKey,
   identity: RunnerIdentity,
   nowMs: number,
+  accessEpoch = 0,
 ): Promise<{ token: string; expiresAt: number; session: RunnerSession }> {
+  if (!Number.isSafeInteger(accessEpoch) || accessEpoch < 0) throw new Error('Vault access epoch is invalid')
   const session: RunnerSession = {
     sub: `runner:${identity.repository}#${identity.runId}.${identity.runAttempt}`,
     repository: identity.repository,
@@ -78,6 +82,7 @@ export async function issueRunnerSession(
     workflow: identity.workflow,
     iat: nowMs,
     exp: nowMs + SESSION_TTL_MS,
+    accessEpoch,
   }
   const payload = b64url(new TextEncoder().encode(JSON.stringify(session)))
   const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload)))
@@ -99,7 +104,10 @@ export async function verifyRunnerSessionSignature(key: CryptoKey, token: string
   if (!valid) return { ok: false, error: 'invalid session' }
   let session: RunnerSession
   try {
-    session = JSON.parse(new TextDecoder().decode(fromB64url(parts[1]!))) as RunnerSession
+    const parsed = JSON.parse(new TextDecoder().decode(fromB64url(parts[1]!))) as Record<string, unknown>
+    const accessEpoch = parsed.accessEpoch === undefined ? 0 : parsed.accessEpoch
+    if (!Number.isSafeInteger(accessEpoch) || (accessEpoch as number) < 0) return { ok: false, error: 'invalid session' }
+    session = { ...parsed, accessEpoch: accessEpoch as number } as RunnerSession
   } catch {
     return { ok: false, error: 'invalid session' }
   }
