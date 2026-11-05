@@ -31,6 +31,8 @@ export type OidcPolicy = {
   allowedRefs: string[]
   allowedEvents: string[]
   allowedWorkflowRefs: string[]
+  /** Numeric owner id. Required outside bootstrap (verification fails closed
+   * without it); bootstrap policies carry the owner id in `bootstrap`. */
   repositoryOwnerId?: string
   bootstrap?: {
     ownerId: string
@@ -289,7 +291,7 @@ export async function verifyGithubOidc(
     if (!repositoryOwner || !sameRepository(repository.split('/')[0]!, repositoryOwner)) {
       return { ok: false, error: 'wrong repository owner' }
     }
-    if (policy.repositoryOwnerId && repositoryOwnerId !== policy.repositoryOwnerId) {
+    if (!policy.repositoryOwnerId || repositoryOwnerId !== policy.repositoryOwnerId) {
       return { ok: false, error: 'wrong repository owner' }
     }
     if (!policy.allowedRefs.includes(ref)) return { ok: false, error: 'ref not allowed' }
@@ -358,13 +360,10 @@ export function policyFromEnv(env: Record<string, unknown>, audience: string): O
   }
   const allowedWorkflowRefs = requiredList('RUNNER_ALLOWED_WORKFLOW_REFS')
   const repositoryOwnerId = typeof env.RUNNER_REPOSITORY_OWNER_ID === 'string' && /^\d{1,20}$/.test(env.RUNNER_REPOSITORY_OWNER_ID.trim())
-    ? env.RUNNER_REPOSITORY_OWNER_ID.trim() : undefined
-  if (env.RUNNER_REPOSITORY_OWNER_ID !== undefined && !repositoryOwnerId) {
-    throw new Error('RUNNER_REPOSITORY_OWNER_ID must be a numeric owner id')
-  }
+    ? env.RUNNER_REPOSITORY_OWNER_ID.trim() : ''
+  if (!repositoryOwnerId) throw new Error('RUNNER_REPOSITORY_OWNER_ID must be the numeric owner id')
   if (allowedWorkflowRefs.some((item) => !item.includes('/.github/workflows/') || !item.includes('@'))) {
     throw new Error('RUNNER_ALLOWED_WORKFLOW_REFS must contain exact workflow refs')
   }
-  return { audience, repository, repositoryId, allowedRefs, allowedEvents, allowedWorkflowRefs,
-    ...(repositoryOwnerId ? { repositoryOwnerId } : {}) }
+  return { audience, repository, repositoryId, repositoryOwnerId, allowedRefs, allowedEvents, allowedWorkflowRefs }
 }

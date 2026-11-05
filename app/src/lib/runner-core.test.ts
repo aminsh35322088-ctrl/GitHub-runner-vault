@@ -98,7 +98,7 @@ const doc = {
 }
 
 const policy: OidcPolicy = {
-  audience: 'https://vault.test', repository: 'o/r', repositoryId: '1',
+  audience: 'https://vault.test', repository: 'o/r', repositoryId: '1', repositoryOwnerId: '2',
   allowedRefs: ['refs/heads/main'], allowedEvents: ['workflow_dispatch', 'schedule', 'push'],
   allowedWorkflowRefs: ['o/r/.github/workflows/runner.yml@refs/heads/main'],
 }

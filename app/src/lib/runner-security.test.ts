@@ -146,6 +146,8 @@ describe('GitHub OIDC verification', () => {
     ['subject names a different repository', { sub: 'repo:attacker/other:ref:refs/heads/main' }, 'subject mismatch'],
     ['immutable subject has a different owner id', { sub: 'repo:example-org@66/runner-project@999:ref:refs/heads/main' }, 'subject mismatch'],
     ['immutable subject has a different repository id', { sub: 'repo:example-org@65/runner-project@1000:ref:refs/heads/main' }, 'subject mismatch'],
+    ['immutable subject names a different repository', { sub: 'repo:example-org@65/other-project@999:ref:refs/heads/main' }, 'subject mismatch'],
+    ['immutable subject context differs from the signed ref', { sub: 'repo:example-org@65/runner-project@999:ref:refs/heads/other' }, 'subject mismatch'],
     ['subject context differs from the signed ref', { sub: 'repo:example-org/runner-project:ref:refs/heads/other' }, 'subject mismatch'],
     ['repository owner name claim disagrees', { repository_owner: 'attacker' }, 'wrong repository owner'],
     ['repository owner id claim is missing', { repository_owner_id: undefined }, 'wrong repository'],
@@ -156,6 +158,14 @@ describe('GitHub OIDC verification', () => {
     const { privateKey, jwk } = await makeKeyPair()
     const result = await verifyGithubOidc(await sign(privateKey, goodClaims(overrides)), policy, async () => ({ keys: [jwk] }), NOW)
     expect(result).toEqual({ ok: false, error })
+  })
+
+  test('rejects a valid token when the policy does not pin a repository owner id', async () => {
+    const { privateKey, jwk } = await makeKeyPair()
+    const unpinned: OidcPolicy = { ...policy, repositoryOwnerId: undefined }
+    const token = await sign(privateKey, goodClaims())
+    expect(await verifyGithubOidc(token, unpinned, async () => ({ keys: [jwk] }), NOW))
+      .toEqual({ ok: false, error: 'wrong repository owner' })
   })
 
   test('allows a main push from the exact approved workflow', async () => {
@@ -272,6 +282,7 @@ describe('GitHub OIDC verification', () => {
     const configured = {
       RUNNER_REPOSITORY: 'example-org/runner-project',
       RUNNER_REPOSITORY_ID: '42',
+      RUNNER_REPOSITORY_OWNER_ID: '65',
       RUNNER_ALLOWED_REFS: 'refs/heads/main,refs/heads/release',
       RUNNER_ALLOWED_EVENTS: 'workflow_dispatch,push',
       RUNNER_ALLOWED_WORKFLOW_REFS: 'example-org/runner-project/.github/workflows/runner.yml@refs/heads/main',
@@ -280,6 +291,7 @@ describe('GitHub OIDC verification', () => {
       audience: 'https://vault.example.test',
       repository: 'example-org/runner-project',
       repositoryId: '42',
+      repositoryOwnerId: '65',
       allowedRefs: ['refs/heads/main', 'refs/heads/release'],
       allowedEvents: ['workflow_dispatch', 'push'],
       allowedWorkflowRefs: ['example-org/runner-project/.github/workflows/runner.yml@refs/heads/main'],
