@@ -82,7 +82,11 @@ export async function saveVaultAccessEnabled(db: Db, enabled: boolean, now = Dat
           THEN CAST(MAX(CAST(vault_setting.value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)
         ELSE excluded.value
       END,
-      updated_at = excluded.updated_at
+      updated_at = CASE
+        WHEN excluded.key = 'runner_revoked_before'
+          THEN MAX(vault_setting.updated_at, excluded.updated_at)
+        ELSE excluded.updated_at
+      END
   `)
 }
 
