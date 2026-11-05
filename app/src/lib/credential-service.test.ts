@@ -8,7 +8,8 @@ import {
   storeCredentialValue, MAX_TEMPORARY_MS,
 } from './credential-service.ts'
 import { consumeEnrollmentLink, listLatestRegistrationLinks, peekEnrollmentLink } from './enrollment.ts'
-import { createNotification, DEFAULT_VAULT_PREFERENCES, getUsageAnalytics, listCredentialValidationHistory, listNotifications, listRunnerIntegrationMetadata, listUnreadRegistrationNotificationIds, loadVaultPreferences, markNotificationIdsRead, markRegistrationNotificationsRead, recordCredentialUsage, recordRuntimeCredentialEvidence, resetVaultPreferencesCache, runScheduledCredentialValidation, saveVaultPreferences, validateStoredCredentialNow } from './vault-observability.ts'
+import { createNotification, DEFAULT_VAULT_PREFERENCES, getUsageAnalytics, listCredentialValidationHistory, listNotifications, listRunnerIntegrationMetadata, listUnreadRegistrationNotificationIds, loadVaultAccessEnabled, loadVaultPreferences, markNotificationIdsRead, markRegistrationNotificationsRead, recordCredentialUsage, recordRuntimeCredentialEvidence, resetVaultPreferencesCache, runScheduledCredentialValidation, saveVaultAccessEnabled, saveVaultPreferences, validateStoredCredentialNow } from './vault-observability.ts'
+import { getRunnerRevokedBefore } from './runner-session.ts'
 
 const KEY_B64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
 const SECRET = 'cfut_SUPERSECRETVALUE_123456789'
@@ -78,6 +79,56 @@ describe('Vault preferences', () => {
       expect(await loadVaultPreferences(db, now + 3)).toEqual(next)
     } finally {
       resetVaultPreferencesCache()
+    }
+  })
+})
+
+describe('global Vault access', () => {
+  test('defaults to enabled, bypasses preferences cache, revokes on disable and never restores old sessions', async () => {
+    const { db, now } = await setup()
+    const [previousAccess] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled')).limit(1)
+    const [previousRevocation] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before')).limit(1)
+    try {
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled'))
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before'))
+      expect(await loadVaultAccessEnabled(db)).toBe(true)
+
+      // A warm, unrelated preferences cache must not mask an access change.
+      resetVaultPreferencesCache()
+      await loadVaultPreferences(db, now)
+      await saveVaultAccessEnabled(db, false, 1)
+      expect(await loadVaultAccessEnabled(db)).toBe(false)
+      expect(await getRunnerRevokedBefore(db)).toBe(1)
+
+      await saveVaultAccessEnabled(db, true, 2)
+      expect(await loadVaultAccessEnabled(db)).toBe(true)
+      expect(await getRunnerRevokedBefore(db)).toBe(1)
+    } finally {
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled'))
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before'))
+      if (previousAccess) await db.insert(schema.vaultSetting).values(previousAccess)
+      if (previousRevocation) await db.insert(schema.vaultSetting).values(previousRevocation)
+      resetVaultPreferencesCache()
+    }
+  })
+
+  test('fails closed for an unrecognized persisted access value', async () => {
+    const { db, now } = await setup()
+    const [previous] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled')).limit(1)
+    try {
+      await db.insert(schema.vaultSetting).values({
+        key: 'vault_access_enabled', value: 'enabled-ish', updatedAt: now,
+      }).onConflictDoUpdate({
+        target: schema.vaultSetting.key,
+        set: { value: 'enabled-ish', updatedAt: now },
+      })
+      expect(await loadVaultAccessEnabled(db)).toBe(false)
+    } finally {
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled'))
+      if (previous) await db.insert(schema.vaultSetting).values(previous)
     }
   })
 })
