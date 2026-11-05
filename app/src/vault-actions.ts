@@ -21,7 +21,7 @@ import { defaultPurposeForService, presetForService } from './lib/presets.ts'
 import { adapterHost, effectiveServiceAdapter, serviceAdapterFor, serviceAdapterFromDocument } from './lib/service-adapter.ts'
 import { validateProviderToken, type CredentialValidationReport } from './lib/credential-validation.ts'
 import { publicCredentialActionError } from './lib/public-action-error.ts'
-import { listUnreadRegistrationNotificationIds, loadVaultPreferences, markAllNotificationsRead, markNotificationIdsRead, markNotificationRead, markRegistrationNotificationsRead, saveVaultPreferences, validateStoredCredentialNow, type VaultPreferences } from './lib/vault-observability.ts'
+import { listUnreadRegistrationNotificationIds, loadVaultAccessEnabled, loadVaultPreferences, markAllNotificationsRead, markNotificationIdsRead, markNotificationRead, markRegistrationNotificationsRead, saveVaultAccessEnabled, saveVaultPreferences, validateStoredCredentialNow, type VaultPreferences } from './lib/vault-observability.ts'
 
 type CredentialActionResult<T> = { ok: true; value: T } | { ok: false; error: string }
 
@@ -363,6 +363,14 @@ export async function addExternalAction(input: { name: string; service: string }
   })
   if (!r.ok) fail(r)
   return { ok: true as const }
+}
+
+export async function setVaultAccessEnabledAction(enabled: boolean) {
+  await requireOwner()
+  const next = z.boolean().parse(enabled)
+  const db = getDb()
+  await saveVaultAccessEnabled(db, next, Date.now())
+  return { ok: true as const, enabled: await loadVaultAccessEnabled(db) }
 }
 
 export async function revokeRunnerSessionsAction() {
