@@ -130,6 +130,27 @@ describe('global Vault access', () => {
     }
   })
 
+  test('never moves the Session revocation cutoff backward', async () => {
+    const { db, now } = await setup()
+    const [previous] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before')).limit(1)
+    try {
+      const futureCutoff = now + 60_000
+      await db.insert(schema.vaultSetting).values({
+        key: 'runner_revoked_before', value: String(futureCutoff), updatedAt: futureCutoff,
+      }).onConflictDoUpdate({
+        target: schema.vaultSetting.key,
+        set: { value: String(futureCutoff), updatedAt: futureCutoff },
+      })
+
+      await saveVaultAccessEnabled(db, false, now)
+      expect(await getRunnerRevokedBefore(db)).toBe(futureCutoff)
+    } finally {
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before'))
+      if (previous) await db.insert(schema.vaultSetting).values(previous)
+    }
+  })
+
   test('fails closed for an unrecognized persisted access value', async () => {
     const { db, now } = await setup()
     const [previous] = await db.select().from(schema.vaultSetting)
