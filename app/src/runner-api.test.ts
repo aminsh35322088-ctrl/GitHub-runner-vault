@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'vitest'
+import * as orm from 'drizzle-orm'
+import { getDb, schema } from 'db'
 import { app } from './app.tsx'
+import { saveVaultAccessEnabled } from './lib/vault-observability.ts'
 import { parseRunnerBody } from './runner-api.ts'
 import { MAX_REQUEST_BODY } from './lib/proxy.ts'
 
@@ -28,6 +31,51 @@ describe('runner HTTP surface', () => {
     expect(res.status).toBe(401)
     expect(res.headers.get('cache-control')).toBe('no-store')
     expect(await res.json()).toEqual({ error: 'unauthorized' })
+  })
+
+  test('global Vault disable blocks every Runner endpoint before credential handling', async () => {
+    const db = getDb()
+    const [previousAccess] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled')).limit(1)
+    const [previousRevocation] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before')).limit(1)
+    const now = Date.now()
+    const metadata = btoa(JSON.stringify({
+      name: 'CF_TOKEN', method: 'GET', url: 'https://api.cloudflare.com/client/v4/user',
+    })).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
+    const requests: Request[] = [
+      new Request('https://vault.test/api/runner/session', { method: 'POST' }),
+      new Request('https://vault.test/api/runner/registry'),
+      new Request('https://vault.test/api/runner/integrations'),
+      new Request('https://vault.test/api/runner/registrations', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'CF_TOKEN', service: 'Cloudflare', doc: {} }),
+      }),
+      new Request('https://vault.test/api/runner/use', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'CF_TOKEN', method: 'GET', url: 'https://api.cloudflare.com/client/v4/user' }),
+      }),
+      new Request('https://vault.test/api/runner/use', {
+        method: 'POST', headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-Vault-Proxy-Metadata': metadata,
+        }, body: 'ignored',
+      }),
+    ]
+    try {
+      await saveVaultAccessEnabled(db, false, now)
+      for (const request of requests) {
+        const res = await app.handle(request)
+        expect(res.status, request.method + ' ' + new URL(request.url).pathname).toBe(403)
+        expect(res.headers.get('cache-control')).toBe('no-store')
+        expect(await res.json()).toEqual({ error: 'vault_disabled' })
+      }
+    } finally {
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled'))
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before'))
+      if (previousAccess) await db.insert(schema.vaultSetting).values(previousAccess)
+      if (previousRevocation) await db.insert(schema.vaultSetting).values(previousRevocation)
+    }
   })
 
   test('malformed and non-object JSON bodies return a generic 400', async () => {
