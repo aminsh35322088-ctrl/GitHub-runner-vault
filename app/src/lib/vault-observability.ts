@@ -76,7 +76,13 @@ export async function saveVaultAccessEnabled(db: Db, enabled: boolean, now = Dat
   await db.run(orm.sql`
     INSERT INTO vault_setting (key, value, updated_at)
     VALUES ${orm.sql.join(writes, orm.sql`, `)}
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    ON CONFLICT(key) DO UPDATE SET
+      value = CASE
+        WHEN excluded.key = 'runner_revoked_before'
+          THEN CAST(MAX(CAST(vault_setting.value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)
+        ELSE excluded.value
+      END,
+      updated_at = excluded.updated_at
   `)
 }
 
