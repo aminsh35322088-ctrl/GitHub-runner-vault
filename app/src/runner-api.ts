@@ -12,7 +12,7 @@ import { deriveSessionKey } from './lib/runner-session.ts'
 import { createSession, registry, integrations, requestCredential, useCredential, type RunnerDeps } from './lib/runner-core.ts'
 import { CLOUDFLARE_IP_ADDRESS_HEADERS } from './lib/auth-config.ts'
 import { getRequestOrigin } from './db.ts'
-import { loadVaultPreferences } from './lib/vault-observability.ts'
+import { loadVaultAccessEnabled, loadVaultPreferences } from './lib/vault-observability.ts'
 
 const jwks = cachedJwksSource()
 
@@ -30,10 +30,9 @@ function clientIp(request: Request): string | undefined {
   return undefined
 }
 
-async function buildDeps(request: Request, includeOidcPolicy = false, waitUntil?: RunnerDeps['waitUntil']): Promise<RunnerDeps> {
+async function buildDeps(request: Request, includeOidcPolicy: boolean, waitUntil: RunnerDeps['waitUntil'] | undefined, db: ReturnType<typeof getDb>, now: number): Promise<RunnerDeps> {
   const e = env as unknown as Record<string, unknown>
   const origin = getRequestOrigin(request)
-  const db = getDb()
   const keys = await loadVaultKeys(db, e as VaultEnv)
   const ip = clientIp(request)
   return {
@@ -44,23 +43,39 @@ async function buildDeps(request: Request, includeOidcPolicy = false, waitUntil?
     jwks,
     origin,
     fetchFn: fetch,
-    now: Date.now(),
+    now,
     ...(ip ? { clientIp: ip } : {}),
     getVaultPreferences: () => loadVaultPreferences(db),
     ...(waitUntil ? { waitUntil } : {}),
   }
 }
 
-// Misconfiguration must fail closed with a generic answer, never a stack trace.
+// Every Runner endpoint passes this uncached global gate. Owner routes are mounted
+// separately and remain available so the owner can re-enable access.
 async function run(
   request: Request,
   fn: (deps: RunnerDeps) => Promise<{ status: number; body: unknown }>,
   options: { includeOidcPolicy?: boolean } = {},
   waitUntil?: RunnerDeps['waitUntil'],
 ) {
+  // Capture the request time before the access read. If disable races with a
+  // session exchange, its revocation cutoff is later than (or equal to) this
+  // timestamp, so that in-flight exchange cannot mint a surviving Session.
+  const requestNow = Date.now()
+  let db: ReturnType<typeof getDb>
+  try {
+    db = getDb()
+    if (!await loadVaultAccessEnabled(db)) {
+      return json({ error: 'vault_disabled' }, { status: 403, headers: { 'Cache-Control': 'no-store' } })
+    }
+  } catch {
+    // Availability-control reads must fail closed, never assume enabled.
+    return json({ error: 'vault_access_unavailable' }, { status: 503, headers: { 'Cache-Control': 'no-store' } })
+  }
+
   let deps: RunnerDeps
   try {
-    deps = await buildDeps(request, options.includeOidcPolicy === true, waitUntil)
+    deps = await buildDeps(request, options.includeOidcPolicy === true, waitUntil, db, requestNow)
   } catch {
     return json({ error: 'vault_not_configured' }, { status: 503, headers: { 'Cache-Control': 'no-store' } })
   }
