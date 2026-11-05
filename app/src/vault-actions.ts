@@ -370,7 +370,7 @@ export async function setVaultAccessEnabledAction(enabled: boolean) {
   const next = z.boolean().parse(enabled)
   const db = getDb()
   await saveVaultAccessEnabled(db, next, Date.now())
-  return { ok: true as const, enabled: await loadVaultAccessEnabled(db) }
+  return { ok: true as const, enabled: next }
 }
 
 export async function revokeRunnerSessionsAction() {
