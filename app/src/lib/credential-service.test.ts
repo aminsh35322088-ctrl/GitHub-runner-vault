@@ -134,6 +134,8 @@ describe('global Vault access', () => {
     const { db, now } = await setup()
     const [previous] = await db.select().from(schema.vaultSetting)
       .where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before')).limit(1)
+    const [previousAccess] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled')).limit(1)
     try {
       const futureCutoff = now + 60_000
       await db.insert(schema.vaultSetting).values({
@@ -145,9 +147,14 @@ describe('global Vault access', () => {
 
       await saveVaultAccessEnabled(db, false, now)
       expect(await getRunnerRevokedBefore(db)).toBe(futureCutoff)
+      const [current] = await db.select().from(schema.vaultSetting)
+        .where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before')).limit(1)
+      expect(current?.updatedAt).toBe(futureCutoff)
     } finally {
       await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before'))
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled'))
       if (previous) await db.insert(schema.vaultSetting).values(previous)
+      if (previousAccess) await db.insert(schema.vaultSetting).values(previousAccess)
     }
   })
 
