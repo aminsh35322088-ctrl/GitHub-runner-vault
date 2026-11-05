@@ -50,6 +50,36 @@ const SETTING_KEYS = {
   runnerRegistrationsPerHour: 'runner_registrations_per_hour',
 } as const
 
+
+/**
+ * Global Runner access is deliberately read outside the preferences cache.
+ * Missing values keep older deployments enabled; malformed values fail closed.
+ */
+export async function loadVaultAccessEnabled(db: Db): Promise<boolean> {
+  const [row] = await db.select({ value: schema.vaultSetting.value })
+    .from(schema.vaultSetting)
+    .where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled'))
+    .limit(1)
+  if (!row) return true
+  return row.value === 'true'
+}
+
+/**
+ * Update the global Runner gate. Disabling and revoking every existing Session
+ * share one atomic D1 statement. Re-enabling never lowers the revocation cutoff.
+ */
+export async function saveVaultAccessEnabled(db: Db, enabled: boolean, now = Date.now()): Promise<void> {
+  const writes = [
+    orm.sql`('vault_access_enabled', ${enabled ? 'true' : 'false'}, ${now})`,
+    ...(!enabled ? [orm.sql`('runner_revoked_before', ${String(now)}, ${now})`] : []),
+  ]
+  await db.run(orm.sql`
+    INSERT INTO vault_setting (key, value, updated_at)
+    VALUES ${orm.sql.join(writes, orm.sql`, `)}
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `)
+}
+
 function intSetting(value: string | null, fallback: number, min: number, max: number): number {
   if (value === null || !/^\d+$/.test(value)) return fallback
   const n = Number(value)
