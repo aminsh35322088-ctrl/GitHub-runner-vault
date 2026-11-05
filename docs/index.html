@@ -165,6 +165,7 @@
           <li>Choose a <strong>public</strong> client, token authentication <strong>None</strong> (PKCE), with the grants <strong>Authorization Code</strong> and <strong>Refresh Token</strong>; set the redirect URL to<br><code id="pageUrlCode"></code></li>
           <li>Allow the scopes <strong>Account Settings: Read</strong>, <strong>D1: Read</strong> and <strong>Workers: Content Read-Only</strong> (there is no scope literally named “Workers Scripts” — that one is the Workers read scope; <code>offline_access</code> is added automatically with the Refresh Token grant).</li>
           <li>Put your client ID in <code>docs/wizard-config.json</code> in this repository and reload this page.</li>
+          <li>Deploy the OAuth relay once: in <strong>Workers &amp; Pages</strong> create a Worker named <code>vault-wizard-relay</code>, paste in <code>docs/oauth-relay-worker.js</code> from this repository, deploy it, and add its URL to <code>docs/wizard-config.json</code> as <code>cloudflareOAuthRelayUrl</code>. (Cloudflare's token endpoint has no CORS headers, so the login exchange needs this stateless relay — it stores nothing and has no secrets.)</li>
         </ol>
       </div>
       <button class="btn ghost" id="skip1Btn" type="button">Continue with a token instead</button>
@@ -237,7 +238,7 @@
 var CF = 'https://api.cloudflare.com/client/v4';
 var AUTH_URL = 'https://dash.cloudflare.com/oauth2/auth';
 var TOKEN_URL = 'https://dash.cloudflare.com/oauth2/token';
-var SCOPES_FULL = 'account-settings.read workers-scripts.read d1.read offline_access';
+var SCOPES_FULL = 'account-settings.read workers.read d1.read offline_access';
 var SCOPES_REDUCED = 'account-settings.read d1.read offline_access';
 var pageUrl = location.origin + location.pathname;
 var qs = new URLSearchParams(location.search);
@@ -317,6 +318,7 @@ function randomB64url(n) { return b64url(crypto.getRandomValues(new Uint8Array(n
 
 /* ---------- step 1: Cloudflare login (OAuth + PKCE) ---------- */
 var clientId = (qs.get('client_id') || '').trim();
+var relayUrl = (qs.get('relay') || '').trim();
 function showS1(which) {
   $('s1-login').classList.toggle('hidden', which !== 'login');
   $('s1-setup').classList.toggle('hidden', which !== 'setup');
@@ -434,7 +436,7 @@ function handleOAuthReturn() {
     grant_type: 'authorization_code', code: code,
     redirect_uri: pageUrl, client_id: clientId, code_verifier: verifier
   });
-  fetch(TOKEN_URL, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
+  fetch(relayUrl || TOKEN_URL, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
     .then(function (res) { return res.json().catch(function () { return null; }); })
     .then(function (tok) {
       if (!tok || !tok.access_token) throw new Error('no token');
@@ -442,7 +444,7 @@ function handleOAuthReturn() {
     })
     .catch(function () {
       showS1(clientId ? 'login' : 'setup');
-      s1Status('The login exchange failed — your browser may have blocked it. You can try again, or continue with a token in Step 2.', 'error');
+      s1Status('The login exchange failed' + (relayUrl ? ' — the relay could not complete it.' : ' — Cloudflare does not allow direct exchanges from a web page, and this copy has no OAuth relay configured (README: “enable Cloudflare login”).') + ' You can try again, or continue with a token in Step 2.', 'error');
       $('resetOAuthBtn').classList.remove('hidden');
     });
   return true;
@@ -621,6 +623,7 @@ fetch('wizard-config.json', { cache: 'no-store' })
   .catch(function () { return null; })
   .then(function (cfg) {
     if (!clientId && cfg && cfg.cloudflareOAuthClientId) clientId = String(cfg.cloudflareOAuthClientId).trim();
+    if (!relayUrl && cfg && cfg.cloudflareOAuthRelayUrl) relayUrl = String(cfg.cloudflareOAuthRelayUrl).trim();
     if (!handleOAuthReturn()) {
       if (state.step1Done || state.skipped1) showS1('none');
       else showS1(clientId ? 'login' : 'setup');
