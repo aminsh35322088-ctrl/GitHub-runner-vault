@@ -14,11 +14,12 @@
 - The owner can disable all Runner API access with the global Vault Access setting. The Worker reads the enabled flag and monotonic access epoch together from D1 on every Runner request (not through the preferences cache); a failed or malformed read denies access. Disabling atomically advances the access epoch and the existing Session revocation cutoff. Every issued Session is signed with its epoch, so sessions from before a disable remain invalid after re-enable, including when different Worker isolates have skewed clocks. Owner dashboard access remains available while Runner access is disabled.
 - Runner identity is GitHub OIDC (RS256 only) restricted by repository id, ref and event.
   It authenticates the workflow run, not an individual process.
-- The only supported deployment route is the repository's **Deploy to Cloudflare** GitHub Actions workflow,
-  which supplies the repository owner's numeric GitHub ID as `RUNNER_VAULT_OWNER_GITHUB_ID` from the trusted
-  Actions context. (The build still honours the general resolution order — explicit ID, then the checked-out
-  GitHub origin via GitHub's typed JSON user API, then the Actions owner ID when its repository context matches
-  that origin — but no other route is documented or supported.) HTML profile metadata is never trusted because
+- Production deployment can use Wrangler OAuth from a trusted owner-controlled environment or the optional
+  **Deploy to Cloudflare** GitHub Actions workflow. The Actions path supplies the repository owner's numeric
+  GitHub ID as `RUNNER_VAULT_OWNER_GITHUB_ID`; the OAuth path resolves the owner from the checked-out GitHub
+  origin through GitHub's typed JSON user API. Both paths use the same build helper and Worker configuration.
+  The GitHub Actions workflow is manual-only and requires `CLOUDFLARE_API_TOKEN`; the Wrangler OAuth path does
+  not require a Cloudflare token in GitHub Secrets. HTML profile metadata is never trusted because
   it cannot distinguish Users from Organizations. If the identity cannot be verified, the Worker remains
   locked. The ID is injected as Worker runtime `OWNER_GITHUB_ID`, which is public identity metadata, not a
   credential.

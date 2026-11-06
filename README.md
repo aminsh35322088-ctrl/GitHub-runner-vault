@@ -254,22 +254,46 @@ Runner traffic limits are owner-configurable in **Settings → Runner traffic li
 
 ## Deployment
 
-There is exactly one way to deploy: a setup wizard drives a GitHub Actions workflow. No local CLI, nothing to configure by hand — the wizard connects to Cloudflare, walks you through creating the single deploy token from a prefilled template, and links you to saving it and running the deploy. The owner identity comes from the repository owner, so there is no first-visitor owner claim.
+There are two deployment paths. For an owner-operated installation, use **Wrangler OAuth** from a trusted machine. It deploys directly to the existing Cloudflare account and does not require a Cloudflare API token in GitHub Secrets. The GitHub Actions route remains optional for unattended deployments and is manual-only; a normal push never starts a deployment that lacks credentials.
+
+### Deploy with Wrangler OAuth (no GitHub Secret)
+
+Run from the repository root on a trusted machine that has access to the target Cloudflare account:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm --filter runner-vault-app exec wrangler login --device --scopes account:read --scopes user:read --scopes workers_scripts:write --scopes d1:write
+pnpm deploy
+```
+
+Wrangler prints a one-time verification URL and code. Approve it while signed in to the intended Cloudflare account. The login is stored in the local Wrangler configuration, not in this repository or GitHub. The deploy helper reuses the existing D1 database and keeps an already-configured `VAULT_MASTER_KEY` Worker secret unchanged.
+
+After a successful deploy, publish metadata for the exact commit that was deployed:
+
+```sh
+export CLOUDFLARE_WORKERS_SUBDOMAIN="your-account-subdomain"
+export GITHUB_SHA="$(git rev-parse HEAD)"
+node app/scripts/deployment-info.mjs
+
+git add deployment.json
+git commit -m "chore(deploy): publish deployment info"
+git push origin main
+```
+
+`CLOUDFLARE_WORKERS_SUBDOMAIN` is the account's public `workers.dev` subdomain, not a credential. The Runner Lab reads `deployment.json` to discover the Vault URL and exact client commit. Publish metadata only after the deployed commit is present on `main`.
+
+### Optional unattended GitHub Actions deployment
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://aminsh35322088-ctrl.github.io/GitHub-runner-vault/)
 
 *The button opens the setup wizard, hosted from this repository's `docs/` folder via GitHub Pages.*
 
-### Steps
-
-1. Fork this repository under the personal GitHub account that will own the vault (or use your existing copy of it). On a fork, GitHub leaves Actions off by default: open the **Actions** tab once and enable workflows, or the deploy in step 7 cannot run.
-2. Enable GitHub Pages once: **Settings → Pages → Deploy from a branch → main → /docs → Save**. The wizard then lives at `https://<you>.github.io/GitHub-runner-vault/`.
-3. Open the wizard (button above). It works out your GitHub username and repository name from its own address — there is nothing to type in.
-4. **Connect Cloudflare.** If login is enabled for your copy (see the next subsection), the wizard signs you in with Cloudflare, finds your account and checks that Workers and D1 are reachable. Otherwise it offers to continue with a token only.
-5. Create the deploy token with the wizard's button — the permissions (Workers Scripts: Edit, D1: Edit, Account Settings: Read) and the token name are pre-selected; press **Create Token** and paste the value back into the wizard. (A Cloudflare login only lasts an hour, so the long-lived token still does the actual deploying.) The wizard verifies the token in your browser; the token is never stored and is only ever sent to Cloudflare's API.
-6. Save the token as the CLOUDFLARE_API_TOKEN repository secret — the wizard links straight to the prefilled form. If token verification lists multiple Cloudflare accounts and step 4 did not pin one, the wizard also offers the optional CLOUDFLARE_ACCOUNT_ID secret for the account you pick.
-7. Run the **Deploy to Cloudflare** workflow from the Actions tab (the wizard links there too), then use the wizard's **Check deployment** button — it shows your vault URL as soon as the run publishes it.
-8. Open the vault URL and finish setup below.
+1. Fork this repository under the personal GitHub account that will own the vault (or use your existing copy). Enable Actions and GitHub Pages (**Settings → Pages → Deploy from a branch → main → /docs**).
+2. Open the wizard. It derives the GitHub username and repository name from its own address.
+3. Connect Cloudflare and create the pre-scoped deploy token (Workers Scripts: Edit, D1: Edit, Account Settings: Read).
+4. Save it as the `CLOUDFLARE_API_TOKEN` GitHub Actions secret. `CLOUDFLARE_ACCOUNT_ID` is optional when the token can access more than one account.
+5. Run **Deploy to Cloudflare** manually from the Actions tab, then use the wizard's **Check deployment** button.
+6. Open the Vault URL and finish setup below.
 
 ### Optional: enable Cloudflare login (once per copy)
 
@@ -282,12 +306,12 @@ The wizard's first step can sign the owner in with Cloudflare (read-only: accoun
 
 ### Updating
 
-Every merge to `main` that changes `app/**`, `client/**`, or the root pnpm manifests redeploys automatically; documentation-only changes do not. Re-running the workflow by hand is always safe: the build, D1 provisioning and master-key provisioning are idempotent, and an upgrade keeps the existing D1 data, owner pin and credentials.
+The GitHub Actions deploy workflow is intentionally manual-only. Wrangler OAuth deployments are initiated explicitly from the trusted owner environment; this avoids a failed deploy on every push when no GitHub Actions API-token secret is configured. Re-running a deploy is designed to preserve the existing D1 data, owner pin and credentials.
 
 ### How it works
 
-- The workflow runs `pnpm deploy` (the root script). The build takes the owner ID from the repository owner, and `app/scripts/deploy.mjs` resolves or creates the D1 database, deploys the Worker with Wrangler using your token, and provisions the `VAULT_MASTER_KEY` Worker secret (see *Where the key lives*). The Worker creates its tables on first request.
-- After deploying, the workflow publishes `deployment.json` at the repository root with the vault URL and the exact commit that was deployed. The Runner Lab reads that file to discover the vault, so there are no Lab-side variables to set.
+- Both deployment paths run the same `pnpm deploy` helper. It resolves the owner identity from the checked-out GitHub repository, reuses or creates the D1 database, deploys the Worker and only provisions `VAULT_MASTER_KEY` when that Worker secret is absent.
+- The GitHub Actions route publishes `deployment.json` automatically. With Wrangler OAuth, run `app/scripts/deployment-info.mjs` using `CLOUDFLARE_WORKERS_SUBDOMAIN` and the deployed `GITHUB_SHA`, then commit `deployment.json` to `main`. The Runner Lab reads that file to discover the Vault URL and client revision.
 
 ### Finish setup
 
@@ -298,8 +322,8 @@ Every merge to `main` that changes `app/**`, `client/**`, or the root pnpm manif
 ### Where the key lives
 
 The master key is a Worker secret: `VAULT_MASTER_KEY` (32 random bytes, base64). **Nobody has to create or paste it.**
-The deploy helper provisions it automatically after every successful deploy (the GitHub Actions workflow above is
-the only supported route): it generates a new key for a fresh deployment or copies a legacy D1 key
+The deploy helper provisions it automatically after a successful deploy (Wrangler OAuth or the optional
+GitHub Actions workflow): it generates a new key for a fresh deployment or copies a legacy D1 key
 verbatim into the secret during an upgrade. The value is sent to Wrangler through stdin only, never argv, files or logs.
 If provisioning cannot complete, a fresh deployment fails closed and a legacy deployment stays in the warned read-only
 mode until a later redeploy retries.
@@ -325,20 +349,21 @@ Stored credentials are not touched.
 
 ## Configuration reference
 
-A deployment needs exactly one GitHub repository secret (`CLOUDFLARE_API_TOKEN`); everything else below is automatic, an optional override, or configured in the UI.
+The Wrangler OAuth deployment path needs no GitHub repository secret. The optional unattended GitHub Actions path uses `CLOUDFLARE_API_TOKEN`; `CLOUDFLARE_ACCOUNT_ID` is only an optional override for accounts where the token can see multiple accounts.
 
 | Name | Kind | Notes |
 | --- | --- | --- |
-| `CLOUDFLARE_API_TOKEN` | Actions secret | **The one required input.** Created with the wizard's prefilled template (Workers Scripts: Edit, D1: Edit, Account Settings: Read); used only by the deploy workflow. |
-| `CLOUDFLARE_ACCOUNT_ID` | Actions secret | Optional. Only needed when the token can see more than one account; otherwise the workflow resolves the single account automatically. |
+| `CLOUDFLARE_API_TOKEN` | Actions secret | Required only for the optional unattended GitHub Actions deploy workflow. Not used by Wrangler OAuth deployments. |
+| `CLOUDFLARE_ACCOUNT_ID` | Actions secret | Optional override for the GitHub Actions path when the token can see multiple accounts. |
+| `CLOUDFLARE_WORKERS_SUBDOMAIN` | deploy env | Public `workers.dev` subdomain used to write `deployment.json` after an OAuth-authenticated deploy; not a secret. |
 | `VAULT_MASTER_KEY` | Worker secret | Provisioned automatically by the deploy helper (see above); keeps the master key out of D1. Set manually only as a fallback. |
 | `PUBLIC_ORIGIN` | var | Canonical HTTPS origin for a custom domain. By default the actual request origin is used. |
-| `OWNER_GITHUB_ID` | var | Set by the deploy workflow from the repository owner; pinned in D1 on first use. Never set by hand. |
+| `OWNER_GITHUB_ID` | var | Set from the checked-out GitHub repository owner (or Actions owner context); pinned in D1 on first use. Never set by hand. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | vars / secrets | Optional override for the private GitHub sign-in App created through `/setup`. |
 | `RUNNER_REPOSITORY`, `RUNNER_REPOSITORY_ID`, `RUNNER_ALLOWED_REFS`, `RUNNER_ALLOWED_EVENTS`, `RUNNER_ALLOWED_WORKFLOW_REFS` | vars | Optional explicit static policy override. When absent, owner-verified OIDC bootstrap pins the first repository automatically. |
 | `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY` | secrets | Legacy explicit keys; both must be set to be used. |
 | `RUNNER_VAULT_D1_DATABASE_ID` | deploy env | Optional internal override: UUID of a pre-created D1 database; skips D1 list/create calls. Never commit this deployment-specific value. |
-| `DB` | D1 binding | Provisioned automatically by the deploy helper during the Actions deploy. |
+| `DB` | D1 binding | Resolved and attached by the deploy helper for both deployment paths. |
 
 ## Operations
 
