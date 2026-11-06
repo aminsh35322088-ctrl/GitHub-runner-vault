@@ -80,7 +80,7 @@ Owner browser -- GitHub OAuth --> /vault
                                   requests / register / audit / settings
 ```
 
-The CLI talks directly to the Worker over HTTPS. It does not use a local Broker, Unix socket, separate Linux identity, persistent Session file, or credential cache. A fresh OIDC token is exchanged when the process starts and the resulting Session is memory-only; a long-running local CLI bridge re-exchanges after a rejected/expired Session when the GitHub Actions OIDC requester remains available. If OIDC or the Worker is unavailable, Vault commands fail closed while unrelated Runner services remain independent.
+The CLI talks directly to the Worker over HTTPS. It does not use a local Broker, Unix socket, separate Linux identity, on-disk Session file or persistent Session cache. A fresh OIDC token is exchanged when the process starts and the resulting Session is memory-only; a long-running local CLI bridge re-exchanges after a rejected/expired Session when the GitHub Actions OIDC requester remains available. If OIDC or the Worker is unavailable, Vault commands fail closed while unrelated Runner services remain independent.
 
 Registering a new credential:
 

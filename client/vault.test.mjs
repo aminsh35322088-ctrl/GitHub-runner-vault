@@ -35,7 +35,7 @@ function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
-function createVaultFetch({ credentials, integrations, useResult, unauthorizedOnce = false } = {}) {
+function createVaultFetch({ credentials, integrations, useResult, unauthorizedOnce = false, expireFirstSession = false } = {}) {
   const seen = []
   let oidcCount = 0
   let sessionCount = 0
@@ -56,7 +56,7 @@ function createVaultFetch({ credentials, integrations, useResult, unauthorizedOn
       assert.equal(init.method, 'POST')
       assert.equal(headers.get('authorization'), 'Bearer ' + OIDC_TOKEN)
       sessionCount++
-      return json({ token: 'runner-session-token-' + sessionCount, expiresAt: Date.now() + 1_800_000 })
+      return json({ token: 'runner-session-token-' + sessionCount, expiresAt: Date.now() + (expireFirstSession && sessionCount === 1 ? 30_000 : 1_800_000) })
     }
     if (headers.get('authorization')?.startsWith('Bearer runner-session-') !== true) {
       return json({ error: 'unauthorized' }, 401)
@@ -112,6 +112,23 @@ test('direct HTTPS bootstrap exchanges GitHub OIDC for an in-memory session and 
     const registryCall = stub.seen.find((item) => item.url.endsWith('/api/runner/registry'))
     assert.equal(registryCall.headers.get('authorization'), 'Bearer runner-session-token-1')
     assert.ok(!JSON.stringify(stub.seen).includes(SECRET))
+  } finally {
+    globalThis.fetch = realFetch
+    restore()
+  }
+})
+
+test('an expiring in-memory session is renewed before the next request', async () => {
+  const restore = configureEnv()
+  const stub = createVaultFetch({ expireFirstSession: true })
+  globalThis.fetch = stub.fetchFn
+  try {
+    const first = await runnerSession()
+    const second = await runnerSession()
+    assert.equal(first.token, 'runner-session-token-1')
+    assert.equal(second.token, 'runner-session-token-2')
+    assert.equal(stub.oidcCount, 2)
+    assert.equal(stub.sessionCount, 2)
   } finally {
     globalThis.fetch = realFetch
     restore()
