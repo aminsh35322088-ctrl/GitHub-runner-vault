@@ -168,6 +168,13 @@ describe('runner HTTP surface', () => {
       expect(res.status).toBe(503)
       expect(res.headers.get('cache-control')).toBe('no-store')
       expect(await res.json()).toEqual({ error: 'vault_access_unavailable' })
+
+      // The Owner can recover from malformed epoch data by disabling access;
+      // the atomic upsert repairs the epoch and keeps the Owner dashboard live.
+      await saveVaultAccessEnabled(db, false, Date.now() + 1)
+      expect(await loadVaultAccessState(db)).toEqual({ enabled: false, epoch: 1 })
+      await saveVaultAccessEnabled(db, true, Date.now() + 2)
+      expect(await loadVaultAccessState(db)).toEqual({ enabled: true, epoch: 1 })
     } finally {
       await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled'))
       await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_epoch'))
