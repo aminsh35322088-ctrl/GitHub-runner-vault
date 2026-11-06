@@ -82,6 +82,47 @@ describe('runner HTTP surface', () => {
     }
   })
 
+  test('disabled Vault access rejects POSTs before consuming their bodies', async () => {
+    const db = getDb()
+    const [previousAccess] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled')).limit(1)
+    const [previousEpoch] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'vault_access_epoch')).limit(1)
+    const [previousRevocation] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before')).limit(1)
+    let reads = 0
+    const body = () => new ReadableStream<Uint8Array>({
+      pull(controller) {
+        reads++
+        controller.enqueue(new TextEncoder().encode('{"name":"X"}'))
+        controller.close()
+      },
+    }, { highWaterMark: 0 })
+    try {
+      await saveVaultAccessEnabled(db, false, Date.now())
+      const registration = new Request('https://vault.test/api/runner/registrations', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: body(), duplex: 'half',
+      } as RequestInit & { duplex: 'half' })
+      const proxy = new Request('https://vault.test/api/runner/use', {
+        method: 'POST', headers: { 'Content-Type': 'application/octet-stream' },
+        body: body(), duplex: 'half',
+      } as RequestInit & { duplex: 'half' })
+      for (const request of [registration, proxy]) {
+        const response = await app.handle(request)
+        expect(response.status).toBe(403)
+        expect(await response.json()).toEqual({ error: 'vault_disabled' })
+      }
+      expect(reads).toBe(0)
+    } finally {
+      const keys = ['vault_access_enabled', 'vault_access_epoch', 'runner_revoked_before']
+      await db.delete(schema.vaultSetting).where(orm.inArray(schema.vaultSetting.key, keys))
+      if (previousAccess) await db.insert(schema.vaultSetting).values(previousAccess)
+      if (previousEpoch) await db.insert(schema.vaultSetting).values(previousEpoch)
+      if (previousRevocation) await db.insert(schema.vaultSetting).values(previousRevocation)
+    }
+  })
+
   test('global access epoch advances on disable and survives re-enable', async () => {
     const db = getDb()
     const keys = ['vault_access_enabled', 'runner_revoked_before', 'vault_access_epoch']

@@ -14,14 +14,12 @@
 //                                               never the stored token.
 //
 // Environment:
-//   VAULT_URL                  vault origin, e.g. https://runner-vault.example.workers.dev
-//   ACTIONS_ID_TOKEN_REQUEST_URL / ACTIONS_ID_TOKEN_REQUEST_TOKEN
-//                              set by GitHub Actions when the job has `permissions: id-token: write`
-//   VAULT_SESSION_FILE         optional cache path for the 30 minute session (default under $XDG_RUNTIME_DIR or /tmp)
+//   VAULT_BROKER_SOCKET        trusted local Unix socket (default /run/runner-vault/broker.sock)
+//   The Agent never receives GitHub OIDC requester values or a Runner Session.
 
 import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
+import net from 'node:net'
+import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:http'
 
@@ -53,131 +51,145 @@ function die(message, code = 1) {
   process.exit(code)
 }
 
-function origin() {
-  const raw = env.VAULT_URL
-  if (!raw) die('VAULT_URL is not set')
-  let url
-  try { url = new URL(raw) } catch { die('VAULT_URL is not a valid URL') }
-  const local = url.hostname === 'localhost' || url.hostname.endsWith('.localhost')
-  if (url.protocol !== 'https:' && !local) die('VAULT_URL must be https')
-  return url.origin
+const BROKER_PROTOCOL_VERSION = 1
+const BROKER_FRAME_LIMIT = 15 * 1024 * 1024
+const BROKER_TIMEOUT_MS = 30_000
+
+function brokerSocketPath() {
+  const value = env.VAULT_BROKER_SOCKET || '/run/runner-vault/broker.sock'
+  if (typeof value !== 'string' || value.length < 1 || value.length > 100 || value.includes('\0')) {
+    die('VAULT_BROKER_SOCKET is invalid', 2)
+  }
+  return value
 }
 
-function sessionFile() {
-  const uid = os.userInfo().uid
-  const privateDir = env.XDG_RUNTIME_DIR || path.join(os.tmpdir(), 'runner-vault-' + uid)
-  return env.VAULT_SESSION_FILE || path.join(privateDir, 'session-' + uid + '.json')
-}
-
-function openNoFollow(file, flags, mode) {
-  const noFollow = fs.constants.O_NOFOLLOW ?? 0
-  return fs.openSync(file, flags | noFollow, mode)
-}
-
-function readCachedSession(base) {
-  let fd
-  try {
-    fd = openNoFollow(sessionFile(), fs.constants.O_RDONLY)
-    const stat = fs.fstatSync(fd)
-    if (!stat.isFile() || stat.uid !== os.userInfo().uid) return null
-    if ((stat.mode & 0o077) !== 0) fs.fchmodSync(fd, 0o600)
-    const cached = JSON.parse(fs.readFileSync(fd, 'utf8'))
-    if (
-      cached.origin === base &&
-      typeof cached.token === 'string' &&
-      cached.token.length >= 10 &&
-      Number.isFinite(cached.expiresAt) &&
-      cached.expiresAt - Date.now() > 60_000
-    ) return cached
-  } catch { /* no cache; symlinks and unsafe files are ignored */ }
-  finally { if (fd !== undefined) fs.closeSync(fd) }
-  return null
-}
-
-function writeCachedSession(base, token, expiresAt) {
-  let fd
-  try {
-    const file = sessionFile()
-    const directory = path.dirname(file)
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
-    const dirStat = fs.lstatSync(directory)
-    if (!dirStat.isDirectory() || dirStat.isSymbolicLink() || dirStat.uid !== os.userInfo().uid) return
-    if ((dirStat.mode & 0o077) !== 0) fs.chmodSync(directory, 0o700)
-
-    fd = openNoFollow(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC, 0o600)
-    const stat = fs.fstatSync(fd)
-    if (!stat.isFile() || stat.uid !== os.userInfo().uid) return
-    fs.fchmodSync(fd, 0o600)
-    fs.writeFileSync(fd, JSON.stringify({ origin: base, token, expiresAt }))
-  } catch { /* cache is optional; never follow a pre-existing symlink */ }
-  finally { if (fd !== undefined) fs.closeSync(fd) }
-}
-
-async function getOidcToken(base) {
-  const url = env.ACTIONS_ID_TOKEN_REQUEST_URL
-  const bearer = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN
-  if (!url || !bearer) die('no GitHub Actions OIDC variables; the job needs `permissions: id-token: write`')
-  const res = await fetchWithTimeout(`${url}${url.includes('?') ? '&' : '?'}audience=${encodeURIComponent(base)}`, {
-    headers: { Authorization: `Bearer ${bearer}`, Accept: 'application/json' },
-  })
-  if (!res.ok) die(`could not get an OIDC token (HTTP ${res.status})`)
-  const body = await res.json()
-  if (typeof body.value !== 'string') die('unexpected OIDC response')
-  return body.value
-}
-
-let memorySession = null
-let memorySessionExpiresAt = 0
-let sessionInFlight = null
-
-async function session(base) {
-  if (memorySession && memorySessionExpiresAt - Date.now() > 60_000) return memorySession
-  if (sessionInFlight) return sessionInFlight
-  sessionInFlight = (async () => {
-    const cached = readCachedSession(base)
-    if (cached) {
-      memorySession = cached.token
-      memorySessionExpiresAt = cached.expiresAt
-      return cached.token
+/** One bounded JSON frame per AF_UNIX connection; no HTTP/OIDC capability lives in the Agent. */
+export async function brokerRequest(operation, payload = undefined) {
+  const id = randomBytes(16).toString('hex')
+  const request = { version: BROKER_PROTOCOL_VERSION, id, operation, ...(payload === undefined ? {} : { payload }) }
+  const frame = Buffer.from(JSON.stringify(request) + '\n', 'utf8')
+  if (frame.byteLength > BROKER_FRAME_LIMIT) throw new Error('Vault broker request exceeds the size limit')
+  const socketPath = brokerSocketPath()
+  return await new Promise((resolve, reject) => {
+    let settled = false
+    let received = Buffer.alloc(0)
+    const socket = net.createConnection(socketPath)
+    const finish = (error, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      socket.destroy()
+      if (error) reject(error)
+      else resolve(value)
     }
-    const oidc = await getOidcToken(base)
-    const res = await fetchWithTimeout(`${base}/api/runner/session`, { method: 'POST', headers: { Authorization: `Bearer ${oidc}` } })
-    const body = await res.json().catch(() => ({}))
-    if (!res.ok) die(`vault refused the session (${body.error ?? res.status})`)
-    memorySession = body.token
-    memorySessionExpiresAt = Number(body.expiresAt) || Date.now() + 25 * 60_000
-    writeCachedSession(base, body.token, body.expiresAt)
-    return body.token
-  })()
-  try { return await sessionInFlight } finally { sessionInFlight = null }
+    const timer = setTimeout(() => {
+      const error = new Error('Vault broker request timed out')
+      error.code = 'BROKER_TIMEOUT'
+      finish(error)
+    }, BROKER_TIMEOUT_MS)
+    socket.once('connect', () => socket.end(frame))
+    socket.on('data', (chunk) => {
+      received = Buffer.concat([received, chunk])
+      if (received.byteLength > BROKER_FRAME_LIMIT) {
+        const error = new Error('Vault broker response exceeds the size limit')
+        error.code = 'BROKER_PROTOCOL_ERROR'
+        finish(error)
+        return
+      }
+      const newline = received.indexOf(0x0a)
+      if (newline < 0) return
+      if (newline !== received.byteLength - 1) {
+        const error = new Error('Vault broker returned multiple response frames')
+        error.code = 'BROKER_PROTOCOL_ERROR'
+        finish(error)
+        return
+      }
+      let response
+      try { response = JSON.parse(received.subarray(0, newline).toString('utf8')) } catch {
+        const error = new Error('Vault broker returned an invalid response')
+        error.code = 'BROKER_PROTOCOL_ERROR'
+        finish(error)
+        return
+      }
+      if (!response || response.version !== BROKER_PROTOCOL_VERSION || response.id !== id || typeof response.ok !== 'boolean') {
+        const error = new Error('Vault broker response did not match the request')
+        error.code = 'BROKER_PROTOCOL_ERROR'
+        finish(error)
+        return
+      }
+      if (response.ok && response.result && typeof response.result === 'object') {
+        finish(null, response.result)
+        return
+      }
+      const brokerError = response.error && typeof response.error === 'object' ? response.error : {}
+      const error = new Error(typeof brokerError.message === 'string' ? brokerError.message : 'Vault broker refused the operation')
+      error.code = typeof brokerError.code === 'string' ? brokerError.code : 'BROKER_REFUSED'
+      error.retryable = brokerError.retryable === true
+      finish(error)
+    })
+    socket.once('error', (cause) => {
+      const error = new Error(cause?.code === 'EACCES' ? 'Vault broker access was denied' : 'Vault broker is unavailable')
+      error.code = cause?.code === 'EACCES' ? 'BROKER_ACCESS_DENIED' : 'BROKER_UNAVAILABLE'
+      finish(error)
+    })
+    socket.once('end', () => {
+      if (!settled) {
+        const error = new Error('Vault broker closed without a complete response')
+        error.code = 'BROKER_PROTOCOL_ERROR'
+        finish(error)
+      }
+    })
+  })
 }
 
-async function api(base, method, route, payload) {
-  const token = await session(base)
-  const res = await fetchWithTimeout(`${base}${route}`, {
-    method,
-    headers: { Authorization: `Bearer ${token}`, ...(payload ? { 'Content-Type': 'application/json' } : {}) },
-    body: payload ? JSON.stringify(payload) : undefined,
-  })
-  const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
-  return { status: res.status, body }
+const BROKER_ERROR_STATUS = {
+  INVALID_REQUEST: 400,
+  OPERATION_NOT_ALLOWED: 403,
+  PEER_DENIED: 403,
+  POLICY_DENIED: 403,
+  SESSION_EXPIRED: 401,
+  SESSION_REJECTED: 401,
+  RATE_LIMITED: 429,
+  BROKER_ACCESS_DENIED: 403,
+  BROKER_UNAVAILABLE: 503,
+  BROKER_TIMEOUT: 504,
+  VAULT_UNAVAILABLE: 503,
+  UPSTREAM_UNAVAILABLE: 503,
+  UPSTREAM_REDIRECT: 502,
 }
 
-async function apiProxy(base, metadata, requestBody) {
-  const token = await session(base)
-  const encodedMetadata = Buffer.from(JSON.stringify(metadata), 'utf8').toString('base64url')
-  const res = await fetchWithTimeout(base + '/api/runner/use', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json',
-      'Content-Type': 'application/octet-stream',
-      'X-Vault-Proxy-Metadata': encodedMetadata,
-    },
-    body: requestBody && requestBody.byteLength > 0 ? requestBody : undefined,
-  })
-  const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
-  return { status: res.status, body }
+async function brokerApi(operation, payload) {
+  try {
+    return { status: 200, body: await brokerRequest(operation, payload) }
+  } catch (error) {
+    const code = typeof error?.code === 'string' ? error.code : 'BROKER_ERROR'
+    return { status: BROKER_ERROR_STATUS[code] ?? 502, body: { error: code.toLowerCase(), detail: error.message } }
+  }
+}
+
+async function api(_base, method, route, payload) {
+  if (method === 'GET' && route === '/api/runner/registry') {
+    const result = await brokerApi('tokens.list')
+    return result.status === 200
+      ? { status: 200, body: { credentials: result.body.credentials } }
+      : result
+  }
+  if (method === 'GET' && route === '/api/runner/integrations') {
+    const result = await brokerApi('integrations.list')
+    return result.status === 200
+      ? { status: 200, body: { integrations: result.body.integrations } }
+      : result
+  }
+  if (method === 'POST' && route === '/api/runner/registrations') {
+    return brokerApi('registrations.create', payload)
+  }
+  return { status: 400, body: { error: 'unsupported_broker_route' } }
+}
+
+async function apiProxy(_base, metadata, requestBody) {
+  const payload = { ...metadata }
+  if (requestBody && requestBody.byteLength > 0) payload.body = Buffer.from(requestBody).toString('base64')
+  return brokerApi('credential.use', payload)
 }
 
 export function parseArgs(argv) {
@@ -244,7 +256,7 @@ export function mapLocalProxyTarget(apiBaseUrl, requestTarget) {
 }
 
 async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPort) {
-  const registry = await api(vaultOrigin, 'GET', '/api/runner/integrations')
+  const registry = await api(null, 'GET', '/api/runner/integrations')
   if (registry.status !== 200 || !Array.isArray(registry.body.integrations)) die(`could not read CLI integration registry (${registry.body.error ?? registry.status})`)
   const credential = registry.body.integrations.find((item) => item.name === credentialName)
   if (!credential) die('credential is unavailable, hidden, disabled, expired or not in the runner registry')
@@ -393,7 +405,14 @@ async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPor
 async function main() {
   const [command, ...rest] = process.argv.slice(2)
   const { positional, flags, headers } = parseArgs(rest)
-  const base = origin()
+  const base = null
+
+  if (command === 'status') {
+    const { status, body } = await brokerApi('status')
+    if (status !== 200) die(`broker status failed (${body.error})`, 4)
+    console.log(JSON.stringify(body, null, 2))
+    return
+  }
 
   if (command === 'list') {
     const { status, body } = await api(base, 'GET', '/api/runner/registry')
@@ -418,7 +437,7 @@ async function main() {
     const { status, body } = await api(base, 'POST', '/api/runner/registrations', { name: flags.name, service: flags.service, doc })
     if (status !== 200) die(`registration refused (${body.error}${body.detail ? `: ${body.detail}` : ''})`)
     console.log(`Credential request created: ${flags.name} (${flags.service})`)
-    console.log(`Owner inbox: ${base}/vault/requests`)
+    console.log(`Owner inbox: ${body.ownerInbox}`)
     console.log(`One-time owner form (expires ${new Date(body.expiresAt).toISOString()}, works once):\n${body.link}`)
     return
   }
@@ -449,7 +468,7 @@ async function main() {
     return
   }
 
-  die('commands: list | request | use | serve')
+  die('commands: status | list | request | use | serve')
 }
 
 // Resolve symlinks: the runner installs this file behind a `vault` symlink, so argv[1] is the link path.

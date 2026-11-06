@@ -30,6 +30,23 @@ function clientIp(request: Request): string | undefined {
   return undefined
 }
 
+/**
+ * Reject disabled/unavailable Vault access before a POST body is consumed.
+ * The main run() gate deliberately reads again after parsing, so a Disable
+ * racing with a slow upload cannot authorize work using this preflight result.
+ */
+async function runnerAccessPreflight(): Promise<Response | null> {
+  try {
+    const access = await loadVaultAccessState(getDb())
+    if (!access.enabled) {
+      return json({ error: 'vault_disabled' }, { status: 403, headers: { 'Cache-Control': 'no-store' } })
+    }
+    return null
+  } catch {
+    return json({ error: 'vault_access_unavailable' }, { status: 503, headers: { 'Cache-Control': 'no-store' } })
+  }
+}
+
 async function buildDeps(request: Request, includeOidcPolicy: boolean, waitUntil: RunnerDeps['waitUntil'] | undefined, db: ReturnType<typeof getDb>, now: number, vaultAccessEpoch: number): Promise<RunnerDeps> {
   const e = env as unknown as Record<string, unknown>
   const origin = getRequestOrigin(request)
@@ -197,6 +214,8 @@ export const runnerApp = new Spiceflow()
     path: '/api/runner/registrations',
     detail: { tags: ['Runner'], summary: 'Ask the owner to register a credential; returns a one-time owner link' },
     async handler({ request }) {
+      const blocked = await runnerAccessPreflight()
+      if (blocked) return blocked
       const parsed = await parseRunnerBody(request)
       if (!parsed.ok) return parsed.error === 'body_too_large' ? requestTooLarge() : invalidRequest()
       const body = parsed.body
@@ -210,6 +229,8 @@ export const runnerApp = new Spiceflow()
     path: '/api/runner/use',
     detail: { tags: ['Runner'], summary: 'Make an HTTPS call with a stored credential; the token is never returned' },
     async handler({ request, waitUntil }) {
+      const blocked = await runnerAccessPreflight()
+      if (blocked) return blocked
       const contentType = request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
       if (contentType === 'application/octet-stream') {
         const declared = contentLength(request, MAX_REQUEST_BODY)

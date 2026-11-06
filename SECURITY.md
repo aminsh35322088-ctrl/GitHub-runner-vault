@@ -10,9 +10,7 @@
   storage paused) until a redeploy provisions the secret. If the key differs, every credential and the GitHub App
   secret is preflighted, then all ciphertext rewrites and key removal commit atomically; any unreadable value blocks
   migration and preserves the old D1 key.
-- The runner is **not** a trust boundary: anything on it can use its own session. So the
-  vault limits what a session can do: owner-approved hosts only, header allowlist, no redirects,
-  response redaction, rate limits, 30-minute sessions, owner-side revoke, append-only audit.
+- The runner host and trusted workflow remain part of the trusted computing base. The model/Agent runs as a separate unprivileged Unix user; a dedicated Broker UID alone receives the GitHub OIDC requester and retains the short-lived Vault Session in memory. A fixed AF_UNIX protocol checks peer credentials and exposes no Session-read operation. The Worker still limits every Session to owner-approved hosts, header allowlists, no redirects, response redaction, rate limits, owner-side revocation and an append-only audit.
 - The owner can disable all Runner API access with the global Vault Access setting. The Worker reads the enabled flag and monotonic access epoch together from D1 on every Runner request (not through the preferences cache); a failed or malformed read denies access. Disabling atomically advances the access epoch and the existing Session revocation cutoff. Every issued Session is signed with its epoch, so sessions from before a disable remain invalid after re-enable, including when different Worker isolates have skewed clocks. Owner dashboard access remains available while Runner access is disabled.
 - Runner identity is GitHub OIDC (RS256 only) restricted by repository id, ref and event.
   It authenticates the workflow run, not an individual process.
