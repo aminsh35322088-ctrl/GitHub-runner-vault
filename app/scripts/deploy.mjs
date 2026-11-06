@@ -7,6 +7,7 @@ import { prepareWorkerEntrypoint } from './prepare-worker-entry.mjs'
 const isWindows = process.platform === 'win32'
 const binPath = (name) => resolve('node_modules', '.bin', name + (isWindows ? '.cmd' : ''))
 const ownerIdPattern = /^[1-9][0-9]{0,15}$/
+const databaseIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function runLocal(name, args, { capture = false, input } = {}) {
   const executable = binPath(name)
@@ -53,7 +54,7 @@ export function parseD1DatabaseList(output) {
 }
 
 export function setD1DatabaseId(config, binding, databaseName, databaseId) {
-  if (!ownerIdPattern.test(databaseId) && !/^[a-f0-9-]{16,64}$/i.test(databaseId)) {
+  if (typeof databaseId !== 'string' || !databaseIdPattern.test(databaseId)) {
     throw new Error('Cloudflare returned an invalid D1 database ID')
   }
   const databases = config.d1_databases
@@ -71,32 +72,39 @@ export function setD1DatabaseId(config, binding, databaseName, databaseId) {
   }
 }
 
-export function setD1DatabaseIdInJsonc(source, binding, databaseName, databaseId) {
-  const array = source.match(/("d1_databases"\s*:\s*\[)([\s\S]*?)(\])/m)
-  if (!array) throw new Error('wrangler.jsonc is missing the d1_databases array')
 
-  const blocks = [...array[2].matchAll(/\{[^{}]*\}/g)]
-  const target = blocks.find((match) => {
-    return /"binding"\s*:\s*"([^"]+)"/.exec(match[0])?.[1] === binding
-  })
-  if (!target) throw new Error(`wrangler.jsonc is missing the ${binding} D1 binding`)
-
-  const currentName = /"database_name"\s*:\s*"([^"]+)"/.exec(target[0])?.[1]
-  if (currentName !== databaseName) {
-    throw new Error(`wrangler.jsonc D1 name mismatch for ${binding}: expected ${databaseName}, found ${currentName ?? 'missing'}`)
+export function applyDeploymentOverrides(config, env = process.env) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    throw new Error('Generated Worker config is invalid')
   }
 
-  let updatedBlock
-  if (/"database_id"\s*:/.test(target[0])) {
-    updatedBlock = target[0].replace(/("database_id"\s*:\s*)"[^"]*"/, `$1"${databaseId}"`)
-  } else {
-    updatedBlock = target[0].replace(
-      /(\"database_name\"\s*:\s*\"[^\"]+\")\s*,?/,
-      `$1,\n      "database_id": "${databaseId}"`,
-    )
+  const workerName = typeof env.RUNNER_VAULT_WORKER_NAME === 'string'
+    ? env.RUNNER_VAULT_WORKER_NAME.trim() : ''
+  if (workerName) {
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(workerName)) {
+      throw new Error('RUNNER_VAULT_WORKER_NAME must be a valid workers.dev-compatible Worker name')
+    }
+    config = { ...config, name: workerName }
   }
-  const absoluteStart = array.index + array[1].length + target.index
-  return source.slice(0, absoluteStart) + updatedBlock + source.slice(absoluteStart + target[0].length)
+
+  const databaseName = typeof env.RUNNER_VAULT_D1_DATABASE_NAME === 'string'
+    ? env.RUNNER_VAULT_D1_DATABASE_NAME.trim() : ''
+  if (databaseName) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/.test(databaseName)) {
+      throw new Error('RUNNER_VAULT_D1_DATABASE_NAME must contain 1-63 letters, numbers, underscores or hyphens')
+    }
+    if (!Array.isArray(config.d1_databases) || !config.d1_databases.some((item) => item.binding === 'DB')) {
+      throw new Error('Worker config is missing the DB D1 binding')
+    }
+    config = {
+      ...config,
+      d1_databases: config.d1_databases.map((item) => item.binding === 'DB'
+        ? { ...item, database_name: databaseName, database_id: undefined }
+        : item),
+    }
+  }
+
+  return config
 }
 
 function loadGeneratedConfig(path) {
@@ -111,24 +119,21 @@ function ensureOwner(config) {
   }
 }
 
-function ensureD1(sourceConfigPath, generatedConfigPath) {
-  const source = readFileSync(sourceConfigPath, 'utf8')
+
+function ensureD1(generatedConfigPath) {
   const generated = loadGeneratedConfig(generatedConfigPath)
   if (!generated) throw new Error('Vite build did not create dist/rsc/wrangler.json')
 
-  const sourceD1 = [...source.matchAll(/\{[^{}]*\}/g)].map((match) => match[0])
-    .find((block) => /"binding"\s*:\s*"DB"/.test(block))
-  const sourceName = sourceD1 && /"database_name"\s*:\s*"([^"]+)"/.exec(sourceD1)?.[1]
   const generatedEntry = generated.d1_databases?.find((item) => item.binding === 'DB')
-  const databaseName = generatedEntry?.database_name ?? sourceName
+  const databaseName = generatedEntry?.database_name
   if (!databaseName || !generatedEntry) {
     throw new Error('Worker config is missing the DB D1 binding or database_name')
   }
 
-  // A deployment-specific ID may be supplied as a Workers Builds / CLI variable.
-  // Never commit one installation's D1 UUID into the reusable source template.
+  // Resolve this installation's database without writing its UUID into the
+  // tracked Wrangler template. Only the generated deployment config is mutated.
   const configuredDatabaseId = process.env.RUNNER_VAULT_D1_DATABASE_ID?.trim()
-  let databaseId = generatedEntry.database_id ?? configuredDatabaseId ?? (sourceD1 && /"database_id"\s*:\s*"([^"]+)"/.exec(sourceD1)?.[1])
+  let databaseId = configuredDatabaseId || generatedEntry.database_id
   if (!databaseId) {
     let databases
     try {
@@ -139,9 +144,9 @@ function ensureD1(sourceConfigPath, generatedConfigPath) {
 
     let match = databases.find((item) => item.name === databaseName)
     if (!match) {
-      console.log(`[deploy] D1 database ${databaseName} does not exist; creating it`)
+      console.log('[deploy] D1 database ' + databaseName + ' does not exist; creating it')
       try {
-        runLocal('wrangler', ['d1', 'create', databaseName, '--binding', 'DB', '--update-config'])
+        runLocal('wrangler', ['d1', 'create', databaseName])
       } catch (error) {
         // A concurrent first deploy may have created the database after the list.
         databases = parseD1DatabaseList(runLocal('wrangler', ['d1', 'list', '--json'], { capture: true }))
@@ -153,17 +158,14 @@ function ensureD1(sourceConfigPath, generatedConfigPath) {
         match = databases.find((item) => item.name === databaseName)
       }
     }
-    if (!match) throw new Error(`Cloudflare did not return the newly created D1 database ${databaseName}`)
+    if (!match) throw new Error('Cloudflare did not return the D1 database ' + databaseName)
     databaseId = match.id
   }
 
   const nextGenerated = setD1DatabaseId(generated, 'DB', databaseName, databaseId)
   writeFileSync(generatedConfigPath, JSON.stringify(nextGenerated, null, 2) + '\n')
 
-  const nextSource = setD1DatabaseIdInJsonc(source, 'DB', databaseName, databaseId)
-  if (nextSource !== source) writeFileSync(sourceConfigPath, nextSource)
-
-  console.log(`[deploy] DB binding is ready: ${databaseName}`)
+  console.log('[deploy] DB binding is ready: ' + databaseName)
   return databaseName
 }
 
@@ -238,10 +240,10 @@ export function masterKeyAction(secretNames, storedKey) {
   return { action: 'generate' }
 }
 
-function ensureMasterKey(databaseName) {
+function ensureMasterKey(databaseName, configPath) {
   let secretNames
   try {
-    secretNames = parseSecretList(runLocal('wrangler', ['secret', 'list'], { capture: true }))
+    secretNames = parseSecretList(runLocal('wrangler', ['secret', 'list', '--config', configPath], { capture: true }))
   } catch (error) {
     console.warn('[deploy] Could not list Worker secrets; skipping master key provisioning (' + error.message + '). The vault stays fail-closed until a redeploy provisions VAULT_MASTER_KEY.')
     return
@@ -253,7 +255,7 @@ function ensureMasterKey(databaseName) {
 
   let storedKey = null
   try {
-    storedKey = parseStoredMasterKey(runLocal('wrangler', ['d1', 'execute', databaseName, '--remote', '--json', '--command', "SELECT value FROM vault_setting WHERE key = 'master_key'"], { capture: true }))
+    storedKey = parseStoredMasterKey(runLocal('wrangler', ['d1', 'execute', databaseName, '--remote', '--json', '--command', "SELECT value FROM vault_setting WHERE key = 'master_key'", '--config', configPath], { capture: true }))
   } catch (error) {
     if (!/no such table/i.test(error.message)) {
       console.warn('[deploy] Could not read the stored master key from D1; skipping provisioning so an existing key is never replaced blindly (' + error.message + ').')
@@ -271,7 +273,7 @@ function ensureMasterKey(databaseName) {
 
   const value = plan.action === 'migrate' ? plan.value : randomBytes(32).toString('base64')
   try {
-    runLocal('wrangler', ['secret', 'put', MASTER_KEY_SECRET], { input: value })
+    runLocal('wrangler', ['secret', 'put', MASTER_KEY_SECRET, '--config', configPath], { input: value })
   } catch (error) {
     console.warn('[deploy] Could not set the VAULT_MASTER_KEY secret (' + error.message + '). The deployment build token needs Workers Scripts edit permission; until the secret is set the vault stays fail-closed (fresh) or in legacy database mode (upgrade).')
     return
@@ -283,7 +285,6 @@ function ensureMasterKey(databaseName) {
 
 export function deploy() {
   const generatedConfigPath = resolve(process.cwd(), 'dist/rsc/wrangler.json')
-  const sourceConfigPath = resolve(process.cwd(), 'wrangler.jsonc')
 
   // Workers Builds runs the configured build command before the deploy command.
   // Local CLI deployments must build first so Vite injects the GitHub owner ID.
@@ -292,11 +293,12 @@ export function deploy() {
   }
 
   prepareWorkerEntrypoint(resolve(process.cwd(), 'dist/rsc'))
-  const generated = loadGeneratedConfig(generatedConfigPath)
+  const generated = applyDeploymentOverrides(loadGeneratedConfig(generatedConfigPath))
+  writeFileSync(generatedConfigPath, JSON.stringify(generated, null, 2) + '\n')
   ensureOwner(generated)
-  const databaseName = ensureD1(sourceConfigPath, generatedConfigPath)
-  runLocal('wrangler', ['deploy'])
-  ensureMasterKey(databaseName)
+  const databaseName = ensureD1(generatedConfigPath)
+  runLocal('wrangler', ['deploy', '--config', generatedConfigPath])
+  ensureMasterKey(databaseName, generatedConfigPath)
 }
 
 if (process.argv[1] && import.meta.url === new URL('file://' + resolve(process.argv[1])).href) {

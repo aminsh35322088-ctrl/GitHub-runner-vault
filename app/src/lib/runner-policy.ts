@@ -1,7 +1,8 @@
 // Which GitHub Actions workflow may talk to this vault.
 //
 // A configured Worker policy wins. Otherwise, the first valid OIDC run must prove
-// the deployment-pinned owner id, main branch and exact rdc-lab.yml workflow. The
+// the deployment-pinned owner id, configured bootstrap branch and workflow file
+// (defaults: main and rdc-lab.yml). The
 // resulting repository id and owner id are atomically pinned in D1. Later runs use
 // that immutable policy; a second repository cannot claim or replace it.
 
@@ -18,17 +19,37 @@ export const DEFAULT_EVENTS = 'workflow_dispatch,schedule,push'
 export const BOOTSTRAP_BRANCH = 'main'
 export const BOOTSTRAP_WORKFLOW_FILE = 'rdc-lab.yml'
 
-export function buildBootstrapPolicy(ownerId: string, audience: string): OidcPolicy {
+export interface BootstrapPolicyOptions {
+  branch?: string
+  workflowFile?: string
+  events?: string
+}
+
+export function buildBootstrapPolicy(
+  ownerId: string,
+  audience: string,
+  options: BootstrapPolicyOptions = {},
+): OidcPolicy {
   if (!/^\d{1,20}$/.test(ownerId)) throw new Error('A pinned numeric vault owner id is required')
+  const branch = options.branch?.trim() || BOOTSTRAP_BRANCH
+  const workflowFile = options.workflowFile?.trim() || BOOTSTRAP_WORKFLOW_FILE
+  const events = (options.events?.trim() || DEFAULT_EVENTS)
+    .split(',').map((event) => event.trim()).filter(Boolean)
+  const parts = { repository: 'owner/repository', repositoryId: '1', branch, workflowFile, events: events.join(',') }
+  checkParts(parts)
+  if (!events.length || events.length > 20 ||
+      events.some((event) => !/^[a-z][a-z0-9_]{0,63}$/.test(event)) ||
+      events.includes('pull_request') || events.includes('pull_request_target')) {
+    throw new Error('RUNNER_BOOTSTRAP_EVENTS must contain safe non-pull-request GitHub event names')
+  }
+  const allowedEvents = [...new Set(events)]
   return {
-    audience, repository: '', repositoryId: '', allowedRefs: [`refs/heads/${BOOTSTRAP_BRANCH}`],
-    allowedEvents: DEFAULT_EVENTS.split(','), allowedWorkflowRefs: [],
-    bootstrap: {
-      ownerId, branch: BOOTSTRAP_BRANCH, workflowFile: BOOTSTRAP_WORKFLOW_FILE,
-      allowedEvents: DEFAULT_EVENTS.split(','),
-    },
+    audience, repository: '', repositoryId: '', allowedRefs: ['refs/heads/' + branch],
+    allowedEvents, allowedWorkflowRefs: [],
+    bootstrap: { ownerId, branch, workflowFile, allowedEvents },
   }
 }
+
 
 /** Atomically pins the first owner-approved OIDC repository; a racing runner cannot replace it. */
 export async function pinRunnerPolicy(db: Db, input: RunnerPolicyInput, audience: string): Promise<RunnerPolicyInput> {
@@ -110,7 +131,12 @@ export async function loadRunnerPolicy(db: Db, e: VaultEnv, audience: string): P
   if (stored) return buildPolicy(stored, audience)
   const ownerId = await loadOwnerId(db, e)
   if (!ownerId) throw new Error('vault owner is not configured')
-  return buildBootstrapPolicy(ownerId, audience)
+  const setting = (key: string) => typeof e[key] === 'string' ? String(e[key]).trim() : ''
+  return buildBootstrapPolicy(ownerId, audience, {
+    branch: setting('RUNNER_BOOTSTRAP_BRANCH'),
+    workflowFile: setting('RUNNER_BOOTSTRAP_WORKFLOW_FILE'),
+    events: setting('RUNNER_BOOTSTRAP_EVENTS'),
+  })
 }
 
 /** Looks up a public repository's numeric id so the owner does not have to. */

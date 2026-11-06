@@ -14,6 +14,9 @@ declare namespace Cloudflare {
     GITHUB_CLIENT_ID?: string
     GITHUB_CLIENT_SECRET?: string
     PUBLIC_ORIGIN?: string
+    RUNNER_BOOTSTRAP_BRANCH?: string
+    RUNNER_BOOTSTRAP_WORKFLOW_FILE?: string
+    RUNNER_BOOTSTRAP_EVENTS?: string
   }
 }
 
