@@ -59,7 +59,8 @@ function vaultOrigin() {
   if (typeof configured !== 'string' || configured.length > 2048) die('VAULT_URL must be configured', 2)
   let url
   try { url = new URL(configured) } catch { die('VAULT_URL is invalid', 2) }
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || (url.pathname !== '/' && url.pathname !== '')) {
+  if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.port
+    || url.search || url.hash || (url.pathname !== '/' && url.pathname !== '')) {
     die('VAULT_URL must be an HTTPS origin without credentials, query or fragment', 2)
   }
   return url.origin
@@ -74,7 +75,7 @@ function oidcRequester() {
   }
   let url
   try { url = new URL(requestUrl) } catch { throw new Error('GitHub Actions OIDC configuration is invalid') }
-  if (url.protocol !== 'https:' || url.hostname !== 'pipelines.actions.githubusercontent.com'
+  if (url.origin !== 'https://pipelines.actions.githubusercontent.com'
     || url.username || url.password || url.hash) {
     throw new Error('GitHub Actions OIDC endpoint is not trusted')
   }
@@ -109,7 +110,7 @@ export async function runnerSession() {
     }, 'Vault session exchange')
     const body = await readJson(response, 'Vault session response')
     if (response.status !== 200 || typeof body.token !== 'string' || body.token.length < 20
-      || !Number.isFinite(body.expiresAt)) {
+      || !Number.isFinite(body.expiresAt) || body.expiresAt <= Date.now() + 30_000) {
       throw new Error(typeof body.error === 'string' ? body.error : 'Vault session exchange was refused')
     }
     return { token: body.token, expiresAt: body.expiresAt }

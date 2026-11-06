@@ -56,7 +56,7 @@ function createVaultFetch({ credentials, integrations, useResult, unauthorizedOn
       assert.equal(init.method, 'POST')
       assert.equal(headers.get('authorization'), 'Bearer ' + OIDC_TOKEN)
       sessionCount++
-      return json({ token: 'runner-session-token-' + sessionCount, expiresAt: Date.now() + (expireFirstSession && sessionCount === 1 ? 30_000 : 1_800_000) })
+      return json({ token: 'runner-session-token-' + sessionCount, expiresAt: Date.now() + (expireFirstSession && sessionCount === 1 ? 45_000 : 1_800_000) })
     }
     if (headers.get('authorization')?.startsWith('Bearer runner-session-') !== true) {
       return json({ error: 'unauthorized' }, 401)
