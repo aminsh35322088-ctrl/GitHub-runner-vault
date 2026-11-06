@@ -40,7 +40,7 @@ be able to read it.*
 
 **Goal:** a compromised or prompt-injected model on the runner cannot read a stored secret.
 
-The Runner host and trusted workflow are part of the trusted computing base, but the model/Agent is not. The workflow runs the Agent under an unprivileged Unix UID and keeps the OIDC requester and Vault Session inside a separate Broker UID. The vault therefore:
+The Runner host and trusted workflow are part of the trusted computing base, but the model/Agent is not. The trusted bootstrap passes the OIDC requester to a separate Broker over an anonymous pipe, then removes it before Agent startup. The Agent runs under an unprivileged Unix UID and receives neither OIDC requester nor Vault Session. The vault therefore:
 
 | Risk | Mitigation |
 | --- | --- |
@@ -56,7 +56,7 @@ The Runner host and trusted workflow are part of the trusted computing base, but
 
 What the vault does **not** protect against: an agent that is allowed to call an approved host can do anything that token
 permits on that host. Keep tokens least-privilege and short-lived (temporary credentials max 24 hours).
-OIDC authenticates the *workflow run*, not an individual process. The Runner host and trusted workflow remain trusted; the Agent receives only the Broker operations allowed to its Unix UID and never receives the OIDC requester or the Vault Session.
+OIDC authenticates the *workflow run*, not an individual process. The Runner host and trusted bootstrap remain trusted; the Agent receives only the Broker operations allowed to its Unix UID and never receives the OIDC requester or the Vault Session.
 
 See `SECURITY.md` for the short version.
 
@@ -86,8 +86,8 @@ See `SECURITY.md` for the short version.
                                      requests / register / audit / settings
 ```
 
-The Broker is the only long-lived runtime process that receives the GitHub OIDC requester capability or holds a Vault
-Session. It runs under its own unprivileged Unix identity. The Agent uses a fixed, versioned Unix-socket protocol; the
+The trusted bootstrap passes the GitHub OIDC requester capability to the Broker through an anonymous pipe and then scrubs it.
+The Broker runs under its own unprivileged Unix identity and is the only long-lived service process that retains the Vault Session. The Agent uses a fixed, versioned Unix-socket protocol; the
 Broker verifies the peer UID, accepts only reviewed operations, and never exports its Session or OIDC token. If the optional
 Broker is unavailable, Vault CLI operations fail closed; RDC, Tailscale and non-Vault Agent work continue independently.
 
