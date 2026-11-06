@@ -28,7 +28,7 @@ import { getCredentialForOwner, listAudit, listCredentialsForOwner, listPendingR
 import { listLatestRegistrationLinks, peekEnrollmentLink } from './lib/enrollment.ts'
 import { linkHost, readStoredDoc, type CredentialDoc } from './lib/credential-docs.ts'
 import { KeyRound, LayoutDashboard, Plus, ChartNoAxesCombined, ShieldCheck, Settings as SettingsIcon, ClipboardList, Workflow, LogOut, Activity, Clock3, CheckCircle2, AlertTriangle, ChevronRight, LockKeyhole, ArrowUpRight, Fingerprint, Search, Gauge, Globe } from 'lucide-react'
-import { getUsageAnalytics, listCredentialIntegrationMetadata, listNotifications, listCredentialValidationHistory, loadVaultPreferences, runScheduledCredentialValidation, unreadNotificationCount } from './lib/vault-observability.ts'
+import { getUsageAnalytics, listCredentialIntegrationMetadata, listNotifications, listCredentialValidationHistory, loadVaultAccessEnabled, loadVaultPreferences, runScheduledCredentialValidation, unreadNotificationCount } from './lib/vault-observability.ts'
 import { SectionCard } from './components/ui/section-card.tsx'
 import { cleanupRunnerRateLimitEvents } from './lib/runner-rate-limit.ts'
 import { ORPHAN_SPAN_ANALYTICS, ORPHAN_SPAN_TO_SM, ORPHAN_SPAN_TO_XL, SUMMARY_GRID_3_SM, SUMMARY_GRID_3_XL, SUMMARY_GRID_4, SUMMARY_GRID_5 } from './lib/responsive.ts'
@@ -1449,9 +1449,15 @@ export const app = new Spiceflow()
 
   .page('/vault/settings', async ({ request }) => {
     await requirePageSession(request)
-    const { VaultSettingsForm } = await import('./components/vault-settings-form.tsx')
+    const [{ VaultSettingsForm }, { VaultAccessControl }] = await Promise.all([
+      import('./components/vault-settings-form.tsx'),
+      import('./components/vault-access-control.tsx'),
+    ])
     const db = getDb()
-    const preferences = await loadVaultPreferences(db)
+    const [preferences, vaultAccessEnabled] = await Promise.all([
+      loadVaultPreferences(db),
+      loadVaultAccessEnabled(db),
+    ])
     const policy = await loadRunnerPolicyInput(db)
     const fixedByEnv = Boolean((env as unknown as VaultEnv).RUNNER_REPOSITORY)
     const pinnedOwner = await loadOwnerId(db, vaultEnv())
@@ -1463,6 +1469,9 @@ export const app = new Spiceflow()
         <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Vault preferences</p><h1 className="mt-1 text-2xl font-bold tracking-tight">Settings</h1><p className="mt-1 text-sm text-muted-foreground">Control validation, runtime behavior, notifications and retention. Provider security rules remain automatic.</p></div>
         {ownerDiffers && <p role="alert" className="rounded-xl border border-warning/30 bg-warning/5 p-4 text-sm">The deployment reports GitHub account ID {buildOwner}, but this vault remains bound to {pinnedOwner}. That change is ignored.</p>}
         {keys.keySource === 'database' && <p role="alert" className="rounded-xl border border-warning/30 bg-warning/5 p-4 text-sm">The vault master key is still stored in D1 beside the encrypted credentials. New credential storage is paused. No manual key entry is needed: redeploy the Vault so the deploy pipeline can provision the <span className="font-mono">VAULT_MASTER_KEY</span> Worker secret automatically. If the new key differs, all credentials and the GitHub sign-in secret are migrated in one atomic database batch. If any value cannot be decrypted, the old key is preserved and migration stops instead of risking data loss.</p>}
+        <SectionCard title="Vault Access" description="Control whether any Runner can create a Session or use stored credentials. This does not disable owner access to the dashboard." icon={<ShieldCheck className="size-5"/>}>
+          <VaultAccessControl initialEnabled={vaultAccessEnabled} />
+        </SectionCard>
         <VaultSettingsForm initial={preferences} />
         <SectionCard title="Runner connection" description="OIDC trust is pinned to the first valid workflow from the owner’s main branch." icon={<Workflow className="size-5"/>}>
           {fixedByEnv ? <p className="text-sm text-muted-foreground">This deployment uses an explicit RUNNER_* trust policy.</p> : policy ? <dl className="grid grid-cols-1 gap-x-3 gap-y-2 text-sm min-[420px]:grid-cols-[7.5rem_minmax(0,1fr)]"><dt className="text-muted-foreground">Repository</dt><dd className="break-all font-mono">{policy.repository}</dd><dt className="text-muted-foreground">Repository ID</dt><dd className="font-mono">{policy.repositoryId}</dd><dt className="text-muted-foreground">Owner ID</dt><dd className="font-mono">{policy.repositoryOwnerId ?? 'legacy policy'}</dd><dt className="text-muted-foreground">Branch</dt><dd className="font-mono">{policy.branch}</dd><dt className="text-muted-foreground">Workflow</dt><dd className="break-all font-mono">{policy.workflowFile}</dd></dl> : <p className="rounded-xl bg-muted/50 p-3 text-sm text-muted-foreground">Waiting for the first valid owner-owned workflow run. Pull-request events are rejected.</p>}

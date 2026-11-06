@@ -1,21 +1,14 @@
 name: Deploy to Cloudflare
 
-# The one supported deployment route. The setup wizard (docs/index.html,
-# published via GitHub Pages) walks the owner through creating the single
-# required secret, CLOUDFLARE_API_TOKEN; this workflow does everything else:
-# build, D1 provisioning, VAULT_MASTER_KEY provisioning (scripts/deploy.mjs)
-# and publishing deployment.json for the Runner Lab to discover.
+# Optional unattended deployment route. Wrangler OAuth is the no-GitHub-Secret
+# path; this workflow remains available for owners who explicitly configure a
+# Cloudflare API token and trigger the deployment manually.
 
 on:
+  # Automatic push deployments require a long-lived Cloudflare API token in
+  # GitHub Actions. Keep this workflow explicitly manual; maintainers can use
+  # Wrangler OAuth from an authorized environment without adding a repo secret.
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'app/**'
-      - 'client/**'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'pnpm-workspace.yaml'
 
 permissions:
   contents: write

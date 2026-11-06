@@ -4,7 +4,7 @@ import {
   cachedJwksSource, GITHUB_OIDC_ISSUER, policyFromEnv, verifyGithubOidc, type JwksSource, type OidcPolicy, resetOidcVerificationKeyCache,
 } from './oidc.ts'
 import {
-  deriveSessionKey, getRunnerRevokedBefore, issueRunnerSession, revokeRunnerSessions, SESSION_TTL_MS, verifyRunnerSession, resetRunnerSessionKeyCache,
+  deriveSessionKey, getRunnerRevokedBefore, issueRunnerSession, revokeRunnerSessions, SESSION_TTL_MS, verifyRunnerSession, verifyRunnerSessionSignature, resetRunnerSessionKeyCache,
 } from './runner-session.ts'
 import { MAX_REQUEST_BODY, MAX_RESPONSE_BODY, redact, runProxy, secretForms, validateTarget } from './proxy.ts'
 
@@ -34,6 +34,7 @@ const policy: OidcPolicy = {
   allowedRefs: ['refs/heads/main'],
   allowedEvents: ['workflow_dispatch', 'schedule', 'push'],
   allowedWorkflowRefs: ['example-org/runner-project/.github/workflows/runner.yml@refs/heads/main'],
+  repositoryOwnerId: '65',
 }
 
 function goodClaims(overrides: Record<string, unknown> = {}) {
@@ -63,6 +64,26 @@ describe('GitHub OIDC verification', () => {
     expect(result).toMatchObject({ ok: true, identity: { runId: '12345', repository: 'example-org/runner-project', ref: 'refs/heads/main' } })
   })
 
+  test('accepts GitHub immutable subject claims bound to signed owner and repository IDs', async () => {
+    const { privateKey, jwk } = await makeKeyPair()
+    const claims = goodClaims({ sub: 'repo:example-org@65/runner-project@999:ref:refs/heads/main' })
+    const result = await verifyGithubOidc(await sign(privateKey, claims), policy, async () => ({ keys: [jwk] }), NOW)
+    expect(result).toMatchObject({
+      ok: true,
+      identity: { repository: 'example-org/runner-project', repositoryId: '999', repositoryOwnerId: '65' },
+    })
+  })
+
+  test('accepts an exact environment context with GitHub colon escaping', async () => {
+    const { privateKey, jwk } = await makeKeyPair()
+    const claims = goodClaims({
+      environment: 'Production:V2',
+      sub: 'repo:example-org@65/runner-project@999:environment:Production%3AV2',
+    })
+    const result = await verifyGithubOidc(await sign(privateKey, claims), policy, async () => ({ keys: [jwk] }), NOW)
+    expect(result.ok).toBe(true)
+  })
+
   test('automatically bootstraps only an owner-owned main-branch Lab workflow', async () => {
     const { privateKey, jwk } = await makeKeyPair()
     const bootstrap: OidcPolicy = {
@@ -70,7 +91,10 @@ describe('GitHub OIDC verification', () => {
       allowedEvents: ['workflow_dispatch', 'schedule', 'push'], allowedWorkflowRefs: [],
       bootstrap: { ownerId: '65', branch: 'main', workflowFile: 'rdc-lab.yml', allowedEvents: ['workflow_dispatch', 'schedule', 'push'] },
     }
-    const claims = goodClaims({ workflow_ref: 'example-org/runner-project/.github/workflows/rdc-lab.yml@refs/heads/main' })
+    const claims = goodClaims({
+      sub: 'repo:example-org@65/runner-project@999:ref:refs/heads/main',
+      workflow_ref: 'example-org/runner-project/.github/workflows/rdc-lab.yml@refs/heads/main',
+    })
     const result = await verifyGithubOidc(await sign(privateKey, claims), bootstrap, async () => ({ keys: [jwk] }), NOW)
     expect(result).toMatchObject({
       ok: true,
@@ -120,6 +144,13 @@ describe('GitHub OIDC verification', () => {
     ['missing run id', { run_id: undefined }, 'missing run id'],
     ['non-numeric run id', { run_id: 'abc' }, 'missing run id'],
     ['subject names a different repository', { sub: 'repo:attacker/other:ref:refs/heads/main' }, 'subject mismatch'],
+    ['immutable subject has a different owner id', { sub: 'repo:example-org@66/runner-project@999:ref:refs/heads/main' }, 'subject mismatch'],
+    ['immutable subject has a different repository id', { sub: 'repo:example-org@65/runner-project@1000:ref:refs/heads/main' }, 'subject mismatch'],
+    ['immutable subject names a different repository', { sub: 'repo:example-org@65/other-project@999:ref:refs/heads/main' }, 'subject mismatch'],
+    ['immutable subject context differs from the signed ref', { sub: 'repo:example-org@65/runner-project@999:ref:refs/heads/other' }, 'subject mismatch'],
+    ['subject context differs from the signed ref', { sub: 'repo:example-org/runner-project:ref:refs/heads/other' }, 'subject mismatch'],
+    ['repository owner name claim disagrees', { repository_owner: 'attacker' }, 'wrong repository owner'],
+    ['repository owner id claim is missing', { repository_owner_id: undefined }, 'wrong repository'],
     ['missing subject', { sub: undefined }, 'subject mismatch'],
     ['missing token id', { jti: undefined }, 'missing token id'],
   ]
@@ -127,6 +158,14 @@ describe('GitHub OIDC verification', () => {
     const { privateKey, jwk } = await makeKeyPair()
     const result = await verifyGithubOidc(await sign(privateKey, goodClaims(overrides)), policy, async () => ({ keys: [jwk] }), NOW)
     expect(result).toEqual({ ok: false, error })
+  })
+
+  test('rejects a valid token when the policy does not pin a repository owner id', async () => {
+    const { privateKey, jwk } = await makeKeyPair()
+    const unpinned: OidcPolicy = { ...policy, repositoryOwnerId: undefined }
+    const token = await sign(privateKey, goodClaims())
+    expect(await verifyGithubOidc(token, unpinned, async () => ({ keys: [jwk] }), NOW))
+      .toEqual({ ok: false, error: 'wrong repository owner' })
   })
 
   test('allows a main push from the exact approved workflow', async () => {
@@ -243,6 +282,7 @@ describe('GitHub OIDC verification', () => {
     const configured = {
       RUNNER_REPOSITORY: 'example-org/runner-project',
       RUNNER_REPOSITORY_ID: '42',
+      RUNNER_REPOSITORY_OWNER_ID: '65',
       RUNNER_ALLOWED_REFS: 'refs/heads/main,refs/heads/release',
       RUNNER_ALLOWED_EVENTS: 'workflow_dispatch,push',
       RUNNER_ALLOWED_WORKFLOW_REFS: 'example-org/runner-project/.github/workflows/runner.yml@refs/heads/main',
@@ -251,6 +291,7 @@ describe('GitHub OIDC verification', () => {
       audience: 'https://vault.example.test',
       repository: 'example-org/runner-project',
       repositoryId: '42',
+      repositoryOwnerId: '65',
       allowedRefs: ['refs/heads/main', 'refs/heads/release'],
       allowedEvents: ['workflow_dispatch', 'push'],
       allowedWorkflowRefs: ['example-org/runner-project/.github/workflows/runner.yml@refs/heads/main'],
@@ -277,6 +318,30 @@ describe('runner sessions', () => {
     expect(expiresAt).toBe(NOW + SESSION_TTL_MS)
     const verified = await verifyRunnerSession(key, token, NOW + 1000, 0)
     expect(verified).toMatchObject({ ok: true, session: { repository: 'a/b', runId: '55', sub: 'runner:a/b#55.2' } })
+  })
+
+  test('embeds the global Vault access epoch in the signed session', async () => {
+    const key = await deriveSessionKey(SECRET_32)
+    const issued = await issueRunnerSession(key, identity, NOW, 3)
+    const verified = await verifyRunnerSessionSignature(key, issued.token, NOW + 1)
+    expect(verified.ok && verified.session.accessEpoch).toBe(3)
+  })
+
+  test('legacy sessions default to epoch zero and malformed epochs are rejected', async () => {
+    const key = await deriveSessionKey(SECRET_32)
+    const legacy = await issueRunnerSession(key, identity, NOW, 0)
+    const [prefix, payload] = legacy.token.split('.')
+    const parsed = JSON.parse(atob(payload!.replace(/-/g, '+').replace(/_/g, '/')))
+    delete parsed.accessEpoch
+    const legacyPayload = b64url(JSON.stringify(parsed))
+    const legacySignature = b64url(new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(legacyPayload))))
+    const legacyVerified = await verifyRunnerSessionSignature(key, `${prefix}.${legacyPayload}.${legacySignature}`, NOW + 1)
+    expect(legacyVerified.ok && legacyVerified.session.accessEpoch).toBe(0)
+
+    const malformedPayload = b64url(JSON.stringify({ ...parsed, accessEpoch: -1 }))
+    const malformedSignature = b64url(new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(malformedPayload))))
+    expect(await verifyRunnerSessionSignature(key, `${prefix}.${malformedPayload}.${malformedSignature}`, NOW + 1))
+      .toEqual({ ok: false, error: 'invalid session' })
   })
 
   test('expires after the ttl', async () => {

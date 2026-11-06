@@ -50,6 +50,80 @@ const SETTING_KEYS = {
   runnerRegistrationsPerHour: 'runner_registrations_per_hour',
 } as const
 
+
+/**
+ * Global Runner access is deliberately read outside the preferences cache.
+ * Both values come from one primary-routed D1 statement so a gate decision and
+ * its session generation cannot be assembled from different database reads.
+ * Missing values preserve older deployments; malformed epochs fail closed.
+ */
+export type VaultAccessState = { enabled: boolean; epoch: number }
+
+export async function loadVaultAccessState(db: Db): Promise<VaultAccessState> {
+  const rows = await db.select({ key: schema.vaultSetting.key, value: schema.vaultSetting.value })
+    .from(schema.vaultSetting)
+    .where(orm.inArray(schema.vaultSetting.key, ['vault_access_enabled', 'vault_access_epoch']))
+  const settings = new Map(rows.map((row) => [row.key, row.value]))
+  const enabledValue = settings.get('vault_access_enabled')
+  const epochValue = settings.get('vault_access_epoch')
+  let epoch = 0
+  if (epochValue !== undefined) {
+    if (!/^\d+$/.test(epochValue)) throw new Error('Vault access epoch is malformed')
+    epoch = Number(epochValue)
+    if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error('Vault access epoch is out of range')
+  }
+  return {
+    enabled: enabledValue === undefined || enabledValue === 'true',
+    epoch,
+  }
+}
+
+/**
+ * Owner UI intentionally reads only the switch. A malformed Runner epoch must
+ * never take the owner settings page offline; the Runner gate uses the stricter
+ * loadVaultAccessState() path and fails closed until the owner repairs it.
+ */
+export async function loadVaultAccessEnabled(db: Db): Promise<boolean> {
+  const [row] = await db.select({ value: schema.vaultSetting.value })
+    .from(schema.vaultSetting)
+    .where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled'))
+    .limit(1)
+  if (!row) return true
+  return row.value === 'true'
+}
+
+/**
+ * Update the global Runner gate. Disabling, advancing the signed-session epoch
+ * and moving the legacy timestamp cutoff share one atomic D1 statement.
+ * Re-enabling never lowers either revocation value or restores old Sessions.
+ */
+export async function saveVaultAccessEnabled(db: Db, enabled: boolean, now = Date.now()): Promise<void> {
+  const writes = [
+    orm.sql`('vault_access_enabled', ${enabled ? 'true' : 'false'}, ${now})`,
+    ...(!enabled ? [
+      orm.sql`('runner_revoked_before', ${String(now)}, ${now})`,
+      orm.sql`('vault_access_epoch', '1', ${now})`,
+    ] : []),
+  ]
+  await db.run(orm.sql`
+    INSERT INTO vault_setting (key, value, updated_at)
+    VALUES ${orm.sql.join(writes, orm.sql`, `)}
+    ON CONFLICT(key) DO UPDATE SET
+      value = CASE
+        WHEN excluded.key = 'runner_revoked_before'
+          THEN CAST(MAX(CAST(vault_setting.value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)
+        WHEN excluded.key = 'vault_access_epoch'
+          THEN CAST(MAX(CAST(vault_setting.value AS INTEGER), 0) + 1 AS TEXT)
+        ELSE excluded.value
+      END,
+      updated_at = CASE
+        WHEN excluded.key IN ('runner_revoked_before', 'vault_access_epoch')
+          THEN MAX(vault_setting.updated_at, excluded.updated_at)
+        ELSE excluded.updated_at
+      END
+  `)
+}
+
 function intSetting(value: string | null, fallback: number, min: number, max: number): number {
   if (value === null || !/^\d+$/.test(value)) return fallback
   const n = Number(value)

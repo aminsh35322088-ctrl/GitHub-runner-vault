@@ -14,22 +14,23 @@
 //                                               never the stored token.
 //
 // Environment:
-//   VAULT_URL                  vault origin, e.g. https://runner-vault.example.workers.dev
-//   ACTIONS_ID_TOKEN_REQUEST_URL / ACTIONS_ID_TOKEN_REQUEST_TOKEN
-//                              set by GitHub Actions when the job has `permissions: id-token: write`
-//   VAULT_SESSION_FILE         optional cache path for the 30 minute session (default under $XDG_RUNTIME_DIR or /tmp)
+//   VAULT_URL                  HTTPS origin of the Vault Worker
+//   GitHub Actions OIDC requester variables (id-token: write) authenticate this run.
+//   A short-lived Runner Session is held only in this process memory; no session file.
 
 import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:http'
 
 const env = process.env
+const fetchImpl = (...args) => globalThis.fetch(...args)
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 8_000
 const MIN_REQUEST_TIMEOUT_MS = 100
 const MAX_REQUEST_TIMEOUT_MS = 30_000
+const MAX_API_RESPONSE_BYTES = 12 * 1024 * 1024
+const LOCAL_PROXY_BODY_LIMIT = 10 * 1024 * 1024
+const LOCAL_PROXY_RESPONSE_LIMIT = 1_100 * 1024
 
 function requestTimeoutMs() {
   const configured = Number(env.VAULT_REQUEST_TIMEOUT_MS)
@@ -41,7 +42,7 @@ function requestTimeoutMs() {
 /** Bounded HTTP requests with sanitized errors; never include URLs or headers in failures. */
 export async function fetchWithTimeout(url, init = {}, label = 'Vault request', timeoutMs = requestTimeoutMs()) {
   try {
-    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+    return await fetchImpl(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) })
   } catch (error) {
     const timedOut = error && (error.name === 'TimeoutError' || error.name === 'AbortError')
     throw new Error(timedOut ? label + ' timed out' : label + ' failed')
@@ -53,131 +54,145 @@ function die(message, code = 1) {
   process.exit(code)
 }
 
-function origin() {
-  const raw = env.VAULT_URL
-  if (!raw) die('VAULT_URL is not set')
+function vaultOrigin() {
+  const configured = env.VAULT_URL
+  if (typeof configured !== 'string' || configured.length > 2048) die('VAULT_URL must be configured', 2)
   let url
-  try { url = new URL(raw) } catch { die('VAULT_URL is not a valid URL') }
-  const local = url.hostname === 'localhost' || url.hostname.endsWith('.localhost')
-  if (url.protocol !== 'https:' && !local) die('VAULT_URL must be https')
+  try { url = new URL(configured) } catch { die('VAULT_URL is invalid', 2) }
+  if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.port
+    || url.search || url.hash || (url.pathname !== '/' && url.pathname !== '')) {
+    die('VAULT_URL must be an HTTPS origin without credentials, query or fragment', 2)
+  }
   return url.origin
 }
 
-function sessionFile() {
-  const uid = os.userInfo().uid
-  const privateDir = env.XDG_RUNTIME_DIR || path.join(os.tmpdir(), 'runner-vault-' + uid)
-  return env.VAULT_SESSION_FILE || path.join(privateDir, 'session-' + uid + '.json')
+function oidcRequester() {
+  const requestUrl = env.ACTIONS_ID_TOKEN_REQUEST_URL
+  const requestToken = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN
+  if (typeof requestUrl !== 'string' || requestUrl.length > 4096
+    || typeof requestToken !== 'string' || requestToken.length < 20 || requestToken.length > 8192) {
+    throw new Error('GitHub Actions OIDC is unavailable; run this command in an authorized workflow with id-token: write')
+  }
+  let url
+  try { url = new URL(requestUrl) } catch { throw new Error('GitHub Actions OIDC configuration is invalid') }
+  if (url.origin !== 'https://pipelines.actions.githubusercontent.com'
+    || url.username || url.password || url.hash) {
+    throw new Error('GitHub Actions OIDC endpoint is not trusted')
+  }
+  return { url, requestToken }
 }
 
-function openNoFollow(file, flags, mode) {
-  const noFollow = fs.constants.O_NOFOLLOW ?? 0
-  return fs.openSync(file, flags | noFollow, mode)
+let sessionPromise
+export function resetClientSessionForTests() {
+  sessionPromise = undefined
 }
-
-function readCachedSession(base) {
-  let fd
-  try {
-    fd = openNoFollow(sessionFile(), fs.constants.O_RDONLY)
-    const stat = fs.fstatSync(fd)
-    if (!stat.isFile() || stat.uid !== os.userInfo().uid) return null
-    if ((stat.mode & 0o077) !== 0) fs.fchmodSync(fd, 0o600)
-    const cached = JSON.parse(fs.readFileSync(fd, 'utf8'))
-    if (
-      cached.origin === base &&
-      typeof cached.token === 'string' &&
-      cached.token.length >= 10 &&
-      Number.isFinite(cached.expiresAt) &&
-      cached.expiresAt - Date.now() > 60_000
-    ) return cached
-  } catch { /* no cache; symlinks and unsafe files are ignored */ }
-  finally { if (fd !== undefined) fs.closeSync(fd) }
-  return null
-}
-
-function writeCachedSession(base, token, expiresAt) {
-  let fd
-  try {
-    const file = sessionFile()
-    const directory = path.dirname(file)
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
-    const dirStat = fs.lstatSync(directory)
-    if (!dirStat.isDirectory() || dirStat.isSymbolicLink() || dirStat.uid !== os.userInfo().uid) return
-    if ((dirStat.mode & 0o077) !== 0) fs.chmodSync(directory, 0o700)
-
-    fd = openNoFollow(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC, 0o600)
-    const stat = fs.fstatSync(fd)
-    if (!stat.isFile() || stat.uid !== os.userInfo().uid) return
-    fs.fchmodSync(fd, 0o600)
-    fs.writeFileSync(fd, JSON.stringify({ origin: base, token, expiresAt }))
-  } catch { /* cache is optional; never follow a pre-existing symlink */ }
-  finally { if (fd !== undefined) fs.closeSync(fd) }
-}
-
-async function getOidcToken(base) {
-  const url = env.ACTIONS_ID_TOKEN_REQUEST_URL
-  const bearer = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN
-  if (!url || !bearer) die('no GitHub Actions OIDC variables; the job needs `permissions: id-token: write`')
-  const res = await fetchWithTimeout(`${url}${url.includes('?') ? '&' : '?'}audience=${encodeURIComponent(base)}`, {
-    headers: { Authorization: `Bearer ${bearer}`, Accept: 'application/json' },
-  })
-  if (!res.ok) die(`could not get an OIDC token (HTTP ${res.status})`)
-  const body = await res.json()
-  if (typeof body.value !== 'string') die('unexpected OIDC response')
-  return body.value
-}
-
-let memorySession = null
-let memorySessionExpiresAt = 0
-let sessionInFlight = null
-
-async function session(base) {
-  if (memorySession && memorySessionExpiresAt - Date.now() > 60_000) return memorySession
-  if (sessionInFlight) return sessionInFlight
-  sessionInFlight = (async () => {
-    const cached = readCachedSession(base)
-    if (cached) {
-      memorySession = cached.token
-      memorySessionExpiresAt = cached.expiresAt
-      return cached.token
+export async function runnerSession() {
+  if (sessionPromise) {
+    const current = await sessionPromise
+    if (current.expiresAt > Date.now() + 60_000) return current
+    sessionPromise = undefined
+  }
+  sessionPromise = (async () => {
+    const origin = vaultOrigin()
+    const { url, requestToken } = oidcRequester()
+    url.searchParams.set('audience', origin)
+    const oidcResponse = await fetchWithTimeout(url, {
+      headers: { Authorization: 'Bearer ' + requestToken, Accept: 'application/json' },
+    }, 'GitHub OIDC token request')
+    if (oidcResponse.status !== 200) throw new Error('GitHub Actions refused the OIDC token request')
+    const oidcBody = await readJson(oidcResponse, 'GitHub OIDC token response')
+    if (typeof oidcBody.value !== 'string' || oidcBody.value.length < 100 || oidcBody.value.length > 8192) {
+      throw new Error('GitHub Actions returned an invalid OIDC token')
     }
-    const oidc = await getOidcToken(base)
-    const res = await fetchWithTimeout(`${base}/api/runner/session`, { method: 'POST', headers: { Authorization: `Bearer ${oidc}` } })
-    const body = await res.json().catch(() => ({}))
-    if (!res.ok) die(`vault refused the session (${body.error ?? res.status})`)
-    memorySession = body.token
-    memorySessionExpiresAt = Number(body.expiresAt) || Date.now() + 25 * 60_000
-    writeCachedSession(base, body.token, body.expiresAt)
-    return body.token
-  })()
-  try { return await sessionInFlight } finally { sessionInFlight = null }
+    const response = await fetchWithTimeout(origin + '/api/runner/session', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + oidcBody.value, Accept: 'application/json' },
+    }, 'Vault session exchange')
+    const body = await readJson(response, 'Vault session response')
+    if (response.status !== 200 || typeof body.token !== 'string' || body.token.length < 20
+      || !Number.isFinite(body.expiresAt) || body.expiresAt <= Date.now() + 30_000) {
+      throw new Error(typeof body.error === 'string' ? body.error : 'Vault session exchange was refused')
+    }
+    return { token: body.token, expiresAt: body.expiresAt }
+  })().catch((error) => {
+    sessionPromise = undefined
+    throw error
+  })
+  return sessionPromise
 }
 
-async function api(base, method, route, payload) {
-  const token = await session(base)
-  const res = await fetchWithTimeout(`${base}${route}`, {
-    method,
-    headers: { Authorization: `Bearer ${token}`, ...(payload ? { 'Content-Type': 'application/json' } : {}) },
-    body: payload ? JSON.stringify(payload) : undefined,
-  })
-  const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
-  return { status: res.status, body }
+async function readJson(response, label) {
+  const declared = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > MAX_API_RESPONSE_BYTES) throw new Error(label + ' is too large')
+  if (!response.body) throw new Error(label + ' is empty')
+  const reader = response.body.getReader()
+  const chunks = []
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > MAX_API_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => undefined)
+        throw new Error(label + ' is too large')
+      }
+      chunks.push(Buffer.from(value))
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  const text = Buffer.concat(chunks, total).toString('utf8')
+  try {
+    const value = JSON.parse(text)
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  } catch {
+    throw new Error(label + ' is invalid')
+  }
 }
 
-async function apiProxy(base, metadata, requestBody) {
-  const token = await session(base)
-  const encodedMetadata = Buffer.from(JSON.stringify(metadata), 'utf8').toString('base64url')
-  const res = await fetchWithTimeout(base + '/api/runner/use', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json',
-      'Content-Type': 'application/octet-stream',
-      'X-Vault-Proxy-Metadata': encodedMetadata,
-    },
-    body: requestBody && requestBody.byteLength > 0 ? requestBody : undefined,
-  })
-  const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
-  return { status: res.status, body }
+async function authenticatedFetch(url, init, label, timeoutMs = requestTimeoutMs()) {
+  const perform = async () => {
+    const session = await runnerSession()
+    const headers = new Headers(init.headers ?? {})
+    headers.set('Authorization', 'Bearer ' + session.token)
+    return fetchWithTimeout(url, { ...init, headers }, label, timeoutMs)
+  }
+  let response = await perform()
+  if (response.status === 401) {
+    // A long-running local CLI bridge can outlive its in-memory session. Re-exchange
+    // a fresh, single-use GitHub OIDC token once; never persist the session to disk.
+    await response.body?.cancel().catch(() => undefined)
+    sessionPromise = undefined
+    response = await perform()
+  }
+  return response
+}
+
+export async function api(_base, method, route, payload) {
+  const headers = { Accept: 'application/json' }
+  const init = { method, headers }
+  if (payload !== undefined) {
+    headers['Content-Type'] = 'application/json'
+    init.body = JSON.stringify(payload)
+  }
+  const response = await authenticatedFetch(vaultOrigin() + route, init, 'Vault API request')
+  const body = await readJson(response, 'Vault API response')
+  return { status: response.status, body }
+}
+
+export async function apiProxy(_base, metadata, requestBody) {
+  const encoded = Buffer.from(JSON.stringify(metadata)).toString('base64url')
+  const headers = {
+    Accept: 'application/json',
+    'Content-Type': 'application/octet-stream',
+    'X-Vault-Proxy-Metadata': encoded,
+  }
+  const init = { method: 'POST', headers }
+  if (requestBody && requestBody.byteLength > 0) init.body = requestBody
+  const response = await authenticatedFetch(vaultOrigin() + '/api/runner/use', init, 'Vault credential request', 30_000)
+  const body = await readJson(response, 'Vault proxy response')
+  return { status: response.status, body }
 }
 
 export function parseArgs(argv) {
@@ -208,8 +223,6 @@ export function parseHeaders(list) {
 }
 
 // Match the Worker-side cap; this is a bounded buffer, not an unbounded upload path.
-const LOCAL_PROXY_BODY_LIMIT = 10 * 1024 * 1024
-const LOCAL_PROXY_RESPONSE_LIMIT = 1_100 * 1024
 const LOCAL_PROXY_REQUEST_HEADERS = new Set([
   'accept', 'content-type', 'if-match', 'if-none-match',
   'if-modified-since', 'if-unmodified-since', 'range', 'x-api-version',
@@ -243,8 +256,8 @@ export function mapLocalProxyTarget(apiBaseUrl, requestTarget) {
   return new URL(`${pathname}${incoming.search}`, base.origin)
 }
 
-async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPort) {
-  const registry = await api(vaultOrigin, 'GET', '/api/runner/integrations')
+export async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPort) {
+  const registry = await api(null, 'GET', '/api/runner/integrations')
   if (registry.status !== 200 || !Array.isArray(registry.body.integrations)) die(`could not read CLI integration registry (${registry.body.error ?? registry.status})`)
   const credential = registry.body.integrations.find((item) => item.name === credentialName)
   if (!credential) die('credential is unavailable, hidden, disabled, expired or not in the runner registry')
@@ -393,7 +406,13 @@ async function startLocalProxy(vaultOrigin, credentialName, toolId, requestedPor
 async function main() {
   const [command, ...rest] = process.argv.slice(2)
   const { positional, flags, headers } = parseArgs(rest)
-  const base = origin()
+  const base = null
+
+  if (command === 'status') {
+    const session = await runnerSession()
+    console.log(JSON.stringify({ connected: true, sessionExpiresAt: session.expiresAt, transport: 'https' }, null, 2))
+    return
+  }
 
   if (command === 'list') {
     const { status, body } = await api(base, 'GET', '/api/runner/registry')
@@ -416,9 +435,9 @@ async function main() {
     let doc
     try { doc = JSON.parse(fs.readFileSync(flags.doc, 'utf8')) } catch { die('--doc must be a JSON file') }
     const { status, body } = await api(base, 'POST', '/api/runner/registrations', { name: flags.name, service: flags.service, doc })
-    if (status !== 200) die(`registration refused (${body.error}${body.detail ? `: ${body.detail}` : ''})`)
+    if (status !== 200) die(`registration refused (${body.error})`)
     console.log(`Credential request created: ${flags.name} (${flags.service})`)
-    console.log(`Owner inbox: ${base}/vault/requests`)
+    console.log(`Owner inbox: ${body.ownerInbox}`)
     console.log(`One-time owner form (expires ${new Date(body.expiresAt).toISOString()}, works once):\n${body.link}`)
     return
   }
@@ -449,7 +468,7 @@ async function main() {
     return
   }
 
-  die('commands: list | request | use | serve')
+  die('commands: status | list | request | use | serve')
 }
 
 // Resolve symlinks: the runner installs this file behind a `vault` symlink, so argv[1] is the link path.

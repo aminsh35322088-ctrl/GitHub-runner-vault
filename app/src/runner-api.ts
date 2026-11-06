@@ -12,7 +12,7 @@ import { deriveSessionKey } from './lib/runner-session.ts'
 import { createSession, registry, integrations, requestCredential, useCredential, type RunnerDeps } from './lib/runner-core.ts'
 import { CLOUDFLARE_IP_ADDRESS_HEADERS } from './lib/auth-config.ts'
 import { getRequestOrigin } from './db.ts'
-import { loadVaultPreferences } from './lib/vault-observability.ts'
+import { loadVaultAccessState, loadVaultPreferences } from './lib/vault-observability.ts'
 
 const jwks = cachedJwksSource()
 
@@ -30,10 +30,26 @@ function clientIp(request: Request): string | undefined {
   return undefined
 }
 
-async function buildDeps(request: Request, includeOidcPolicy = false, waitUntil?: RunnerDeps['waitUntil']): Promise<RunnerDeps> {
+/**
+ * Reject disabled/unavailable Vault access before a POST body is consumed.
+ * The main run() gate deliberately reads again after parsing, so a Disable
+ * racing with a slow upload cannot authorize work using this preflight result.
+ */
+async function runnerAccessPreflight(): Promise<Response | null> {
+  try {
+    const access = await loadVaultAccessState(getDb())
+    if (!access.enabled) {
+      return json({ error: 'vault_disabled' }, { status: 403, headers: { 'Cache-Control': 'no-store' } })
+    }
+    return null
+  } catch {
+    return json({ error: 'vault_access_unavailable' }, { status: 503, headers: { 'Cache-Control': 'no-store' } })
+  }
+}
+
+async function buildDeps(request: Request, includeOidcPolicy: boolean, waitUntil: RunnerDeps['waitUntil'] | undefined, db: ReturnType<typeof getDb>, now: number, vaultAccessEpoch: number): Promise<RunnerDeps> {
   const e = env as unknown as Record<string, unknown>
   const origin = getRequestOrigin(request)
-  const db = getDb()
   const keys = await loadVaultKeys(db, e as VaultEnv)
   const ip = clientIp(request)
   return {
@@ -44,23 +60,40 @@ async function buildDeps(request: Request, includeOidcPolicy = false, waitUntil?
     jwks,
     origin,
     fetchFn: fetch,
-    now: Date.now(),
+    now,
+    vaultAccessEpoch,
     ...(ip ? { clientIp: ip } : {}),
     getVaultPreferences: () => loadVaultPreferences(db),
     ...(waitUntil ? { waitUntil } : {}),
   }
 }
 
-// Misconfiguration must fail closed with a generic answer, never a stack trace.
+// Every Runner endpoint passes this uncached global gate. Owner routes are mounted
+// separately and remain available so the owner can re-enable access.
 async function run(
   request: Request,
   fn: (deps: RunnerDeps) => Promise<{ status: number; body: unknown }>,
   options: { includeOidcPolicy?: boolean } = {},
   waitUntil?: RunnerDeps['waitUntil'],
 ) {
+  const requestNow = Date.now()
+  let db: ReturnType<typeof getDb>
+  let vaultAccessEpoch = 0
+  try {
+    db = getDb()
+    const access = await loadVaultAccessState(db)
+    if (!access.enabled) {
+      return json({ error: 'vault_disabled' }, { status: 403, headers: { 'Cache-Control': 'no-store' } })
+    }
+    vaultAccessEpoch = access.epoch
+  } catch {
+    // Availability-control reads must fail closed, never assume enabled.
+    return json({ error: 'vault_access_unavailable' }, { status: 503, headers: { 'Cache-Control': 'no-store' } })
+  }
+
   let deps: RunnerDeps
   try {
-    deps = await buildDeps(request, options.includeOidcPolicy === true, waitUntil)
+    deps = await buildDeps(request, options.includeOidcPolicy === true, waitUntil, db, requestNow, vaultAccessEpoch)
   } catch {
     return json({ error: 'vault_not_configured' }, { status: 503, headers: { 'Cache-Control': 'no-store' } })
   }
@@ -181,6 +214,8 @@ export const runnerApp = new Spiceflow()
     path: '/api/runner/registrations',
     detail: { tags: ['Runner'], summary: 'Ask the owner to register a credential; returns a one-time owner link' },
     async handler({ request }) {
+      const blocked = await runnerAccessPreflight()
+      if (blocked) return blocked
       const parsed = await parseRunnerBody(request)
       if (!parsed.ok) return parsed.error === 'body_too_large' ? requestTooLarge() : invalidRequest()
       const body = parsed.body
@@ -194,6 +229,8 @@ export const runnerApp = new Spiceflow()
     path: '/api/runner/use',
     detail: { tags: ['Runner'], summary: 'Make an HTTPS call with a stored credential; the token is never returned' },
     async handler({ request, waitUntil }) {
+      const blocked = await runnerAccessPreflight()
+      if (blocked) return blocked
       const contentType = request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
       if (contentType === 'application/octet-stream') {
         const declared = contentLength(request, MAX_REQUEST_BODY)

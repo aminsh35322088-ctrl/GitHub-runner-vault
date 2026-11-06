@@ -98,7 +98,7 @@ const doc = {
 }
 
 const policy: OidcPolicy = {
-  audience: 'https://vault.test', repository: 'o/r', repositoryId: '1',
+  audience: 'https://vault.test', repository: 'o/r', repositoryId: '1', repositoryOwnerId: '2',
   allowedRefs: ['refs/heads/main'], allowedEvents: ['workflow_dispatch', 'schedule', 'push'],
   allowedWorkflowRefs: ['o/r/.github/workflows/runner.yml@refs/heads/main'],
 }
@@ -221,6 +221,19 @@ describe('authentication', () => {
     expect(rows.length).toBeGreaterThan(0)
   })
 
+  test('new sessions are signed with the gate epoch observed by the request', async () => {
+    const now = Date.now() + 23 * 60 * 60_000
+    const signed = await signedOidcToken(now, { jti: 'session-access-epoch' })
+    const d = await deps({ now, jwks: signed.jwks, vaultAccessEpoch: 7 })
+    const result = await createSession(d, `Bearer ${signed.token}`)
+    expect(result.status).toBe(200)
+    if (result.status !== 200) throw new Error('session exchange unexpectedly failed')
+    const token = (result.body as { token: string }).token
+    const payload = token.split('.')[1]!
+    const session = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')))
+    expect(session.accessEpoch).toBe(7)
+  })
+
   test('revoking sessions locks out existing sessions at once', async () => {
     const d = await deps()
     const revokedKey = 'runner_revoked_before'
@@ -279,6 +292,12 @@ describe('OIDC tokens are single-use (jti consumption)', () => {
       orm.eq(schema.credentialAudit.detail, 'oidc_token_replay'),
     ))
     expect(denials).toHaveLength(1)
+  })
+
+  test('a session from an earlier Vault access epoch is rejected after re-enable', async () => {
+    const d = await deps({ vaultAccessEpoch: 4 })
+    const oldHeader = await sessionHeader({ ...d, vaultAccessEpoch: 3 })
+    expect(await registry(d, oldHeader)).toEqual({ status: 401, body: { error: 'unauthorized' } })
   })
 
   test('a fresh token for the same workflow still works after another was consumed', async () => {

@@ -8,8 +8,9 @@
 //   - issuer, audience (this vault's origin), expiry and not-before,
 //   - that the token comes from the configured repository, from an allowed ref and
 //     event (so pull-request and fork runs cannot enroll),
-//   - that the subject claim names that same repository, and that the token id
-//     (jti) is present. Verification alone does not stop replay: the caller
+//   - that the subject claim binds the exact repository and context, accepting
+//     both GitHub's legacy name-only and immutable owner/repository-ID formats,
+//     and that the token id (jti) is present. Verification alone does not stop replay: the caller
 //     consumes the jti (see createSession in runner-core.ts) so each token can
 //     be exchanged exactly once.
 //
@@ -30,6 +31,8 @@ export type OidcPolicy = {
   allowedRefs: string[]
   allowedEvents: string[]
   allowedWorkflowRefs: string[]
+  /** Numeric owner id. Required outside bootstrap (verification fails closed
+   * without it); bootstrap policies carry the owner id in `bootstrap`. */
   repositoryOwnerId?: string
   bootstrap?: {
     ownerId: string
@@ -160,6 +163,45 @@ export function sameRepository(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase()
 }
 
+/**
+ * GitHub's default `sub` has two supported forms:
+ *   repo:OWNER/REPO:ref:refs/heads/main
+ *   repo:OWNER@OWNER-ID/REPO@REPO-ID:ref:refs/heads/main
+ *
+ * Do not use a prefix-only comparison here. Bind the repository segment to the
+ * independently signed repository claims and require the subject context to
+ * match the signed ref/environment claim exactly.
+ */
+function subjectMatchesRepository(
+  sub: string,
+  repository: string,
+  repositoryOwnerId: string,
+  repositoryId: string,
+  ref: string,
+  environment: string,
+  event: string,
+): boolean {
+  const separator = sub.indexOf(':', 5)
+  if (!sub.startsWith('repo:') || separator < 0) return false
+
+  const subjectRepository = sub.slice(5, separator)
+  const subjectContext = sub.slice(separator + 1)
+  const [owner, name] = repository.split('/')
+  if (!owner || !name) return false
+
+  const legacyRepository = repository
+  const immutableRepository = `${owner}@${repositoryOwnerId}/${name}@${repositoryId}`
+  const repositoryMatches = sameRepository(subjectRepository, legacyRepository) ||
+    sameRepository(subjectRepository, immutableRepository)
+  if (!repositoryMatches) return false
+
+  let expectedContext = ''
+  if (environment) expectedContext = `environment:${environment.replace(/:/g, '%3A')}`
+  else if (event === 'pull_request' || event === 'pull_request_target') expectedContext = 'pull_request'
+  else if (ref) expectedContext = `ref:${ref}`
+  return subjectContext === expectedContext
+}
+
 export async function verifyGithubOidc(
   token: string,
   policy: OidcPolicy,
@@ -218,19 +260,20 @@ export async function verifyGithubOidc(
   const repository = str(claims, 'repository')
   const repositoryId = str(claims, 'repository_id')
   const repositoryOwnerId = str(claims, 'repository_owner_id')
+  const repositoryOwner = str(claims, 'repository_owner')
   const ref = str(claims, 'ref')
   const event = str(claims, 'event_name')
+  const environment = str(claims, 'environment')
   const workflowRef = str(claims, 'workflow_ref')
   const reusableWorkflowRef = str(claims, 'job_workflow_ref')
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || !/^\d{1,20}$/.test(repositoryId)) {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ||
+      !/^\d{1,20}$/.test(repositoryId) || !/^\d{1,20}$/.test(repositoryOwnerId)) {
     return { ok: false, error: 'wrong repository' }
   }
-
   if (policy.bootstrap) {
     const bootstrap = policy.bootstrap
     const expectedRef = `refs/heads/${bootstrap.branch}`
     const expectedWorkflow = `${repository}/.github/workflows/${bootstrap.workflowFile}@${expectedRef}`
-    const repositoryOwner = str(claims, 'repository_owner')
     if (repositoryOwnerId !== bootstrap.ownerId || !repositoryOwner ||
         repository.split('/')[0]!.toLowerCase() !== repositoryOwner.toLowerCase()) {
       return { ok: false, error: 'wrong repository owner' }
@@ -245,7 +288,10 @@ export async function verifyGithubOidc(
     if (!sameRepository(repository, policy.repository) || repositoryId !== policy.repositoryId) {
       return { ok: false, error: 'wrong repository' }
     }
-    if (policy.repositoryOwnerId && repositoryOwnerId !== policy.repositoryOwnerId) {
+    if (!repositoryOwner || !sameRepository(repository.split('/')[0]!, repositoryOwner)) {
+      return { ok: false, error: 'wrong repository owner' }
+    }
+    if (!policy.repositoryOwnerId || repositoryOwnerId !== policy.repositoryOwnerId) {
       return { ok: false, error: 'wrong repository owner' }
     }
     if (!policy.allowedRefs.includes(ref)) return { ok: false, error: 'ref not allowed' }
@@ -261,12 +307,11 @@ export async function verifyGithubOidc(
   const runId = str(claims, 'run_id')
   if (!/^\d{1,20}$/.test(runId)) return { ok: false, error: 'missing run id' }
 
-  // Defence in depth: GitHub binds the subject to the same repository the
-  // other claims name (`repo:OWNER/REPO:ref:...`, `:environment:...` or
-  // `:pull_request`). A token whose sub names another repository is not the
-  // token it claims to be, even if every remaining claim was copied across.
+  // Defence in depth: verify the complete repository identity and context. For
+  // immutable subjects, this also proves the IDs embedded in `sub` match the
+  // separately signed owner/repository ID claims above.
   const sub = str(claims, 'sub')
-  if (!sub.toLowerCase().startsWith(`repo:${repository.toLowerCase()}:`)) {
+  if (!subjectMatchesRepository(sub, repository, repositoryOwnerId, repositoryId, ref, environment, event)) {
     return { ok: false, error: 'subject mismatch' }
   }
   // The caller consumes the jti to make the token single-use; without one
@@ -315,13 +360,10 @@ export function policyFromEnv(env: Record<string, unknown>, audience: string): O
   }
   const allowedWorkflowRefs = requiredList('RUNNER_ALLOWED_WORKFLOW_REFS')
   const repositoryOwnerId = typeof env.RUNNER_REPOSITORY_OWNER_ID === 'string' && /^\d{1,20}$/.test(env.RUNNER_REPOSITORY_OWNER_ID.trim())
-    ? env.RUNNER_REPOSITORY_OWNER_ID.trim() : undefined
-  if (env.RUNNER_REPOSITORY_OWNER_ID !== undefined && !repositoryOwnerId) {
-    throw new Error('RUNNER_REPOSITORY_OWNER_ID must be a numeric owner id')
-  }
+    ? env.RUNNER_REPOSITORY_OWNER_ID.trim() : ''
+  if (!repositoryOwnerId) throw new Error('RUNNER_REPOSITORY_OWNER_ID must be the numeric owner id')
   if (allowedWorkflowRefs.some((item) => !item.includes('/.github/workflows/') || !item.includes('@'))) {
     throw new Error('RUNNER_ALLOWED_WORKFLOW_REFS must contain exact workflow refs')
   }
-  return { audience, repository, repositoryId, allowedRefs, allowedEvents, allowedWorkflowRefs,
-    ...(repositoryOwnerId ? { repositoryOwnerId } : {}) }
+  return { audience, repository, repositoryId, repositoryOwnerId, allowedRefs, allowedEvents, allowedWorkflowRefs }
 }

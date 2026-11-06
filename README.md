@@ -40,7 +40,7 @@ be able to read it.*
 
 **Goal:** a compromised or prompt-injected model on the runner cannot read a stored secret.
 
-The runner is **not** a trust boundary. An agent may have elevated permissions and share its runner account with workflow processes, so runner-side secrets cannot be protected from that agent. The vault therefore:
+The Runner host and the authorized GitHub Actions workflow are the trust boundary. The CLI obtains a short-lived GitHub OIDC token directly from the Actions runtime, exchanges it with this Worker for a short-lived Runner Session, and keeps that Session only in the CLI process memory. No provider token or Vault encryption key is sent to the Runner. Because OIDC authenticates the workflow run rather than an individual process, any process running inside that authorized job that can read the OIDC requester environment can request a Session; the Vault therefore enforces the pinned repository/workflow policy, short Session lifetime, single-use OIDC token IDs, rate limits, operation-level checks, owner-side revocation and audit logging.
 
 | Risk | Mitigation |
 | --- | --- |
@@ -56,28 +56,31 @@ The runner is **not** a trust boundary. An agent may have elevated permissions a
 
 What the vault does **not** protect against: an agent that is allowed to call an approved host can do anything that token
 permits on that host. Keep tokens least-privilege and short-lived (temporary credentials max 24 hours).
-OIDC authenticates the *workflow run*, not one process, so any process on the runner can use that run's session.
-
 See `SECURITY.md` for the short version.
 
 ## How it works
 
+
 ```
- Runner (GitHub Actions job)                 Cloudflare Worker (this repo)               Upstream
- ┌──────────────────────────┐   OIDC token   ┌───────────────────────────────┐
- │ agent → client/vault.mjs │ ─────────────▶ │ POST /api/runner/session      │  verify RS256 JWT vs GitHub JWKS,
- │                          │ ◀───────────── │   → 30-min signed session     │  repo id / ref / event pinned
- │                          │                │                               │
- │   use NAME GET <url>     │ ─────────────▶ │ POST /api/runner/use          │
- │                          │                │   decrypt token (in memory)   │ ──── HTTPS + token ───▶ api.example.com
- │   ◀ response (redacted)  │ ◀───────────── │   redact echoed token         │ ◀──────────────────────
- │                          │                │                               │
- │   request --doc doc.json │ ─────────────▶ │ POST /api/runner/registrations│
- │   ◀ one-time owner link  │ ◀───────────── │   creates pending entry + link│
- └──────────────────────────┘                └───────────────▲───────────────┘
-                                                             │ GitHub OAuth (owner only)
-                                              Owner browser ─┘  /vault  requests · register · detail · audit · settings
+The authorized GitHub Actions job exposes its OIDC requester capability to the Runner process. The Vault CLI obtains a single-use OIDC JWT, exchanges it with the Worker for a short-lived Session, and uses that Session over HTTPS. The Session exists only in the CLI process memory; no local broker, Unix socket or separate Linux account is involved.
+
+```text
+GitHub Actions job (id-token: write)
+        |
+        | OIDC requester variables
+        v
+Runner / Agent process
+        |
+        | Vault CLI: OIDC exchange + HTTPS API
+        v
+Cloudflare Vault Worker --------------------> approved upstream
+        | decrypts stored credential in memory
+        |
+Owner browser -- GitHub OAuth --> /vault
+                                  requests / register / audit / settings
 ```
+
+The CLI talks directly to the Worker over HTTPS. It does not use a local Broker, Unix socket, separate Linux identity, on-disk Session file or persistent Session cache. A fresh OIDC token is exchanged when the process starts and the resulting Session is memory-only; a long-running local CLI bridge re-exchanges after a rejected/expired Session when the GitHub Actions OIDC requester remains available. If OIDC or the Worker is unavailable, Vault commands fail closed while unrelated Runner services remain independent.
 
 Registering a new credential:
 
@@ -196,9 +199,7 @@ Every call is audited with the worker-observed result, the purpose the agent gav
 
 ## Runner client
 
-`client/vault.mjs` is one zero-dependency file (Node 18+). It reads `VAULT_URL` and, inside a GitHub Actions job with
-`permissions: id-token: write`, uses `ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN` to get an OIDC token and caches the 30-minute
-session in a `0600` file.
+client/vault.mjs is one zero-dependency file (Node 18+). It connects directly to VAULT_URL over HTTPS and uses the GitHub Actions OIDC requester variables (ACTIONS_ID_TOKEN_REQUEST_URL and ACTIONS_ID_TOKEN_REQUEST_TOKEN) to obtain a single-use identity token. It exchanges that token at /api/runner/session, then calls the Runner API with the short-lived Session held only in process memory. No Session is written to disk, and no provider token is returned to the CLI. The workflow must grant permissions: id-token: write; the Worker still verifies the immutable repository/owner identity and exact workflow policy.
 
 ```bash
 export VAULT_URL=https://<your-vault-origin>
@@ -253,22 +254,46 @@ Runner traffic limits are owner-configurable in **Settings → Runner traffic li
 
 ## Deployment
 
-There is exactly one way to deploy: a setup wizard drives a GitHub Actions workflow. No local CLI, nothing to configure by hand — the wizard connects to Cloudflare, walks you through creating the single deploy token from a prefilled template, and links you to saving it and running the deploy. The owner identity comes from the repository owner, so there is no first-visitor owner claim.
+There are two deployment paths. For an owner-operated installation, use **Wrangler OAuth** from a trusted machine. It deploys directly to the existing Cloudflare account and does not require a Cloudflare API token in GitHub Secrets. The GitHub Actions route remains optional for unattended deployments and is manual-only; a normal push never starts a deployment that lacks credentials.
+
+### Deploy with Wrangler OAuth (no GitHub Secret)
+
+Run from the repository root on a trusted machine that has access to the target Cloudflare account:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm --filter runner-vault-app exec wrangler login --device --scopes account:read --scopes user:read --scopes workers_scripts:write --scopes d1:write
+pnpm deploy
+```
+
+Wrangler prints a one-time verification URL and code. Approve it while signed in to the intended Cloudflare account. The login is stored in the local Wrangler configuration, not in this repository or GitHub. The deploy helper reuses the existing D1 database and keeps an already-configured `VAULT_MASTER_KEY` Worker secret unchanged.
+
+After a successful deploy, publish metadata for the exact commit that was deployed:
+
+```sh
+export CLOUDFLARE_WORKERS_SUBDOMAIN="your-account-subdomain"
+export GITHUB_SHA="$(git rev-parse HEAD)"
+node app/scripts/deployment-info.mjs
+
+git add deployment.json
+git commit -m "chore(deploy): publish deployment info"
+git push origin main
+```
+
+`CLOUDFLARE_WORKERS_SUBDOMAIN` is the account's public `workers.dev` subdomain, not a credential. The Runner Lab reads `deployment.json` to discover the Vault URL and exact client commit. Publish metadata only after the deployed commit is present on `main`.
+
+### Optional unattended GitHub Actions deployment
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://aminsh35322088-ctrl.github.io/GitHub-runner-vault/)
 
 *The button opens the setup wizard, hosted from this repository's `docs/` folder via GitHub Pages.*
 
-### Steps
-
-1. Fork this repository under the personal GitHub account that will own the vault (or use your existing copy of it). On a fork, GitHub leaves Actions off by default: open the **Actions** tab once and enable workflows, or the deploy in step 7 cannot run.
-2. Enable GitHub Pages once: **Settings → Pages → Deploy from a branch → main → /docs → Save**. The wizard then lives at `https://<you>.github.io/GitHub-runner-vault/`.
-3. Open the wizard (button above). It works out your GitHub username and repository name from its own address — there is nothing to type in.
-4. **Connect Cloudflare.** If login is enabled for your copy (see the next subsection), the wizard signs you in with Cloudflare, finds your account and checks that Workers and D1 are reachable. Otherwise it offers to continue with a token only.
-5. Create the deploy token with the wizard's button — the permissions (Workers Scripts: Edit, D1: Edit, Account Settings: Read) and the token name are pre-selected; press **Create Token** and paste the value back into the wizard. (A Cloudflare login only lasts an hour, so the long-lived token still does the actual deploying.) The wizard verifies the token in your browser; the token is never stored and is only ever sent to Cloudflare's API.
-6. Save the token as the CLOUDFLARE_API_TOKEN repository secret — the wizard links straight to the prefilled form. If token verification lists multiple Cloudflare accounts and step 4 did not pin one, the wizard also offers the optional CLOUDFLARE_ACCOUNT_ID secret for the account you pick.
-7. Run the **Deploy to Cloudflare** workflow from the Actions tab (the wizard links there too), then use the wizard's **Check deployment** button — it shows your vault URL as soon as the run publishes it.
-8. Open the vault URL and finish setup below.
+1. Fork this repository under the personal GitHub account that will own the vault (or use your existing copy). Enable Actions and GitHub Pages (**Settings → Pages → Deploy from a branch → main → /docs**).
+2. Open the wizard. It derives the GitHub username and repository name from its own address.
+3. Connect Cloudflare and create the pre-scoped deploy token (Workers Scripts: Edit, D1: Edit, Account Settings: Read).
+4. Save it as the `CLOUDFLARE_API_TOKEN` GitHub Actions secret. `CLOUDFLARE_ACCOUNT_ID` is optional when the token can access more than one account.
+5. Run **Deploy to Cloudflare** manually from the Actions tab, then use the wizard's **Check deployment** button.
+6. Open the Vault URL and finish setup below.
 
 ### Optional: enable Cloudflare login (once per copy)
 
@@ -281,24 +306,24 @@ The wizard's first step can sign the owner in with Cloudflare (read-only: accoun
 
 ### Updating
 
-Every merge to `main` that changes `app/**`, `client/**`, or the root pnpm manifests redeploys automatically; documentation-only changes do not. Re-running the workflow by hand is always safe: the build, D1 provisioning and master-key provisioning are idempotent, and an upgrade keeps the existing D1 data, owner pin and credentials.
+The GitHub Actions deploy workflow is intentionally manual-only. Wrangler OAuth deployments are initiated explicitly from the trusted owner environment; this avoids a failed deploy on every push when no GitHub Actions API-token secret is configured. Re-running a deploy is designed to preserve the existing D1 data, owner pin and credentials.
 
 ### How it works
 
-- The workflow runs `pnpm deploy` (the root script). The build takes the owner ID from the repository owner, and `app/scripts/deploy.mjs` resolves or creates the D1 database, deploys the Worker with Wrangler using your token, and provisions the `VAULT_MASTER_KEY` Worker secret (see *Where the key lives*). The Worker creates its tables on first request.
-- After deploying, the workflow publishes `deployment.json` at the repository root with the vault URL and the exact commit that was deployed. The Runner Lab reads that file to discover the vault, so there are no Lab-side variables to set.
+- Both deployment paths run the same `pnpm deploy` helper. It resolves the owner identity from the checked-out GitHub repository, reuses or creates the D1 database, deploys the Worker and only provisions `VAULT_MASTER_KEY` when that Worker secret is absent.
+- The GitHub Actions route publishes `deployment.json` automatically. With Wrangler OAuth, run `app/scripts/deployment-info.mjs` using `CLOUDFLARE_WORKERS_SUBDOMAIN` and the deployed `GITHUB_SHA`, then commit `deployment.json` to `main`. The Runner Lab reads that file to discover the Vault URL and client revision.
 
 ### Finish setup
 
 1. Open the Worker URL (`https://<name>.<you>.workers.dev`) and choose *Create the GitHub App* using the personal GitHub account that owns the deployed repository (or matches the explicitly configured owner ID). The app is always named `Runner Vault <your numeric GitHub ID>` — the name is fixed per account, so setup never creates a differently-named app on a later run. If GitHub reports that the name is taken, the app already exists under your account: delete it under **GitHub Settings → Developer settings → GitHub Apps** and run setup again, and it is recreated under the same name.
 2. Sign in to the owner dashboard. No Runner repository form is required: the first valid OIDC run from the owner's `main/.github/workflows/rdc-lab.yml` workflow proves the owner identity and atomically pins the repository ID. Later runs must match the pinned repository, owner, branch, event and workflow. Pull-request events are refused.
-3. Nothing to configure in the Runner Lab: its workflow reads `deployment.json` from this repository and connects automatically — see the [Runner Lab README](https://github.com/aminsh35322088-ctrl/GitHub-Runner-Lab). The Lab downloads the client at the commit recorded in `deployment.json`, obtains an OIDC token, establishes a short-lived session and reads the registry before starting RDC. No runner token or manual policy value is needed.
+3. Nothing to configure in the Runner Lab: its workflow reads deployment.json from this repository and connects automatically — see the Runner Lab README (https://github.com/aminsh35322088-ctrl/GitHub-Runner-Lab). The authorized workflow grants id-token: write and passes the Vault URL plus GitHub Actions OIDC requester environment to the Runner process. The CLI exchanges OIDC directly with the Worker over HTTPS; there is no Broker service, Unix socket, extra Linux account or runner PAT. If Vault is not configured or unavailable, Vault operations fail closed without blocking RDC or Tailscale.
 
 ### Where the key lives
 
 The master key is a Worker secret: `VAULT_MASTER_KEY` (32 random bytes, base64). **Nobody has to create or paste it.**
-The deploy helper provisions it automatically after every successful deploy (the GitHub Actions workflow above is
-the only supported route): it generates a new key for a fresh deployment or copies a legacy D1 key
+The deploy helper provisions it automatically after a successful deploy (Wrangler OAuth or the optional
+GitHub Actions workflow): it generates a new key for a fresh deployment or copies a legacy D1 key
 verbatim into the secret during an upgrade. The value is sent to Wrangler through stdin only, never argv, files or logs.
 If provisioning cannot complete, a fresh deployment fails closed and a legacy deployment stays in the warned read-only
 mode until a later redeploy retries.
@@ -324,26 +349,28 @@ Stored credentials are not touched.
 
 ## Configuration reference
 
-A deployment needs exactly one GitHub repository secret (`CLOUDFLARE_API_TOKEN`); everything else below is automatic, an optional override, or configured in the UI.
+The Wrangler OAuth deployment path needs no GitHub repository secret. The optional unattended GitHub Actions path uses `CLOUDFLARE_API_TOKEN`; `CLOUDFLARE_ACCOUNT_ID` is only an optional override for accounts where the token can see multiple accounts.
 
 | Name | Kind | Notes |
 | --- | --- | --- |
-| `CLOUDFLARE_API_TOKEN` | Actions secret | **The one required input.** Created with the wizard's prefilled template (Workers Scripts: Edit, D1: Edit, Account Settings: Read); used only by the deploy workflow. |
-| `CLOUDFLARE_ACCOUNT_ID` | Actions secret | Optional. Only needed when the token can see more than one account; otherwise the workflow resolves the single account automatically. |
+| `CLOUDFLARE_API_TOKEN` | Actions secret | Required only for the optional unattended GitHub Actions deploy workflow. Not used by Wrangler OAuth deployments. |
+| `CLOUDFLARE_ACCOUNT_ID` | Actions secret | Optional override for the GitHub Actions path when the token can see multiple accounts. |
+| `CLOUDFLARE_WORKERS_SUBDOMAIN` | deploy env | Public `workers.dev` subdomain used to write `deployment.json` after an OAuth-authenticated deploy; not a secret. |
 | `VAULT_MASTER_KEY` | Worker secret | Provisioned automatically by the deploy helper (see above); keeps the master key out of D1. Set manually only as a fallback. |
 | `PUBLIC_ORIGIN` | var | Canonical HTTPS origin for a custom domain. By default the actual request origin is used. |
-| `OWNER_GITHUB_ID` | var | Set by the deploy workflow from the repository owner; pinned in D1 on first use. Never set by hand. |
+| `OWNER_GITHUB_ID` | var | Set from the checked-out GitHub repository owner (or Actions owner context); pinned in D1 on first use. Never set by hand. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | vars / secrets | Optional override for the private GitHub sign-in App created through `/setup`. |
 | `RUNNER_REPOSITORY`, `RUNNER_REPOSITORY_ID`, `RUNNER_ALLOWED_REFS`, `RUNNER_ALLOWED_EVENTS`, `RUNNER_ALLOWED_WORKFLOW_REFS` | vars | Optional explicit static policy override. When absent, owner-verified OIDC bootstrap pins the first repository automatically. |
 | `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY` | secrets | Legacy explicit keys; both must be set to be used. |
 | `RUNNER_VAULT_D1_DATABASE_ID` | deploy env | Optional internal override: UUID of a pre-created D1 database; skips D1 list/create calls. Never commit this deployment-specific value. |
-| `DB` | D1 binding | Provisioned automatically by the deploy helper during the Actions deploy. |
+| `DB` | D1 binding | Resolved and attached by the deploy helper for both deployment paths. |
 
 ## Operations
 
-- **Revoke runner access now:** `/vault/settings` → *Revoke all runner sessions*. Do this after a runner reset or suspected leak.
+- **Disable all Runner access:** `/vault/settings` → *Vault Access* → *Disable Vault Access*. This blocks Runner API requests and atomically advances the global access epoch plus the Session revocation cutoff. Re-enabling does not restore old Sessions; each Runner must authenticate again and obtain a Session for the current epoch.
+- **Revoke runner sessions only:** `/vault/settings` → *Runner sessions* → *Revoke all runner sessions*. Use this when you need to invalidate Sessions without disabling the Vault.
 - **Rotate a credential:** open it → *Replace value*. The old value is overwritten.
-- **Disable quickly:** *Disable* or *Hide* takes effect on the next request.
+- **Disable one credential:** open it → *Disable* or *Hide*. The change takes effect on the next request.
 - **Delete:** destroys the stored ciphertext; the audit trail stays.
 - **Audit log:** `/vault/audit`. Rows contain runner identity, credential, result and sanitized request metadata. Caller-controlled purpose, body, headers, names that fail validation and secret values are not persisted.
 - **Rotating the key:** set a new `VAULT_MASTER_KEY` secret and redeploy; on the first request the vault re-encrypts every stored value under the new key automatically.

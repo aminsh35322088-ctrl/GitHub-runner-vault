@@ -3,7 +3,7 @@ import { getDb, schema } from 'db'
 import { buildPolicy, DEFAULT_EVENTS, loadRunnerPolicy, pinRunnerPolicy, resolveRepositoryId, saveRunnerPolicy } from './runner-policy.ts'
 
 const db = getDb()
-const input = { repository: 'o/r', repositoryId: '123', branch: 'main', workflowFile: 'rdc-lab.yml', events: DEFAULT_EVENTS }
+const input = { repository: 'o/r', repositoryId: '123', repositoryOwnerId: '65', branch: 'main', workflowFile: 'rdc-lab.yml', events: DEFAULT_EVENTS }
 const AUD = 'https://vault.test'
 
 beforeEach(async () => { await db.delete(schema.vaultSetting) })
@@ -11,7 +11,7 @@ beforeEach(async () => { await db.delete(schema.vaultSetting) })
 describe('runner policy', () => {
   test('is exact: one repository id, one branch ref, one workflow ref, no pull requests', () => {
     expect(buildPolicy(input, AUD)).toEqual({
-      audience: AUD, repository: 'o/r', repositoryId: '123',
+      audience: AUD, repository: 'o/r', repositoryId: '123', repositoryOwnerId: '65',
       allowedRefs: ['refs/heads/main'], allowedEvents: ['workflow_dispatch', 'schedule', 'push'],
       allowedWorkflowRefs: ['o/r/.github/workflows/rdc-lab.yml@refs/heads/main'],
     })
@@ -32,7 +32,7 @@ describe('runner policy', () => {
     await expect(loadRunnerPolicy(db, {}, AUD)).rejects.toThrow()
     await saveRunnerPolicy(db, input, AUD)
     expect((await loadRunnerPolicy(db, {}, AUD)).repositoryId).toBe('123')
-    const env = { RUNNER_REPOSITORY: 'a/b', RUNNER_REPOSITORY_ID: '9', RUNNER_ALLOWED_REFS: 'refs/heads/x', RUNNER_ALLOWED_EVENTS: 'push', RUNNER_ALLOWED_WORKFLOW_REFS: 'a/b/.github/workflows/w.yml@refs/heads/x' }
+    const env = { RUNNER_REPOSITORY: 'a/b', RUNNER_REPOSITORY_ID: '9', RUNNER_REPOSITORY_OWNER_ID: '3', RUNNER_ALLOWED_REFS: 'refs/heads/x', RUNNER_ALLOWED_EVENTS: 'push', RUNNER_ALLOWED_WORKFLOW_REFS: 'a/b/.github/workflows/w.yml@refs/heads/x' }
     expect((await loadRunnerPolicy(db, env, AUD)).repository).toBe('a/b')
   })
 

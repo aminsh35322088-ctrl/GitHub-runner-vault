@@ -22,10 +22,27 @@ export function parseWorkersSubdomain(payload) {
     throw new Error('Cloudflare did not return the workers.dev subdomain' + (message ? ': ' + message : ''))
   }
   const subdomain = payload?.result?.subdomain
-  if (typeof subdomain !== 'string' || !subdomain.trim()) {
-    throw new Error('Cloudflare did not return the workers.dev subdomain')
+  if (typeof subdomain !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(subdomain.trim())) {
+    throw new Error('Cloudflare did not return a valid workers.dev subdomain')
   }
   return subdomain.trim()
+}
+
+export async function resolveWorkersSubdomain({ configuredSubdomain, token, accountId, fetchImpl = fetch }) {
+  const override = typeof configuredSubdomain === 'string' ? configuredSubdomain.trim() : ''
+  if (override) return parseWorkersSubdomain({ success: true, result: { subdomain: override } })
+  if (!token) throw new Error('CLOUDFLARE_API_TOKEN is not set; set CLOUDFLARE_WORKERS_SUBDOMAIN to use an authenticated Wrangler deployment')
+  if (!accountId) throw new Error('CLOUDFLARE_ACCOUNT_ID is not set')
+
+  const response = await fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/subdomain`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  const body = await response.json().catch(() => null)
+  if (!response.ok) {
+    const detail = body?.errors?.find((item) => typeof item?.message === 'string')?.message
+    throw new Error('Cloudflare workers.dev lookup failed' + (detail ? ': ' + detail : ''))
+  }
+  return parseWorkersSubdomain(body)
 }
 
 export function buildVaultUrl(worker, subdomain) {
@@ -45,21 +62,12 @@ export function buildDeploymentInfo({ worker, subdomain, clientRef, now = new Da
 }
 
 async function main() {
-  const token = process.env.CLOUDFLARE_API_TOKEN?.trim()
-  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim()
-  if (!token) throw new Error('CLOUDFLARE_API_TOKEN is not set')
-  if (!accountId) throw new Error('CLOUDFLARE_ACCOUNT_ID is not set')
-
-  const worker = parseWorkerName(readFileSync(resolve(appDir, 'wrangler.jsonc'), 'utf8'))
-  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/subdomain`, {
-    headers: { Authorization: `Bearer ${token}` },
+  const subdomain = await resolveWorkersSubdomain({
+    configuredSubdomain: process.env.CLOUDFLARE_WORKERS_SUBDOMAIN,
+    token: process.env.CLOUDFLARE_API_TOKEN?.trim(),
+    accountId: process.env.CLOUDFLARE_ACCOUNT_ID?.trim(),
   })
-  const body = await response.json().catch(() => null)
-  if (!response.ok) {
-    const detail = body?.errors?.find((item) => typeof item?.message === 'string')?.message
-    throw new Error('Cloudflare workers.dev lookup failed' + (detail ? ': ' + detail : ''))
-  }
-  const subdomain = parseWorkersSubdomain(body)
+  const worker = parseWorkerName(readFileSync(resolve(appDir, 'wrangler.jsonc'), 'utf8'))
   const info = buildDeploymentInfo({ worker, subdomain, clientRef: process.env.GITHUB_SHA })
   writeFileSync(resolve(repoRoot, 'deployment.json'), JSON.stringify(info, null, 2) + '\n')
   console.log('[deployment-info] wrote deployment.json for ' + info.url)

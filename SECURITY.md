@@ -10,16 +10,16 @@
   storage paused) until a redeploy provisions the secret. If the key differs, every credential and the GitHub App
   secret is preflighted, then all ciphertext rewrites and key removal commit atomically; any unreadable value blocks
   migration and preserves the old D1 key.
-- The runner is **not** a trust boundary: anything on it can use its own session. So the
-  vault limits what a session can do: owner-approved hosts only, header allowlist, no redirects,
-  response redaction, rate limits, 30-minute sessions, owner-side revoke, append-only audit.
+- The Runner host and authorized GitHub Actions workflow are the trust boundary. The CLI obtains a single-use GitHub OIDC token from the Actions requester endpoint and exchanges it directly with the Worker over HTTPS. OIDC authenticates the workflow run, not an individual process: any process in that authorized job that can read the OIDC requester environment can request a short-lived Runner Session. The Session is held only in CLI process memory and is never written to disk. The Worker still enforces immutable repository/owner identity, the pinned workflow/ref/event policy, one-time OIDC token IDs, rate limits, operation checks, owner-side revocation, access epochs and append-only audit records. Provider tokens and the Vault encryption key remain inside the Worker and are never returned to the Runner.
+- The owner can disable all Runner API access with the global Vault Access setting. The Worker reads the enabled flag and monotonic access epoch together from D1 on every Runner request (not through the preferences cache); a failed or malformed read denies access. Disabling atomically advances the access epoch and the existing Session revocation cutoff. Every issued Session is signed with its epoch, so sessions from before a disable remain invalid after re-enable, including when different Worker isolates have skewed clocks. Owner dashboard access remains available while Runner access is disabled.
 - Runner identity is GitHub OIDC (RS256 only) restricted by repository id, ref and event.
   It authenticates the workflow run, not an individual process.
-- The only supported deployment route is the repository's **Deploy to Cloudflare** GitHub Actions workflow,
-  which supplies the repository owner's numeric GitHub ID as `RUNNER_VAULT_OWNER_GITHUB_ID` from the trusted
-  Actions context. (The build still honours the general resolution order — explicit ID, then the checked-out
-  GitHub origin via GitHub's typed JSON user API, then the Actions owner ID when its repository context matches
-  that origin — but no other route is documented or supported.) HTML profile metadata is never trusted because
+- Production deployment can use Wrangler OAuth from a trusted owner-controlled environment or the optional
+  **Deploy to Cloudflare** GitHub Actions workflow. The Actions path supplies the repository owner's numeric
+  GitHub ID as `RUNNER_VAULT_OWNER_GITHUB_ID`; the OAuth path resolves the owner from the checked-out GitHub
+  origin through GitHub's typed JSON user API. Both paths use the same build helper and Worker configuration.
+  The GitHub Actions workflow is manual-only and requires `CLOUDFLARE_API_TOKEN`; the Wrangler OAuth path does
+  not require a Cloudflare token in GitHub Secrets. HTML profile metadata is never trusted because
   it cannot distinguish Users from Organizations. If the identity cannot be verified, the Worker remains
   locked. The ID is injected as Worker runtime `OWNER_GITHUB_ID`, which is public identity metadata, not a
   credential.

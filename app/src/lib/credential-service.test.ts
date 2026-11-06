@@ -8,7 +8,8 @@ import {
   storeCredentialValue, MAX_TEMPORARY_MS,
 } from './credential-service.ts'
 import { consumeEnrollmentLink, listLatestRegistrationLinks, peekEnrollmentLink } from './enrollment.ts'
-import { createNotification, DEFAULT_VAULT_PREFERENCES, getUsageAnalytics, listCredentialValidationHistory, listNotifications, listRunnerIntegrationMetadata, listUnreadRegistrationNotificationIds, loadVaultPreferences, markNotificationIdsRead, markRegistrationNotificationsRead, recordCredentialUsage, recordRuntimeCredentialEvidence, resetVaultPreferencesCache, runScheduledCredentialValidation, saveVaultPreferences, validateStoredCredentialNow } from './vault-observability.ts'
+import { createNotification, DEFAULT_VAULT_PREFERENCES, getUsageAnalytics, listCredentialValidationHistory, listNotifications, listRunnerIntegrationMetadata, listUnreadRegistrationNotificationIds, loadVaultAccessEnabled, loadVaultPreferences, markNotificationIdsRead, markRegistrationNotificationsRead, recordCredentialUsage, recordRuntimeCredentialEvidence, resetVaultPreferencesCache, runScheduledCredentialValidation, saveVaultAccessEnabled, saveVaultPreferences, validateStoredCredentialNow } from './vault-observability.ts'
+import { deriveSessionKey, getRunnerRevokedBefore, issueRunnerSession, verifyRunnerSession } from './runner-session.ts'
 
 const KEY_B64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
 const SECRET = 'cfut_SUPERSECRETVALUE_123456789'
@@ -78,6 +79,100 @@ describe('Vault preferences', () => {
       expect(await loadVaultPreferences(db, now + 3)).toEqual(next)
     } finally {
       resetVaultPreferencesCache()
+    }
+  })
+})
+
+describe('global Vault access', () => {
+  test('defaults to enabled, bypasses preferences cache, revokes on disable and never restores old sessions', async () => {
+    const { db, now } = await setup()
+    const [previousAccess] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled')).limit(1)
+    const [previousRevocation] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before')).limit(1)
+    try {
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled'))
+      expect(await loadVaultAccessEnabled(db)).toBe(true)
+
+      // A warm, unrelated preferences cache must not mask an access change.
+      resetVaultPreferencesCache()
+      await loadVaultPreferences(db, now)
+
+      const previousCutoff = previousRevocation ? Number(previousRevocation.value) : 0
+      const issuedAt = Math.max(now, previousCutoff + 1)
+      const key = await deriveSessionKey('global-access-session-secret-at-least-32')
+      const issued = await issueRunnerSession(key, {
+        repository: 'owner/repository', repositoryId: '1', repositoryOwnerId: '2',
+        runId: '9001', runAttempt: '1', ref: 'refs/heads/main', event: 'workflow_dispatch',
+        workflow: 'runner', workflowRef: 'owner/repository/.github/workflows/runner.yml@refs/heads/main',
+        sha: 'test-sha', jti: 'global-access-test', sub: 'repo:owner/repository:ref:refs/heads/main',
+        expiresAt: issuedAt + 300_000,
+      }, issuedAt)
+      expect((await verifyRunnerSession(key, issued.token, issuedAt + 1, previousCutoff)).ok).toBe(true)
+
+      await saveVaultAccessEnabled(db, false, issuedAt + 1)
+      expect(await loadVaultAccessEnabled(db)).toBe(false)
+      const disabledCutoff = await getRunnerRevokedBefore(db)
+      expect(disabledCutoff).toBe(issuedAt + 1)
+      expect((await verifyRunnerSession(key, issued.token, issuedAt + 2, disabledCutoff)).ok).toBe(false)
+
+      await saveVaultAccessEnabled(db, true, issuedAt + 2)
+      expect(await loadVaultAccessEnabled(db)).toBe(true)
+      const reenabledCutoff = await getRunnerRevokedBefore(db)
+      expect(reenabledCutoff).toBe(disabledCutoff)
+      expect((await verifyRunnerSession(key, issued.token, issuedAt + 3, reenabledCutoff)).ok).toBe(false)
+    } finally {
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled'))
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before'))
+      if (previousAccess) await db.insert(schema.vaultSetting).values(previousAccess)
+      if (previousRevocation) await db.insert(schema.vaultSetting).values(previousRevocation)
+      resetVaultPreferencesCache()
+    }
+  })
+
+  test('never moves the Session revocation cutoff backward', async () => {
+    const { db, now } = await setup()
+    const [previous] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before')).limit(1)
+    const [previousAccess] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled')).limit(1)
+    try {
+      const futureCutoff = now + 60_000
+      await db.insert(schema.vaultSetting).values({
+        key: 'runner_revoked_before', value: String(futureCutoff), updatedAt: futureCutoff,
+      }).onConflictDoUpdate({
+        target: schema.vaultSetting.key,
+        set: { value: String(futureCutoff), updatedAt: futureCutoff },
+      })
+
+      await saveVaultAccessEnabled(db, false, now)
+      expect(await getRunnerRevokedBefore(db)).toBe(futureCutoff)
+      const [current] = await db.select().from(schema.vaultSetting)
+        .where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before')).limit(1)
+      expect(current?.updatedAt).toBe(futureCutoff)
+    } finally {
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'runner_revoked_before'))
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled'))
+      if (previous) await db.insert(schema.vaultSetting).values(previous)
+      if (previousAccess) await db.insert(schema.vaultSetting).values(previousAccess)
+    }
+  })
+
+  test('fails closed for an unrecognized persisted access value', async () => {
+    const { db, now } = await setup()
+    const [previous] = await db.select().from(schema.vaultSetting)
+      .where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled')).limit(1)
+    try {
+      await db.insert(schema.vaultSetting).values({
+        key: 'vault_access_enabled', value: 'enabled-ish', updatedAt: now,
+      }).onConflictDoUpdate({
+        target: schema.vaultSetting.key,
+        set: { value: 'enabled-ish', updatedAt: now },
+      })
+      expect(await loadVaultAccessEnabled(db)).toBe(false)
+    } finally {
+      await db.delete(schema.vaultSetting).where(orm.eq(schema.vaultSetting.key, 'vault_access_enabled'))
+      if (previous) await db.insert(schema.vaultSetting).values(previous)
     }
   })
 })
