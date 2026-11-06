@@ -45,7 +45,7 @@ function createVaultFetch({ credentials, integrations, useResult, unauthorizedOn
     const headers = new Headers(init.headers ?? {})
     seen.push({ url: url.toString(), method: init.method ?? 'GET', headers, body: init.body })
     if (url.hostname === '127.0.0.1' || url.hostname === 'localhost') return realFetch(input, init)
-    if (url.hostname === 'pipelines.actions.githubusercontent.com') {
+    if (url.hostname.endsWith('.actions.githubusercontent.com')) {
       assert.equal(headers.get('authorization'), 'Bearer ' + REQUESTER_TOKEN)
       assert.equal(url.searchParams.get('audience'), 'https://vault.example')
       oidcCount++
@@ -230,14 +230,56 @@ test('serve runs a loopback-only provider bridge with Vault-injected credentials
   }
 })
 
-test('OIDC bootstrap fails closed when the requester endpoint is not GitHub Actions', async () => {
-  const restore = configureEnv({ ACTIONS_ID_TOKEN_REQUEST_URL: 'https://attacker.example/steal' })
-  globalThis.fetch = async () => { throw new Error('must not be called') }
+test('OIDC bootstrap accepts the regional GitHub-hosted runner requester endpoint', async () => {
+  const restore = configureEnv({
+    ACTIONS_ID_TOKEN_REQUEST_URL: 'https://run-actions-2-azure-eastus.actions.githubusercontent.com/oidc/token?api-version=2.0',
+  })
+  const stub = createVaultFetch()
+  globalThis.fetch = stub.fetchFn
   try {
-    await assert.rejects(runnerSession(), /OIDC endpoint is not trusted/)
+    const session = await runnerSession()
+    assert.equal(session.token, 'runner-session-token-1')
+    assert.equal(stub.seen.some((item) => new URL(item.url).hostname === 'run-actions-2-azure-eastus.actions.githubusercontent.com'), true)
   } finally {
     globalThis.fetch = realFetch
     restore()
+  }
+})
+
+test('OIDC bootstrap still accepts the legacy pipelines requester endpoint', async () => {
+  const restore = configureEnv()
+  const stub = createVaultFetch()
+  globalThis.fetch = stub.fetchFn
+  try {
+    const session = await runnerSession()
+    assert.equal(session.token, 'runner-session-token-1')
+  } finally {
+    globalThis.fetch = realFetch
+    restore()
+  }
+})
+
+test('OIDC bootstrap fails closed for hosts outside the direct GitHub Actions suffix', async () => {
+  const untrustedUrls = [
+    'https://attacker.example/steal',
+    'https://actions.githubusercontent.com/oidc/token',
+    'https://nested.run-actions-2-azure-eastus.actions.githubusercontent.com/oidc/token',
+    'https://run-actions-2-azure-eastus.actions.githubusercontent.com.evil.example/oidc/token',
+    'https://run-actions-2-azure-eastus.actions.githubusercontent.com:8443/oidc/token',
+    'http://run-actions-2-azure-eastus.actions.githubusercontent.com/oidc/token',
+    'https://user:pass@run-actions-2-azure-eastus.actions.githubusercontent.com/oidc/token',
+  ]
+  for (const endpoint of untrustedUrls) {
+    const restore = configureEnv({ ACTIONS_ID_TOKEN_REQUEST_URL: endpoint })
+    let called = false
+    globalThis.fetch = async () => { called = true; throw new Error('must not be called') }
+    try {
+      await assert.rejects(runnerSession(), /OIDC endpoint is not trusted/, endpoint)
+      assert.equal(called, false, 'untrusted endpoint must be rejected before network access')
+    } finally {
+      globalThis.fetch = realFetch
+      restore()
+    }
   }
 })
 

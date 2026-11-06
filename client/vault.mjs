@@ -75,7 +75,21 @@ function oidcRequester() {
   }
   let url
   try { url = new URL(requestUrl) } catch { throw new Error('GitHub Actions OIDC configuration is invalid') }
-  if (url.origin !== 'https://pipelines.actions.githubusercontent.com'
+  // GitHub documents the OIDC requester on *.actions.githubusercontent.com.
+  // GitHub-hosted runners may use a regional host such as
+  // run-actions-2-azure-eastus.actions.githubusercontent.com instead of the
+  // older pipelines.actions.githubusercontent.com hostname. Trust exactly one
+  // DNS label below the GitHub-owned suffix; reject nested domains, ports,
+  // userinfo, fragments, non-HTTPS URLs and redirects.
+  const oidcSuffix = '.actions.githubusercontent.com'
+  const oidcHost = url.hostname.toLowerCase()
+  const oidcSubdomain = oidcHost.endsWith(oidcSuffix)
+    ? oidcHost.slice(0, -oidcSuffix.length)
+    : ''
+  const trustedOidcHost = oidcSubdomain.length > 0
+    && !oidcSubdomain.includes('.')
+    && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(oidcSubdomain)
+  if (url.protocol !== 'https:' || !trustedOidcHost || url.port
     || url.username || url.password || url.hash) {
     throw new Error('GitHub Actions OIDC endpoint is not trusted')
   }
