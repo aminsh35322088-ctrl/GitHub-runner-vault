@@ -1,1 +1,5 @@
-{"cloudflareOAuthClientId":"5c2023bf846c0661cd779532fffe5080","cloudflareOAuthRelayUrl":"https://vault-wizard-relay.amin3532.workers.dev"}
+{
+  "siteUrl": "https://aminsh35322088-ctrl.github.io/GitHub-runner-vault/",
+  "cloudflareOAuthClientId": "5c2023bf846c0661cd779532fffe5080",
+  "cloudflareOAuthRelayUrl": "https://vault-wizard-relay.amin3532.workers.dev"
+}

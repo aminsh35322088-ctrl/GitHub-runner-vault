@@ -5,13 +5,13 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import {
+  applyDeploymentOverrides,
   isValidMasterKey,
   masterKeyAction,
   parseD1DatabaseList,
   parseSecretList,
   parseStoredMasterKey,
   setD1DatabaseId,
-  setD1DatabaseIdInJsonc,
 } from './deploy.mjs'
 
 const DATABASE_ID = '8bd6ccde-01d7-47e4-8fd5-92bf99736b81'
@@ -114,39 +114,23 @@ test('rejects binding/name mismatches instead of reusing another database', () =
   )
 })
 
-test('adds database_id to wrangler.jsonc without dropping comments or other settings', () => {
-  const source = `{
-  // Keep the DB binding name stable in Worker code.
-  "d1_databases": [
-    { "binding": "DB", "database_name": "runner-vault-db" }
-  ],
-  "vars": {
-    // This is public identity metadata.
-    "OWNER_GITHUB_ID": "318252513"
+test('deployment overrides are isolated to generated config and validated', () => {
+  const config = {
+    name: 'runner-vault',
+    d1_databases: [{ binding: 'DB', database_name: 'runner-vault-db' }],
   }
-}
-`
-  const updated = setD1DatabaseIdInJsonc(source, 'DB', 'runner-vault-db', DATABASE_ID)
-  assert.match(updated, /"database_id": "8bd6ccde-01d7-47e4-8fd5-92bf99736b81"/)
-  assert.match(updated, /Keep the DB binding name stable/)
-  assert.match(updated, /OWNER_GITHUB_ID/)
+  const overridden = applyDeploymentOverrides(config, {
+    RUNNER_VAULT_WORKER_NAME: 'vault-instance-2',
+    RUNNER_VAULT_D1_DATABASE_NAME: 'vault-instance-2-db',
+  })
+  assert.equal(overridden.name, 'vault-instance-2')
+  assert.equal(overridden.d1_databases[0].database_name, 'vault-instance-2-db')
+  assert.equal(config.name, 'runner-vault')
+  assert.equal(config.d1_databases[0].database_name, 'runner-vault-db')
+  assert.throws(() => applyDeploymentOverrides(config, { RUNNER_VAULT_WORKER_NAME: 'Not Valid' }), /WORKER_NAME/)
+  assert.throws(() => applyDeploymentOverrides(config, { RUNNER_VAULT_D1_DATABASE_NAME: '../other' }), /D1_DATABASE_NAME/)
 })
 
-test('updates an existing database_id in wrangler.jsonc instead of duplicating it', () => {
-  const source = `{
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "runner-vault-db",
-      "database_id": "old-id"
-    }
-  ]
-}
-`
-  const updated = setD1DatabaseIdInJsonc(source, 'DB', 'runner-vault-db', DATABASE_ID)
-  assert.equal((updated.match(/"database_id"/g) ?? []).length, 1)
-  assert.match(updated, new RegExp(DATABASE_ID))
-})
 
 function makeDeployFixture({ withBuild = false, databases = [{ name: 'runner-vault-db', uuid: DATABASE_ID }] } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'runner-vault-deploy-'))
@@ -271,7 +255,7 @@ test('uses the deployment-provided D1 UUID without D1 API calls', () => {
       RUNNER_VAULT_D1_DATABASE_ID: DATABASE_ID,
     })
     assert.equal(result.status, 0, result.stderr)
-    assert.deepEqual(readFileSync(f.callsFile, 'utf8').trim().split('\n'), ['deploy', 'secret list', EXECUTE_MASTER_KEY_CALL, 'secret put VAULT_MASTER_KEY'])
+    assert.deepEqual(readFileSync(f.callsFile, 'utf8').trim().split('\n'), ['deploy --config ' + f.generatedConfig, 'secret list --config ' + f.generatedConfig, EXECUTE_MASTER_KEY_CALL + ' --config ' + f.generatedConfig, 'secret put VAULT_MASTER_KEY --config ' + f.generatedConfig])
     assert.equal(JSON.parse(readFileSync(f.generatedConfig, 'utf8')).d1_databases[0].database_id, DATABASE_ID)
     // A fresh deploy generates a valid 32-byte key, delivered on stdin only:
     // it reaches the secret-value file but never appears in the call log.
@@ -289,14 +273,14 @@ test('Workers Builds reuses its prebuilt owner binding, resolves D1, then deploy
     const result = invokeDeploy(f, { WORKERS_CI: '1' })
     assert.equal(result.status, 0, result.stderr)
     const calls = readFileSync(f.callsFile, 'utf8').trim().split('\n')
-    assert.deepEqual(calls, ['d1 list --json', 'deploy', 'secret list', EXECUTE_MASTER_KEY_CALL, 'secret put VAULT_MASTER_KEY'])
+    assert.deepEqual(calls, ['d1 list --json', 'deploy --config ' + f.generatedConfig, 'secret list --config ' + f.generatedConfig, EXECUTE_MASTER_KEY_CALL + ' --config ' + f.generatedConfig, 'secret put VAULT_MASTER_KEY --config ' + f.generatedConfig])
     const generated = JSON.parse(readFileSync(f.generatedConfig, 'utf8'))
     assert.equal(generated.vars.OWNER_GITHUB_ID, OWNER_ID)
     assert.equal(generated.d1_databases[0].database_id, DATABASE_ID)
     assert.equal(generated.main, 'worker.js')
     assert.equal('no_bundle' in generated, false)
     assert.equal(readFileSync(join(f.app, 'dist', 'rsc', 'worker.js'), 'utf8'), "import worker from './index.js'\nexport default worker\n")
-    assert.match(readFileSync(f.sourceConfig, 'utf8'), new RegExp(DATABASE_ID))
+    assert.doesNotMatch(readFileSync(f.sourceConfig, 'utf8'), /database_id/)
   } finally {
     f.cleanup()
   }
@@ -308,7 +292,7 @@ test('Wrangler CLI path builds first, then resolves D1 and deploys', () => {
     const result = invokeDeploy(f, { RUNNER_VAULT_OWNER_GITHUB_ID: OWNER_ID })
     assert.equal(result.status, 0, result.stderr)
     const calls = readFileSync(f.callsFile, 'utf8').trim().split('\n')
-    assert.deepEqual(calls, ['vite build', 'd1 list --json', 'deploy', 'secret list', EXECUTE_MASTER_KEY_CALL, 'secret put VAULT_MASTER_KEY'])
+    assert.deepEqual(calls, ['vite build', 'd1 list --json', 'deploy --config ' + f.generatedConfig, 'secret list --config ' + f.generatedConfig, EXECUTE_MASTER_KEY_CALL + ' --config ' + f.generatedConfig, 'secret put VAULT_MASTER_KEY --config ' + f.generatedConfig])
     const generated = JSON.parse(readFileSync(f.generatedConfig, 'utf8'))
     assert.equal(generated.vars.OWNER_GITHUB_ID, OWNER_ID)
     assert.equal(generated.d1_databases[0].database_id, DATABASE_ID)
@@ -320,13 +304,37 @@ test('Wrangler CLI path builds first, then resolves D1 and deploys', () => {
   }
 })
 
+test('supports installation-specific Worker and D1 names without editing the source template', () => {
+  const f = makeDeployFixture()
+  try {
+    const result = invokeDeploy(f, {
+      WORKERS_CI: '1',
+      RUNNER_VAULT_WORKER_NAME: 'vault-copy-1',
+      RUNNER_VAULT_D1_DATABASE_NAME: 'vault-copy-1-db',
+    })
+    assert.equal(result.status, 0, result.stderr)
+    const generated = JSON.parse(readFileSync(f.generatedConfig, 'utf8'))
+    assert.equal(generated.name, 'vault-copy-1')
+    assert.equal(generated.d1_databases[0].database_name, 'vault-copy-1-db')
+    const calls = readFileSync(f.callsFile, 'utf8')
+    assert.match(calls, /d1 list --json/)
+    assert.match(calls, /deploy --config/)
+    assert.match(calls, /secret list --config/)
+    assert.match(calls, /d1 execute vault-copy-1-db .*--config/)
+    assert.match(calls, /secret put VAULT_MASTER_KEY --config/)
+    assert.doesNotMatch(readFileSync(f.sourceConfig, 'utf8'), /vault-copy-1|database_id/)
+  } finally {
+    f.cleanup()
+  }
+})
+
 test('creates a missing D1 database before deploying', () => {
   const f = makeDeployFixture({ databases: [] })
   try {
     const result = invokeDeploy(f, { WORKERS_CI: '1' })
     assert.equal(result.status, 0, result.stderr)
     const calls = readFileSync(f.callsFile, 'utf8').trim().split('\n')
-    assert.deepEqual(calls, ['d1 list --json', 'd1 create runner-vault-db --binding DB --update-config', 'd1 list --json', 'deploy', 'secret list', EXECUTE_MASTER_KEY_CALL, 'secret put VAULT_MASTER_KEY'])
+    assert.deepEqual(calls, ['d1 list --json', 'd1 create runner-vault-db', 'd1 list --json', 'deploy --config ' + f.generatedConfig, 'secret list --config ' + f.generatedConfig, EXECUTE_MASTER_KEY_CALL + ' --config ' + f.generatedConfig, 'secret put VAULT_MASTER_KEY --config ' + f.generatedConfig])
     assert.equal(JSON.parse(readFileSync(f.generatedConfig, 'utf8')).d1_databases[0].database_id, DATABASE_ID)
   } finally {
     f.cleanup()
@@ -342,7 +350,7 @@ test('skips master key provisioning when the secret already exists', () => {
     })
     assert.equal(result.status, 0, result.stderr)
     const calls = readFileSync(f.callsFile, 'utf8').trim().split('\n')
-    assert.deepEqual(calls, ['d1 list --json', 'deploy', 'secret list'])
+    assert.deepEqual(calls, ['d1 list --json', 'deploy --config ' + f.generatedConfig, 'secret list --config ' + f.generatedConfig])
     assert.equal(existsSync(f.secretValueFile), false)
   } finally {
     f.cleanup()
@@ -358,7 +366,7 @@ test('migrates a stored legacy master key into the secret verbatim', () => {
     })
     assert.equal(result.status, 0, result.stderr)
     const calls = readFileSync(f.callsFile, 'utf8').trim().split('\n')
-    assert.deepEqual(calls, ['d1 list --json', 'deploy', 'secret list', EXECUTE_MASTER_KEY_CALL, 'secret put VAULT_MASTER_KEY'])
+    assert.deepEqual(calls, ['d1 list --json', 'deploy --config ' + f.generatedConfig, 'secret list --config ' + f.generatedConfig, EXECUTE_MASTER_KEY_CALL + ' --config ' + f.generatedConfig, 'secret put VAULT_MASTER_KEY --config ' + f.generatedConfig])
     assert.equal(readFileSync(f.secretValueFile, 'utf8'), TEST_MASTER_KEY)
     assert.equal(readFileSync(f.callsFile, 'utf8').includes(TEST_MASTER_KEY), false)
   } finally {

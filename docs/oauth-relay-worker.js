@@ -8,30 +8,41 @@
 //
 // It stores nothing, logs nothing and has no secrets: the OAuth client is
 // public (PKCE), and the authorization code it forwards is single-use and
-// seconds-lived. Deploy one per wizard copy (see the vault README,
-// "enable Cloudflare login").
+// seconds-lived. Deploy one per wizard copy and set ALLOWED_ORIGINS to its
+// exact HTTPS origin.
 const TOKEN_URL = 'https://dash.cloudflare.com/oauth2/token';
-const DEFAULT_ORIGINS = 'https://aminsh35322088-ctrl.github.io';
 
 export default {
   async fetch(request, env) {
     const origin = request.headers.get('Origin') || '';
-    const allowed = (env.ALLOWED_ORIGINS || DEFAULT_ORIGINS)
-      .split(',').map((s) => s.trim()).filter(Boolean);
-    const ok = allowed.includes(origin);
+    const allowed = (typeof env.ALLOWED_ORIGINS === 'string' ? env.ALLOWED_ORIGINS : '')
+      .split(',').map((value) => value.trim()).filter((value) => {
+        try {
+          const parsed = new URL(value);
+          return parsed.protocol === 'https:' && parsed.origin === value &&
+            parsed.pathname === '/' && !parsed.search && !parsed.hash;
+        } catch {
+          return false;
+        }
+      });
+    // This relay handles authorization codes for a browser origin. Without
+    // an explicit allowlist it must fail closed, never inherit the source
+    // repository owner's GitHub Pages origin in a fork.
+    if (!allowed.length) return new Response('Relay origin allowlist is not configured', { status: 503 });
+    const ok = Boolean(origin) && allowed.includes(origin);
     const cors = ok ? {
       'Access-Control-Allow-Origin': origin,
       'Access-Control-Allow-Methods': 'POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
       'Vary': 'Origin',
     } : {};
+    if (!ok) return new Response('Origin not allowed', { status: 403 });
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: cors });
     }
     if (request.method !== 'POST') {
       return new Response('Method not allowed', { status: 405, headers: cors });
     }
-    if (!ok) return new Response('Origin not allowed', { status: 403 });
     let form;
     try {
       form = await request.formData();
@@ -41,7 +52,7 @@ export default {
     const body = new URLSearchParams();
     for (const k of ['code', 'redirect_uri', 'client_id', 'code_verifier']) {
       const v = form.get(k);
-      if (v) body.set(k, v);
+      if (typeof v === 'string' && v) body.set(k, v);
     }
     body.set('grant_type', 'authorization_code');
     const res = await fetch(TOKEN_URL, {

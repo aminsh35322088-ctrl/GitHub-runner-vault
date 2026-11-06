@@ -155,7 +155,7 @@
       <p class="dim">Sign in with Cloudflare so the wizard can find your account and check it is ready.
       The login is read-only — it cannot change anything.</p>
       <button class="btn primary" id="loginBtn" type="button">Login with Cloudflare</button>
-      <p class="dim" style="font-size:.85em;margin-top:10px">Running a fork? The preconfigured login belongs to the original owner's Cloudflare account. Register your own client (README: “enable Cloudflare login”), or continue with a token in Step 2 — setup works fully either way.</p>
+      <p class="dim" style="font-size:.85em;margin-top:10px">Cloudflare login is enabled only when this copy has its own OAuth client and HTTPS relay configured for this exact GitHub Pages path. You can also skip login and continue with a token in Step 2.</p>
     </div>
     <div id="s1-setup" class="hidden">
       <p class="dim">Login is not configured for this copy of the wizard yet. It takes a minute, once:</p>
@@ -164,8 +164,8 @@
           <li>In Cloudflare open <strong>Manage account → OAuth clients → Create client</strong> and name it <strong>Runner Vault Setup Wizard</strong>.</li>
           <li>Choose a <strong>public</strong> client, token authentication <strong>None</strong> (PKCE), with the grants <strong>Authorization Code</strong> and <strong>Refresh Token</strong>; set the redirect URL to<br><code id="pageUrlCode"></code></li>
           <li>Allow the scopes <strong>Account Settings: Read</strong>, <strong>D1: Read</strong> and <strong>Workers: Content Read-Only</strong> (there is no scope literally named “Workers Scripts” — that one is the Workers read scope; <code>offline_access</code> is added automatically with the Refresh Token grant).</li>
-          <li>Put your client ID in <code>docs/wizard-config.json</code> in this repository and reload this page.</li>
-          <li>Deploy the OAuth relay once: in <strong>Workers &amp; Pages</strong> create a Worker named <code>vault-wizard-relay</code>, paste in <code>docs/oauth-relay-worker.js</code> from this repository, deploy it, and add its URL to <code>docs/wizard-config.json</code> as <code>cloudflareOAuthRelayUrl</code>. (Cloudflare's token endpoint has no CORS headers, so the login exchange needs this stateless relay — it stores nothing and has no secrets.)</li>
+          <li>Put your client ID in <code>docs/wizard-config.json</code> and set its <code>siteUrl</code> to this exact page URL, including the repository path. The file is ignored by any other copy, even another repository under the same GitHub Pages hostname.</li>
+          <li>Deploy the OAuth relay once: in <strong>Workers &amp; Pages</strong> create a Worker named <code>vault-wizard-relay</code>, paste in <code>docs/oauth-relay-worker.js</code>, set <code>ALLOWED_ORIGINS</code> to this exact HTTPS origin, then deploy it. Add its URL to <code>docs/wizard-config.json</code> as <code>cloudflareOAuthRelayUrl</code>. The relay has no built-in origin allowlist and refuses requests until you configure one.</li>
         </ol>
       </div>
       <button class="btn ghost" id="skip1Btn" type="button">Continue with a token instead</button>
@@ -187,8 +187,7 @@
       <div><div class="clabel">Step 2</div><h2>Create the deploy token</h2></div>
       <div class="badge"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg></div>
     </div>
-    <p class="dim">A login only lasts an hour, so GitHub Actions needs its own token that does not expire.
-    This one is pre-filled — just press <strong>Create Token</strong> and paste the value below.</p>
+    <p class="dim">Use a narrowly-scoped Cloudflare API token for the deployment. Select only the permissions shown below, then paste the token to validate it.</p>
     <a class="btn primary" id="tokenLink" target="_blank" rel="noopener">Create the deploy token</a>
     <label for="token">Deploy token</label>
     <input id="token" type="password" autocomplete="off" placeholder="Paste the token — it is checked automatically">
@@ -202,8 +201,7 @@
       <div><div class="clabel">Step 3</div><h2>Save &amp; deploy</h2></div>
       <div class="badge"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg></div>
     </div>
-    <p class="dim">Save the token as a repository secret, then run the deploy once.
-    After that, every merge to <code>main</code> redeploys automatically.</p>
+    <p class="dim">Save the token as a repository secret. Run the deployment workflow manually from the Actions tab whenever you want to publish an update.</p>
     <a class="btn primary" id="secretLink" target="_blank" rel="noopener">Save CLOUDFLARE_API_TOKEN</a>
     <div id="acctSecretWrap" class="hidden">
       <p class="small" id="acctSecretText"></p>
@@ -220,7 +218,7 @@
       <label for="user">GitHub username</label>
       <input id="user" type="text" autocomplete="username" placeholder="e.g. octocat">
       <label for="repo">Repository name</label>
-      <input id="repo" type="text" value="GitHub-runner-vault">
+      <input id="repo" type="text" placeholder="Repository name">
       <p class="small">Links on this page normally follow the address you opened it at.
       Change these only if your vault lives somewhere else.</p>
     </div>
@@ -258,21 +256,33 @@ if (!owner && /\.github\.io$/i.test(location.hostname)) {
   var seg = location.pathname.split('/').filter(Boolean);
   if (!repo && seg.length) repo = decodeURIComponent(seg[0]);
 }
-if (!repo) repo = 'GitHub-runner-vault';
 $('user').value = owner;
 $('repo').value = repo;
 if (!owner) $('advanced').open = true;
 
 function repoPath() {
-  return encodeURIComponent(($('user').value || '').trim()) + '/' +
-         encodeURIComponent(($('repo').value || '').trim() || 'GitHub-runner-vault');
+  var user = ($('user').value || '').trim();
+  var repository = ($('repo').value || '').trim();
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(user) ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(repository)) return '';
+  return encodeURIComponent(user) + '/' + encodeURIComponent(repository);
 }
 function refreshLinks() {
-  var base = 'https://github.com/' + repoPath();
+  var path = repoPath();
+  var links = ['secretLink', 'accountSecretLink', 'deployLink', 'readmeLink'];
+  if (!path) {
+    links.forEach(function (id) {
+      $(id).href = '#';
+      $(id).setAttribute('aria-disabled', 'true');
+    });
+    return;
+  }
+  var base = 'https://github.com/' + path;
   $('secretLink').href = base + '/settings/secrets/actions/new?name=CLOUDFLARE_API_TOKEN';
   $('accountSecretLink').href = base + '/settings/secrets/actions/new?name=CLOUDFLARE_ACCOUNT_ID';
   $('deployLink').href = base + '/actions/workflows/deploy.yml';
   $('readmeLink').href = base + '#deployment';
+  links.forEach(function (id) { $(id).removeAttribute('aria-disabled'); });
 }
 $('user').addEventListener('input', refreshLinks);
 $('repo').addEventListener('input', refreshLinks);
@@ -317,8 +327,22 @@ function b64url(bytes) {
 function randomB64url(n) { return b64url(crypto.getRandomValues(new Uint8Array(n))); }
 
 /* ---------- step 1: Cloudflare login (OAuth + PKCE) ---------- */
-var clientId = (qs.get('client_id') || '').trim();
-var relayUrl = (qs.get('relay') || '').trim();
+// OAuth endpoints are loaded only from this exact site's checked-in config.
+// Do not accept ?relay= or ?client_id= overrides: they could redirect a PKCE
+// authorization code to an attacker-controlled endpoint.
+var clientId = '';
+var relayUrl = '';
+function safeHttpsOrigin(value) {
+  if (typeof value !== 'string' || !value.trim()) return '';
+  try {
+    var parsed = new URL(value.trim());
+    if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password ||
+        parsed.port || parsed.pathname !== '/' || parsed.search || parsed.hash) return '';
+    return parsed.origin;
+  } catch (e) {
+    return '';
+  }
+}
 function showS1(which) {
   $('s1-login').classList.toggle('hidden', which !== 'login');
   $('s1-setup').classList.toggle('hidden', which !== 'setup');
@@ -419,7 +443,7 @@ function handleOAuthReturn() {
       return true;
     }
     showS1(clientId ? 'login' : 'setup');
-    s1Status('Cloudflare login did not finish (' + err + '). Nothing was changed — try again, start over, or continue with a token in Step 2. On a fork this usually means the configured login client belongs to another Cloudflare account — see the note under the login button.', 'error');
+    s1Status('Cloudflare login did not finish (' + err + '). Nothing was changed — verify that the OAuth client belongs to your Cloudflare account and its redirect URL exactly matches this wizard page, or continue with a token in Step 2.', 'error');
     $('resetOAuthBtn').classList.remove('hidden');
     return true;
   }
@@ -444,7 +468,7 @@ function handleOAuthReturn() {
     })
     .catch(function () {
       showS1(clientId ? 'login' : 'setup');
-      s1Status('The login exchange failed' + (relayUrl ? ' — the relay could not complete it.' : ' — Cloudflare does not allow direct exchanges from a web page, and this copy has no OAuth relay configured (README: “enable Cloudflare login”).') + ' You can try again, or continue with a token in Step 2.', 'error');
+      s1Status('The login exchange failed' + (relayUrl ? ' — the relay could not complete it.' : ' — Cloudflare does not allow direct exchanges from a web page, and this copy has no valid HTTPS OAuth relay configured. Check the siteUrl and cloudflareOAuthRelayUrl values in its wizard-config.json.') + ' You can try again, or continue with a token in Step 2.', 'error');
       $('resetOAuthBtn').classList.remove('hidden');
     });
   return true;
@@ -573,8 +597,13 @@ function refreshStep3() {
 }
 $('checkDeployBtn').addEventListener('click', function () {
   var out = $('deployResult');
+  var path = repoPath();
+  if (!path) {
+    out.innerHTML = '<p class="msg error">Enter a valid GitHub owner and repository before checking deployment.</p>';
+    return;
+  }
   out.innerHTML = '<p class="msg dim">Checking…</p>';
-  fetch('https://api.github.com/repos/' + repoPath() + '/contents/deployment.json', {
+  fetch('https://api.github.com/repos/' + path + '/contents/deployment.json', {
     headers: { Accept: 'application/vnd.github+json' }, cache: 'no-store'
   }).then(function (res) {
     if (res.status === 404) {
@@ -586,13 +615,28 @@ $('checkDeployBtn').addEventListener('click', function () {
   }).then(function (body) {
     if (!body || !body.content) return;
     var info = JSON.parse(atob(body.content.replace(/\s/g, '')));
+    if (typeof info.repository !== 'string' || info.repository.toLowerCase() !== path.toLowerCase()) {
+      out.innerHTML = '<p class="msg warn">This repository does not yet have its own deployment metadata. Deploy this copy first; metadata from the upstream repository is not reusable.</p>';
+      return;
+    }
+    var vaultUrl;
+    try {
+      vaultUrl = new URL(info.url);
+      if (vaultUrl.protocol !== 'https:' || !vaultUrl.hostname || vaultUrl.username || vaultUrl.password ||
+          (vaultUrl.port && vaultUrl.port !== '443') || vaultUrl.pathname !== '/' || vaultUrl.search || vaultUrl.hash) {
+        throw new Error('invalid URL');
+      }
+    } catch (e) {
+      out.innerHTML = '<p class="msg error">The deployment metadata contains an invalid Vault origin.</p>';
+      return;
+    }
     out.innerHTML = '';
     var card = document.createElement('div'); card.className = 'vaultcard';
     var big = document.createElement('div'); big.className = 'big'; big.textContent = '🎉 Your vault is live';
-    var a = document.createElement('a'); a.className = 'url'; a.href = info.url; a.textContent = info.url;
+    var a = document.createElement('a'); a.className = 'url'; a.href = vaultUrl.origin; a.textContent = vaultUrl.origin;
     var p = document.createElement('p'); p.className = 'small';
     p.textContent = 'Open it and choose “Create the GitHub App” to finish. The Runner Lab finds this deployment automatically — nothing else to configure.';
-    var open = document.createElement('a'); open.className = 'btn primary'; open.href = info.url;
+    var open = document.createElement('a'); open.className = 'btn primary'; open.href = vaultUrl.origin;
     open.target = '_blank'; open.rel = 'noopener'; open.textContent = 'Open your vault';
     card.appendChild(big); card.appendChild(a); card.appendChild(p); card.appendChild(open);
     out.appendChild(card);
@@ -622,8 +666,21 @@ fetch('wizard-config.json', { cache: 'no-store' })
   .then(function (r) { return r.ok ? r.json() : null; })
   .catch(function () { return null; })
   .then(function (cfg) {
-    if (!clientId && cfg && cfg.cloudflareOAuthClientId) clientId = String(cfg.cloudflareOAuthClientId).trim();
-    if (!relayUrl && cfg && cfg.cloudflareOAuthRelayUrl) relayUrl = String(cfg.cloudflareOAuthRelayUrl).trim();
+    var configMatchesSite = false;
+    try {
+      var configuredSite = new URL(cfg && cfg.siteUrl || '');
+      var configuredPath = configuredSite.pathname.replace(/\/$/, '') + '/';
+      var currentPath = location.pathname.replace(/\/$/, '') + '/';
+      configMatchesSite = configuredSite.protocol === 'https:' && !configuredSite.username &&
+        !configuredSite.password && !configuredSite.port &&
+        configuredSite.origin === location.origin && configuredPath === currentPath &&
+        !configuredSite.search && !configuredSite.hash;
+    } catch (e) {}
+    if (configMatchesSite && typeof cfg.cloudflareOAuthClientId === 'string' &&
+        /^[A-Za-z0-9._-]{8,256}$/.test(cfg.cloudflareOAuthClientId.trim())) {
+      clientId = cfg.cloudflareOAuthClientId.trim();
+    }
+    if (configMatchesSite) relayUrl = safeHttpsOrigin(cfg.cloudflareOAuthRelayUrl);
     if (!handleOAuthReturn()) {
       if (state.step1Done || state.skipped1) showS1('none');
       else showS1(clientId ? 'login' : 'setup');

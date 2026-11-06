@@ -284,9 +284,9 @@ git push origin main
 
 ### Optional unattended GitHub Actions deployment
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://aminsh35322088-ctrl.github.io/GitHub-runner-vault/)
+Enable GitHub Pages for your own copy (Settings → Pages → Deploy from a branch → main → /docs), then open `https://<your-owner>.github.io/<your-repository>/`.
 
-*The button opens the setup wizard, hosted from this repository's `docs/` folder via GitHub Pages.*
+*The wizard is hosted from your own copy's docs folder via GitHub Pages.*
 
 1. Fork this repository under the personal GitHub account that will own the vault (or use your existing copy). Enable Actions and GitHub Pages (**Settings → Pages → Deploy from a branch → main → /docs**).
 2. Open the wizard. It derives the GitHub username and repository name from its own address.
@@ -297,12 +297,12 @@ git push origin main
 
 ### Optional: enable Cloudflare login (once per copy)
 
-The wizard's first step can sign the owner in with Cloudflare (read-only: account, Workers and D1 checks) instead of starting cold. This repository's own copy is already registered (client ID in `docs/wizard-config.json`); for a fork, register your own once:
+The wizard's first step can sign the owner in with Cloudflare (read-only: account, Workers and D1 checks) instead of starting cold. Cloudflare OAuth is optional; the API-token path works without it. OAuth settings in `docs/wizard-config.json` are bound to the exact `siteUrl` (including the repository path) in that file. A fork ignores the inherited upstream settings until you register its own client and relay:
 
 1. In Cloudflare open **Manage account → OAuth clients → Create client**, name it **Runner Vault Setup Wizard**, and create a **public** client with token authentication **None** (PKCE) and the grants **Authorization Code** and **Refresh Token**.
 2. Set its redirect URL to your wizard address (`https://<you>.github.io/<repo>/`) and allow the scopes **Account Settings: Read**, **D1: Read** and **Workers: Content Read-Only** (the picker has no scope literally named "Workers Scripts" — that is the Workers read scope; `offline_access` is added automatically with the Refresh Token grant).
-3. Put your client ID in `docs/wizard-config.json` in your repository (`cloudflareOAuthClientId`), replacing the inherited one, and commit. A fork inherits the upstream owner's client ID in that file, and only that owner's Cloudflare account can approve it — until you replace it (or empty the value to skip login entirely), the wizard's login cannot complete for you. The token path works fully regardless.
-4. Deploy the OAuth relay once. Cloudflare's token endpoint sends no CORS headers, so a browser page can authorize but can never read the exchange response — a tiny stateless Worker relays it. In your Cloudflare account open **Workers & Pages → Create → Worker**, name it `vault-wizard-relay`, replace its code with [`docs/oauth-relay-worker.js`](docs/oauth-relay-worker.js) and deploy. It stores nothing, has no secrets (the client is public/PKCE) and only forwards the single-use authorization code. Put its URL in `docs/wizard-config.json` as `cloudflareOAuthRelayUrl` (this repository's own relay is already configured). If you run the wizard from a different origin, set the Worker's `ALLOWED_ORIGINS` variable to your wizard origin — the default covers this repository's Pages origin.
+3. Put your client ID in `docs/wizard-config.json` (`cloudflareOAuthClientId`) and set `siteUrl` to the exact GitHub Pages URL of this copy, including its repository path. The wizard applies those values only when the full site URL matches; copied config from another repository is ignored even when both sites share one GitHub Pages hostname.
+4. Deploy the OAuth relay once. Cloudflare's token endpoint sends no CORS headers, so the browser needs a stateless Worker to relay the PKCE code exchange. In Workers & Pages → Create → Worker, create `vault-wizard-relay`, paste `docs/oauth-relay-worker.js`, set the Worker variable `ALLOWED_ORIGINS` to the exact HTTPS origin from step 2 (comma-separated origins are supported), and deploy. The relay has no built-in origin fallback; without this variable it returns HTTP 503. Put its deployed URL in `docs/wizard-config.json` as `cloudflareOAuthRelayUrl`.
 
 ### Updating
 
@@ -311,13 +311,13 @@ The GitHub Actions deploy workflow is intentionally manual-only. Wrangler OAuth 
 ### How it works
 
 - Both deployment paths run the same `pnpm deploy` helper. It resolves the owner identity from the checked-out GitHub repository, reuses or creates the D1 database, deploys the Worker and only provisions `VAULT_MASTER_KEY` when that Worker secret is absent.
-- The GitHub Actions route publishes `deployment.json` automatically. With Wrangler OAuth, run `app/scripts/deployment-info.mjs` using `CLOUDFLARE_WORKERS_SUBDOMAIN` and the deployed `GITHUB_SHA`, then commit `deployment.json` to `main`. The Runner Lab reads that file to discover the Vault URL and client revision.
+- The GitHub Actions route publishes `deployment.json` automatically. With Wrangler OAuth, run `app/scripts/deployment-info.mjs` using `CLOUDFLARE_WORKERS_SUBDOMAIN` (or `RUNNER_VAULT_PUBLIC_URL` for a custom domain) and the deployed `GITHUB_SHA`, then commit `deployment.json` to `main`. Metadata includes the exact GitHub repository identity; a fork must publish its own metadata before the wizard or Runner Lab can use it.
 
 ### Finish setup
 
 1. Open the Worker URL (`https://<name>.<you>.workers.dev`) and choose *Create the GitHub App* using the personal GitHub account that owns the deployed repository (or matches the explicitly configured owner ID). The app is always named `Runner Vault <your numeric GitHub ID>` — the name is fixed per account, so setup never creates a differently-named app on a later run. If GitHub reports that the name is taken, the app already exists under your account: delete it under **GitHub Settings → Developer settings → GitHub Apps** and run setup again, and it is recreated under the same name.
-2. Sign in to the owner dashboard. No Runner repository form is required: the first valid OIDC run from the owner's `main/.github/workflows/rdc-lab.yml` workflow proves the owner identity and atomically pins the repository ID. Later runs must match the pinned repository, owner, branch, event and workflow. Pull-request events are refused.
-3. Nothing to configure in the Runner Lab: its workflow reads deployment.json from this repository and connects automatically — see the Runner Lab README (https://github.com/aminsh35322088-ctrl/GitHub-Runner-Lab). The authorized workflow grants id-token: write and passes the Vault URL plus GitHub Actions OIDC requester environment to the Runner process. The CLI exchanges OIDC directly with the Worker over HTTPS; there is no Broker service, Unix socket, extra Linux account or runner PAT. If Vault is not configured or unavailable, Vault operations fail closed without blocking RDC or Tailscale.
+2. Sign in to the owner dashboard. No Runner repository form is required: the first valid OIDC run from the owner's `main/.github/workflows/rdc-lab.yml` workflow (the default; configurable with `RUNNER_BOOTSTRAP_*` variables) proves the owner identity and atomically pins the repository ID. Later runs must match the pinned repository, owner, branch, event and workflow. Pull-request events are refused.
+3. Nothing to configure in the Runner Lab: its workflow reads deployment.json from this repository and connects automatically — see the README in your Runner Lab repository. The authorized workflow grants id-token: write and passes the Vault URL plus GitHub Actions OIDC requester environment to the Runner process. The CLI exchanges OIDC directly with the Worker over HTTPS; there is no Broker service, Unix socket, extra Linux account or runner PAT. If Vault is not configured or unavailable, Vault operations fail closed without blocking RDC or Tailscale.
 
 ### Where the key lives
 
@@ -361,8 +361,12 @@ The Wrangler OAuth deployment path needs no GitHub repository secret. The option
 | `OWNER_GITHUB_ID` | var | Set from the checked-out GitHub repository owner (or Actions owner context); pinned in D1 on first use. Never set by hand. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | vars / secrets | Optional override for the private GitHub sign-in App created through `/setup`. |
 | `RUNNER_REPOSITORY`, `RUNNER_REPOSITORY_ID`, `RUNNER_ALLOWED_REFS`, `RUNNER_ALLOWED_EVENTS`, `RUNNER_ALLOWED_WORKFLOW_REFS` | vars | Optional explicit static policy override. When absent, owner-verified OIDC bootstrap pins the first repository automatically. |
+| `RUNNER_BOOTSTRAP_BRANCH`, `RUNNER_BOOTSTRAP_WORKFLOW_FILE`, `RUNNER_BOOTSTRAP_EVENTS` | vars | Optional bootstrap trust-policy defaults. Defaults are `main`, `rdc-lab.yml`, and `workflow_dispatch,schedule,push`; pull-request events are always rejected. |
 | `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY` | secrets | Legacy explicit keys; both must be set to be used. |
-| `RUNNER_VAULT_D1_DATABASE_ID` | deploy env | Optional internal override: UUID of a pre-created D1 database; skips D1 list/create calls. Never commit this deployment-specific value. |
+| `RUNNER_VAULT_D1_DATABASE_ID` | Actions variable / deploy env | Optional internal override: UUID of a pre-created D1 database; skips D1 list/create calls. Never commit this deployment-specific value. |
+| `RUNNER_VAULT_WORKER_NAME`, `RUNNER_VAULT_D1_DATABASE_NAME` | Actions variables / deploy env | Optional per-install resource names. Defaults remain `runner-vault` and `runner-vault-db`; overrides apply only to generated deployment config, never the tracked template. |
+| `RUNNER_VAULT_PUBLIC_URL` | Actions variable / deploy env | Optional HTTPS origin for a custom Worker domain. When set, deployment metadata does not require a workers.dev subdomain or Cloudflare account lookup. |
+| `RUNNER_VAULT_REPOSITORY` | deploy env | Optional explicit GitHub owner/name for detached/manual deployments without GITHUB_REPOSITORY or a usable Git origin. In Actions, GITHUB_REPOSITORY wins; conflicting overrides are rejected. |
 | `DB` | D1 binding | Resolved and attached by the deploy helper for both deployment paths. |
 
 ## Operations

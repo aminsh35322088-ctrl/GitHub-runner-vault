@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'vitest'
 import { getDb, schema } from 'db'
-import { buildPolicy, DEFAULT_EVENTS, loadRunnerPolicy, pinRunnerPolicy, resolveRepositoryId, saveRunnerPolicy } from './runner-policy.ts'
+import { buildBootstrapPolicy, buildPolicy, DEFAULT_EVENTS, loadRunnerPolicy, pinRunnerPolicy, resolveRepositoryId, saveRunnerPolicy } from './runner-policy.ts'
 
 const db = getDb()
 const input = { repository: 'o/r', repositoryId: '123', repositoryOwnerId: '65', branch: 'main', workflowFile: 'rdc-lab.yml', events: DEFAULT_EVENTS }
@@ -44,6 +44,24 @@ describe('runner policy', () => {
     })
     await db.delete(schema.vaultSetting)
     await expect(loadRunnerPolicy(db, {}, AUD)).rejects.toThrow()
+  })
+
+  test('allows safe installation-specific bootstrap branch, workflow and events', async () => {
+    const policy = await loadRunnerPolicy(db, {
+      OWNER_GITHUB_ID: '65',
+      RUNNER_BOOTSTRAP_BRANCH: 'stable',
+      RUNNER_BOOTSTRAP_WORKFLOW_FILE: 'vault-runner.yml',
+      RUNNER_BOOTSTRAP_EVENTS: 'workflow_dispatch,push',
+    }, AUD)
+    expect(policy.bootstrap).toEqual({
+      ownerId: '65', branch: 'stable', workflowFile: 'vault-runner.yml',
+      allowedEvents: ['workflow_dispatch', 'push'],
+    })
+    expect(policy.allowedRefs).toEqual(['refs/heads/stable'])
+    expect(() => buildBootstrapPolicy('65', AUD, { events: 'workflow_dispatch,pull_request' })).toThrow(/non-pull-request/)
+    await expect(loadRunnerPolicy(db, {
+      OWNER_GITHUB_ID: '65', RUNNER_BOOTSTRAP_WORKFLOW_FILE: '../outside.yml',
+    }, AUD)).rejects.toThrow(/Workflow file/)
   })
 
   test('atomically pins the first OIDC repository and refuses to replace it', async () => {

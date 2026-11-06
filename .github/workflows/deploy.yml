@@ -87,6 +87,9 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ steps.cf-account.outputs.account_id }}
           RUNNER_VAULT_OWNER_GITHUB_ID: ${{ github.event.repository.owner.id }}
+          RUNNER_VAULT_WORKER_NAME: ${{ vars.RUNNER_VAULT_WORKER_NAME }}
+          RUNNER_VAULT_D1_DATABASE_NAME: ${{ vars.RUNNER_VAULT_D1_DATABASE_NAME }}
+          RUNNER_VAULT_D1_DATABASE_ID: ${{ vars.RUNNER_VAULT_D1_DATABASE_ID }}
         run: pnpm deploy
 
       - name: Publish deployment info
@@ -94,6 +97,9 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ steps.cf-account.outputs.account_id }}
           GITHUB_SHA: ${{ github.sha }}
+          CLOUDFLARE_WORKERS_SUBDOMAIN: ${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
+          RUNNER_VAULT_PUBLIC_URL: ${{ vars.RUNNER_VAULT_PUBLIC_URL }}
+          RUNNER_VAULT_WORKER_NAME: ${{ vars.RUNNER_VAULT_WORKER_NAME }}
         run: node app/scripts/deployment-info.mjs
 
       - name: Commit deployment info

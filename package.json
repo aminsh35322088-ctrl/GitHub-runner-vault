@@ -5,7 +5,7 @@
   "scripts": {
     "typecheck": "pnpm -r typecheck",
     "embed-schema": "pnpm --filter runner-vault-app embed-schema",
-    "test": "pnpm --filter runner-vault-app test && node --test client/vault.test.mjs",
+    "test": "pnpm --filter runner-vault-app test && node --test client/vault.test.mjs docs/oauth-relay-worker.test.mjs",
     "build": "pnpm --filter runner-vault-app build",
     "validate": "pnpm typecheck && pnpm test && pnpm build",
     "deploy": "pnpm --filter runner-vault-app deploy"
