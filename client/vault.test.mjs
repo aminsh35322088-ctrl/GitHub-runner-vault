@@ -1,79 +1,87 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
-import net from 'node:net'
-import { spawn } from 'node:child_process'
-import os from 'node:os'
-import path from 'node:path'
-import fs from 'node:fs'
-import { parseArgs, parseHeaders, mapLocalProxyTarget, fetchWithTimeout } from './vault.mjs'
+import {
+  api, apiProxy, parseArgs, parseHeaders, mapLocalProxyTarget, fetchWithTimeout,
+  runnerSession, resetClientSessionForTests, startLocalProxy,
+} from './vault.mjs'
 
 const SECRET = 'must-never-appear-anywhere'
+const realFetch = globalThis.fetch
+const OIDC_TOKEN = 'eyJ' + 'a'.repeat(180)
+const REQUESTER_TOKEN = 'github-actions-requester-token-for-tests'
 
-function startBrokerStub({ credentials, integrations, useResult } = {}) {
+function configureEnv(extra = {}) {
+  const keys = ['VAULT_URL', 'ACTIONS_ID_TOKEN_REQUEST_URL', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'VAULT_REQUEST_TIMEOUT_MS']
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+  for (const key of keys) delete process.env[key]
+  Object.assign(process.env, {
+    VAULT_URL: 'https://vault.example',
+    ACTIONS_ID_TOKEN_REQUEST_URL: 'https://pipelines.actions.githubusercontent.com/oidc/token?foo=bar',
+    ACTIONS_ID_TOKEN_REQUEST_TOKEN: REQUESTER_TOKEN,
+    ...extra,
+  })
+  resetClientSessionForTests()
+  return () => {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key]
+      else process.env[key] = previous[key]
+    }
+    resetClientSessionForTests()
+  }
+}
+
+function json(body, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+}
+
+function createVaultFetch({ credentials, integrations, useResult, unauthorizedOnce = false } = {}) {
   const seen = []
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-broker-socket-'))
-  const socketPath = path.join(dir, 'broker.sock')
-  const server = net.createServer((socket) => {
-    let input = Buffer.alloc(0)
-    socket.on('data', (chunk) => {
-      input = Buffer.concat([input, chunk])
-      if (input.length > 15 * 1024 * 1024) socket.destroy()
-    })
-    socket.on('end', () => {
-      let request
-      try { request = JSON.parse(input.toString('utf8').trim()) } catch { socket.destroy(); return }
-      seen.push(request)
-      let result
-      let error
-      switch (request.operation) {
-        case 'status':
-          result = { connected: true, sessionExpiresAt: Date.now() + 1_800_000, brokerProtocol: 1,
-            operations: ['tokens.list', 'integrations.list', 'registrations.create', 'credential.use'] }
-          break
-        case 'tokens.list':
-          result = { credentials: credentials ?? [{ name: 'CF_TOKEN', service: 'Cloudflare' }] }
-          break
-        case 'integrations.list':
-          result = { integrations: integrations ?? [] }
-          break
-        case 'registrations.create':
-          result = { link: `http://localhost/vault/register/lnk_${'a'.repeat(43)}`, ownerInbox: 'https://vault.example/vault/requests', expiresAt: Date.now() + 900_000 }
-          break
-        case 'credential.use':
-          if (request.payload?.name === 'MISSING') {
-            error = { code: 'CREDENTIAL_UNAVAILABLE', message: 'Credential is unavailable', retryable: false }
-          } else {
-            result = useResult ?? { status: 200, headers: {}, body: '{"ok":true}', truncated: false }
-            seen[seen.length - 1].decodedBody = request.payload?.body
-              ? Buffer.from(request.payload.body, 'base64') : Buffer.alloc(0)
-          }
-          break
-        default:
-          error = { code: 'OPERATION_NOT_ALLOWED', message: 'Operation is not available', retryable: false }
+  let oidcCount = 0
+  let sessionCount = 0
+  let rejected = false
+  const fetchFn = async (input, init = {}) => {
+    const url = new URL(String(input))
+    const headers = new Headers(init.headers ?? {})
+    seen.push({ url: url.toString(), method: init.method ?? 'GET', headers, body: init.body })
+    if (url.hostname === '127.0.0.1' || url.hostname === 'localhost') return realFetch(input, init)
+    if (url.hostname === 'pipelines.actions.githubusercontent.com') {
+      assert.equal(headers.get('authorization'), 'Bearer ' + REQUESTER_TOKEN)
+      assert.equal(url.searchParams.get('audience'), 'https://vault.example')
+      oidcCount++
+      return json({ value: OIDC_TOKEN })
+    }
+    assert.equal(url.origin, 'https://vault.example')
+    if (url.pathname === '/api/runner/session') {
+      assert.equal(init.method, 'POST')
+      assert.equal(headers.get('authorization'), 'Bearer ' + OIDC_TOKEN)
+      sessionCount++
+      return json({ token: 'runner-session-token-' + sessionCount, expiresAt: Date.now() + 1_800_000 })
+    }
+    if (headers.get('authorization')?.startsWith('Bearer runner-session-') !== true) {
+      return json({ error: 'unauthorized' }, 401)
+    }
+    if (url.pathname === '/api/runner/registry') {
+      if (unauthorizedOnce && !rejected) {
+        rejected = true
+        return json({ error: 'unauthorized' }, 401)
       }
-      socket.end(JSON.stringify({ version: 1, id: request.id, ok: !error, ...(error ? { error } : { result }) }) + '\n')
-    })
-  })
-  return new Promise((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(socketPath, () => resolve({ server, seen, socketPath, dir }))
-  })
-}
-
-function run(args, env, script = new URL('./vault.mjs', import.meta.url).pathname) {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [script, ...args], { env: { PATH: process.env.PATH, ...env } })
-    let stdout = '', stderr = ''
-    child.stdout.on('data', (c) => (stdout += c))
-    child.stderr.on('data', (c) => (stderr += c))
-    child.on('close', (code) => resolve({ code, stdout, stderr }))
-  })
-}
-
-async function closeBrokerStub(stub) {
-  await new Promise((resolve) => stub.server.close(resolve))
-  fs.rmSync(stub.dir, { recursive: true, force: true })
+      return json({ credentials: credentials ?? [{ name: 'CF_TOKEN', service: 'Cloudflare' }] })
+    }
+    if (url.pathname === '/api/runner/integrations') return json({ integrations: integrations ?? [] })
+    if (url.pathname === '/api/runner/registrations') {
+      return json({ link: 'https://vault.example/vault/register/once', ownerInbox: 'https://vault.example/vault/requests', expiresAt: Date.now() + 900_000 })
+    }
+    if (url.pathname === '/api/runner/use') {
+      const metadata = JSON.parse(Buffer.from(headers.get('x-vault-proxy-metadata'), 'base64url').toString('utf8'))
+      const body = init.body ? Buffer.from(init.body) : Buffer.alloc(0)
+      seen[seen.length - 1].metadata = metadata
+      seen[seen.length - 1].decodedBody = body
+      return json(useResult ?? { status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}', truncated: false })
+    }
+    return json({ error: 'not_found' }, 404)
+  }
+  return { fetchFn, seen, get oidcCount() { return oidcCount }, get sessionCount() { return sessionCount } }
 }
 
 test('parsing', () => {
@@ -90,167 +98,129 @@ test('local API proxy preserves provider base paths without allowing an absolute
   assert.throws(() => mapLocalProxyTarget('https://api.northflank.com:8443/v1', '/projects'))
 })
 
-test('request uses only the broker registration operation and prints the one-time owner link', async () => {
-  const stub = await startBrokerStub()
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-request-e2e-'))
-  const docPath = path.join(dir, 'service-doc.json')
-  const doc = { overview: 'Deploy a Worker', task: 'Deploy a Worker', token_type: 'API token', creation_steps: [],
-    required_permissions: [], unnecessary_permissions: [], security_notes: [], expiration_guidance: [],
-    official_documentation_links: [], verification: 'unverified', unverified_note: 'Not yet checked' }
-  fs.writeFileSync(docPath, JSON.stringify(doc))
+test('direct HTTPS bootstrap exchanges GitHub OIDC for an in-memory session and authenticates API calls', async () => {
+  const restore = configureEnv()
+  const stub = createVaultFetch()
+  globalThis.fetch = stub.fetchFn
   try {
-    const result = await run(['request', '--name', 'CF_NEW_TOKEN', '--service', 'Cloudflare', '--doc', docPath], {
-      VAULT_BROKER_SOCKET: stub.socketPath,
-    })
-    assert.equal(result.code, 0, result.stderr)
-    assert.match(result.stdout, /Credential request created: CF_NEW_TOKEN \(Cloudflare\)/)
-    assert.match(result.stdout, /Owner inbox: https:\/\/vault\.example\/vault\/requests/)
-    assert.match(result.stdout, /One-time owner form .*works once/)
-    assert.match(result.stdout, /\/vault\/register\/lnk_/)
-    assert.equal(stub.seen.length, 1)
-    assert.equal(stub.seen[0].operation, 'registrations.create')
-    assert.deepEqual(stub.seen[0].payload, { name: 'CF_NEW_TOKEN', service: 'Cloudflare', doc })
-    assert.ok(!result.stdout.includes(SECRET) && !result.stderr.includes(SECRET))
+    const session = await runnerSession()
+    assert.equal(session.token, 'runner-session-token-1')
+    const result = await api(null, 'GET', '/api/runner/registry')
+    assert.deepEqual(result.body.credentials, [{ name: 'CF_TOKEN', service: 'Cloudflare' }])
+    assert.equal(stub.oidcCount, 1)
+    assert.equal(stub.sessionCount, 1)
+    const registryCall = stub.seen.find((item) => item.url.endsWith('/api/runner/registry'))
+    assert.equal(registryCall.headers.get('authorization'), 'Bearer runner-session-token-1')
+    assert.ok(!JSON.stringify(stub.seen).includes(SECRET))
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true })
-    await closeBrokerStub(stub)
+    globalThis.fetch = realFetch
+    restore()
   }
 })
 
-test('serve runs a Northflank loopback bridge without forwarding a CLI placeholder as a secret', async () => {
-  const stub = await startBrokerStub({ integrations: [{
-    name: 'NORTHFLANK_API_TOKEN', service: 'Northflank',
-    adapter: {
-      apiBaseUrl: 'https://api.northflank.com/v1',
-      defaultHeaders: { 'x-api-version': '2026-01-01' },
-      cliTools: [{ id: 'northflank', label: 'Northflank CLI', binary: 'nf', integration: 'base-url-env', variable: 'NF_API_BASE_URL' }],
-    },
-  }], useResult: { status: 200, headers: { 'content-type': 'application/json' }, body: '{"projects":[{"id":"project-1"}]}', truncated: false } })
-  const child = spawn(process.execPath, [new URL('./vault.mjs', import.meta.url).pathname, 'serve', 'NORTHFLANK_API_TOKEN'], {
-    env: { PATH: process.env.PATH, VAULT_BROKER_SOCKET: stub.socketPath }, stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  let stdout = '', stderr = '', port = null
-  let resolveReady
-  const ready = new Promise((resolve) => { resolveReady = resolve })
-  child.stdout.on('data', (chunk) => {
-    stdout += chunk.toString()
-    const match = stdout.match(/Listening only on 127\.0\.0\.1:(\d+)/)
-    if (match && stdout.includes('Use: export NF_API_BASE_URL=') && !port) { port = Number(match[1]); resolveReady() }
-  })
-  child.stderr.on('data', (chunk) => { stderr += chunk.toString() })
-  const close = new Promise((resolve) => child.once('close', resolve))
+test('registration is sent directly to the Worker and returns only the one-time owner link', async () => {
+  const restore = configureEnv()
+  const stub = createVaultFetch()
+  globalThis.fetch = stub.fetchFn
+  const doc = { overview: 'Deploy a Worker', required_permissions: [], verification: 'unverified' }
   try {
-    await Promise.race([ready, new Promise((_, reject) => setTimeout(() => reject(new Error(`bridge did not start: ${stderr}`)), 5000))])
-    assert.match(stdout, /NF_API_BASE_URL=/)
-    assert.match(stdout, /NF_API_TOKEN="vault-local-placeholder"/)
-    const response = await fetch(`http://127.0.0.1:${port}/v1/projects?limit=5`, {
+    const result = await api(null, 'POST', '/api/runner/registrations', { name: 'CF_NEW_TOKEN', service: 'Cloudflare', doc })
+    assert.equal(result.status, 200)
+    assert.match(result.body.link, /register\/once/)
+    const call = stub.seen.find((item) => item.url.endsWith('/api/runner/registrations'))
+    assert.deepEqual(JSON.parse(call.body), { name: 'CF_NEW_TOKEN', service: 'Cloudflare', doc })
+    assert.equal(call.headers.get('content-type'), 'application/json')
+  } finally {
+    globalThis.fetch = realFetch
+    restore()
+  }
+})
+
+test('credential use sends only metadata and request bytes; provider secret never reaches the client', async () => {
+  const restore = configureEnv()
+  const stub = createVaultFetch()
+  globalThis.fetch = stub.fetchFn
+  const requestBody = Buffer.from('binary-deploy-payload')
+  const metadata = { name: 'CF_TOKEN', method: 'POST', url: 'https://api.cloudflare.com/client/v4/deploy', purpose: 'deploy', headers: { accept: 'application/json' } }
+  try {
+    const result = await apiProxy(null, metadata, requestBody)
+    assert.equal(result.status, 200)
+    assert.deepEqual(result.body, { status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}', truncated: false })
+    const call = stub.seen.find((item) => item.url.endsWith('/api/runner/use'))
+    assert.deepEqual(call.metadata, metadata)
+    assert.deepEqual(call.decodedBody, requestBody)
+    assert.equal(call.headers.get('authorization'), 'Bearer runner-session-token-1')
+    assert.ok(!JSON.stringify(stub.seen).includes(SECRET))
+  } finally {
+    globalThis.fetch = realFetch
+    restore()
+  }
+})
+
+test('a long-running local proxy refreshes a rejected in-memory session once', async () => {
+  const restore = configureEnv()
+  const stub = createVaultFetch({ unauthorizedOnce: true })
+  globalThis.fetch = stub.fetchFn
+  try {
+    const result = await api(null, 'GET', '/api/runner/registry')
+    assert.equal(result.status, 200)
+    assert.equal(stub.oidcCount, 2)
+    assert.equal(stub.sessionCount, 2)
+    const registryCalls = stub.seen.filter((item) => item.url.endsWith('/api/runner/registry'))
+    assert.equal(registryCalls.length, 2)
+    assert.equal(registryCalls[0].headers.get('authorization'), 'Bearer runner-session-token-1')
+    assert.equal(registryCalls[1].headers.get('authorization'), 'Bearer runner-session-token-2')
+  } finally {
+    globalThis.fetch = realFetch
+    restore()
+  }
+})
+
+test('serve runs a loopback-only provider bridge with Vault-injected credentials', async () => {
+  const restore = configureEnv()
+  const stub = createVaultFetch({
+    integrations: [{
+      name: 'NORTHFLANK_API_TOKEN', service: 'Northflank',
+      adapter: {
+        apiBaseUrl: 'https://api.northflank.com/v1',
+        defaultHeaders: { 'x-api-version': '2026-01-01' },
+        cliTools: [{ id: 'northflank', label: 'Northflank CLI', binary: 'nf', integration: 'base-url-env', variable: 'NF_API_BASE_URL' }],
+      },
+    }],
+    useResult: { status: 200, headers: { 'content-type': 'application/json' }, body: '{"projects":[{"id":"project-1"}]}', truncated: false },
+  })
+  globalThis.fetch = stub.fetchFn
+  let server
+  try {
+    server = await startLocalProxy(null, 'NORTHFLANK_API_TOKEN', undefined, 0)
+    const port = server.address().port
+    const response = await fetch('http://127.0.0.1:' + port + '/v1/projects?limit=5', {
       headers: { Authorization: 'Bearer vault-local-placeholder', Accept: 'application/json', 'x-api-version': 'attacker-value' },
     })
     assert.equal(response.status, 200)
     assert.deepEqual(await response.json(), { projects: [{ id: 'project-1' }] })
-    const use = stub.seen.find((item) => item.operation === 'credential.use')
-    assert.ok(use)
-    assert.equal(use.payload.name, 'NORTHFLANK_API_TOKEN')
-    assert.equal(use.payload.method, 'GET')
-    assert.equal(use.payload.url, 'https://api.northflank.com/v1/projects?limit=5')
-    assert.deepEqual(use.payload.headers, { accept: 'application/json', 'x-api-version': '2026-01-01' })
-    assert.equal(use.payload.consumer, 'cli:northflank')
-    assert.ok(!stdout.includes(SECRET) && !stderr.includes(SECRET))
+    const use = stub.seen.find((item) => item.url.endsWith('/api/runner/use'))
+    assert.deepEqual(use.metadata, {
+      name: 'NORTHFLANK_API_TOKEN', method: 'GET', url: 'https://api.northflank.com/v1/projects?limit=5',
+      headers: { accept: 'application/json', 'x-api-version': '2026-01-01' },
+      consumer: 'cli:northflank', purpose: 'CLI integration: Northflank CLI',
+    })
+    assert.ok(!JSON.stringify(stub.seen).includes(SECRET))
   } finally {
-    child.kill('SIGTERM'); await close; await closeBrokerStub(stub)
+    if (server) await new Promise((resolve) => server.close(resolve))
+    globalThis.fetch = realFetch
+    restore()
   }
 })
 
-test('serve runs a Cloudflare Wrangler loopback bridge using broker-approved integration metadata', async () => {
-  const stub = await startBrokerStub({ integrations: [{
-    name: 'CLOUDFLARE_API_TOKEN', service: 'Cloudflare',
-    adapter: {
-      apiBaseUrl: 'https://api.cloudflare.com/client/v4',
-      cliTools: [{ id: 'wrangler', label: 'Wrangler CLI', binary: 'wrangler', integration: 'base-url-env',
-        variable: 'CLOUDFLARE_API_BASE_URL', tokenVariable: 'CLOUDFLARE_API_TOKEN' }],
-    },
-  }], useResult: { status: 200, headers: { 'content-type': 'application/json' }, body: '{"success":true}', truncated: false } })
-  const child = spawn(process.execPath, [new URL('./vault.mjs', import.meta.url).pathname, 'serve', 'CLOUDFLARE_API_TOKEN'], {
-    env: { PATH: process.env.PATH, VAULT_BROKER_SOCKET: stub.socketPath }, stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  let stdout = '', stderr = '', port = null
-  let resolveReady
-  const ready = new Promise((resolve) => { resolveReady = resolve })
-  child.stdout.on('data', (chunk) => {
-    stdout += chunk.toString()
-    const match = stdout.match(/Listening only on 127\.0\.0\.1:(\d+)/)
-    if (match && stdout.includes('Use: export CLOUDFLARE_API_BASE_URL=') && !port) { port = Number(match[1]); resolveReady() }
-  })
-  child.stderr.on('data', (chunk) => { stderr += chunk.toString() })
-  const close = new Promise((resolve) => child.once('close', resolve))
+test('OIDC bootstrap fails closed when the requester endpoint is not GitHub Actions', async () => {
+  const restore = configureEnv({ ACTIONS_ID_TOKEN_REQUEST_URL: 'https://attacker.example/steal' })
+  globalThis.fetch = async () => { throw new Error('must not be called') }
   try {
-    await Promise.race([ready, new Promise((_, reject) => setTimeout(() => reject(new Error(`bridge did not start: ${stderr}`)), 5000))])
-    assert.match(stdout, /CLOUDFLARE_API_TOKEN="vault-local-placeholder"/)
-    const response = await fetch(`http://127.0.0.1:${port}/client/v4/user`, { headers: { Authorization: 'Bearer vault-local-placeholder', Accept: 'application/json' } })
-    assert.equal(response.status, 200)
-    assert.deepEqual(await response.json(), { success: true })
-    const use = stub.seen.find((item) => item.operation === 'credential.use')
-    assert.equal(use.payload.url, 'https://api.cloudflare.com/client/v4/user')
-    assert.equal(use.payload.consumer, 'cli:wrangler')
-    const uploadBody = Buffer.alloc(300 * 1024, 0xff)
-    const upload = await fetch(`http://127.0.0.1:${port}/v1/deploy`, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: uploadBody })
-    assert.equal(upload.status, 200)
-    const post = stub.seen.filter((item) => item.operation === 'credential.use')[1]
-    assert.ok(post)
-    assert.deepEqual(Buffer.from(post.payload.body, 'base64'), uploadBody)
-    assert.ok(!stdout.includes(SECRET) && !stderr.includes(SECRET))
+    await assert.rejects(runnerSession(), /OIDC endpoint is not trusted/)
   } finally {
-    child.kill('SIGTERM'); await close; await closeBrokerStub(stub)
-  }
-})
-
-test('list and use use the broker protocol without OIDC variables or a Runner Session cache', async () => {
-  const stub = await startBrokerStub()
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-broker-cli-'))
-  const legacySessionFile = path.join(dir, 'session.json')
-  const env = { VAULT_BROKER_SOCKET: stub.socketPath, VAULT_SESSION_FILE: legacySessionFile }
-  try {
-    const list = await run(['list'], env)
-    assert.equal(list.code, 0, list.stderr)
-    assert.match(list.stdout, /CF_TOKEN/)
-    const use = await run(['use', 'CF_TOKEN', 'GET', 'https://api.cloudflare.com/client/v4/user', '--purpose', 'check', '--header', 'Accept: application/json'], env)
-    assert.equal(use.code, 0, use.stderr)
-    assert.equal(use.stdout, '{"ok":true}')
-    assert.equal(stub.seen[0].operation, 'tokens.list')
-    assert.equal(stub.seen[1].operation, 'credential.use')
-    assert.equal(stub.seen[1].payload.name, 'CF_TOKEN')
-    assert.equal(stub.seen[1].payload.purpose, 'check')
-    assert.deepEqual(stub.seen[1].payload.headers, { Accept: 'application/json' })
-    assert.equal(fs.existsSync(legacySessionFile), false)
-    const missing = await run(['use', 'MISSING', 'GET', 'https://api.cloudflare.com/client/v4/user'], env)
-    assert.equal(missing.code, 2)
-    assert.match(missing.stderr, /credential_unavailable/)
-    assert.ok(!(list.stdout + use.stdout + use.stderr).includes(SECRET))
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true })
-    await closeBrokerStub(stub)
-  }
-})
-
-test('missing broker socket fails closed without asking for OIDC requester variables', async () => {
-  const result = await run(['list'], { VAULT_BROKER_SOCKET: '/tmp/nonexistent-vault-broker.sock' })
-  assert.notEqual(result.code, 0)
-  assert.match(result.stderr, /broker_unavailable/)
-  assert.doesNotMatch(result.stderr, /id-token: write|OIDC/)
-})
-
-test('works when invoked through a symlink (how the runner installs it)', async () => {
-  const stub = await startBrokerStub()
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-link-'))
-  const link = path.join(dir, 'vault')
-  fs.symlinkSync(new URL('./vault.mjs', import.meta.url).pathname, link)
-  try {
-    const out = await run(['list'], { VAULT_BROKER_SOCKET: stub.socketPath }, link)
-    assert.equal(out.code, 0, out.stderr)
-    assert.match(out.stdout, /CF_TOKEN/)
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true })
-    await closeBrokerStub(stub)
+    globalThis.fetch = realFetch
+    restore()
   }
 })
 

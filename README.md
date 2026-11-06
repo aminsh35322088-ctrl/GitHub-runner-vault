@@ -40,7 +40,7 @@ be able to read it.*
 
 **Goal:** a compromised or prompt-injected model on the runner cannot read a stored secret.
 
-The Runner host and trusted workflow are part of the trusted computing base, but the model/Agent is not. The trusted bootstrap passes the OIDC requester to a separate Broker over an anonymous pipe, then removes it before Agent startup. The Agent runs under an unprivileged Unix UID and receives neither OIDC requester nor Vault Session. The vault therefore:
+The Runner host and the authorized GitHub Actions workflow are the trust boundary. The CLI obtains a short-lived GitHub OIDC token directly from the Actions runtime, exchanges it with this Worker for a short-lived Runner Session, and keeps that Session only in the CLI process memory. No provider token or Vault encryption key is sent to the Runner. Because OIDC authenticates the workflow run rather than an individual process, any process running inside that authorized job that can read the OIDC requester environment can request a Session; the Vault therefore enforces the pinned repository/workflow policy, short Session lifetime, single-use OIDC token IDs, rate limits, operation-level checks, owner-side revocation and audit logging.
 
 | Risk | Mitigation |
 | --- | --- |
@@ -56,40 +56,31 @@ The Runner host and trusted workflow are part of the trusted computing base, but
 
 What the vault does **not** protect against: an agent that is allowed to call an approved host can do anything that token
 permits on that host. Keep tokens least-privilege and short-lived (temporary credentials max 24 hours).
-OIDC authenticates the *workflow run*, not an individual process. The Runner host and trusted bootstrap remain trusted; the Agent receives only the Broker operations allowed to its Unix UID and never receives the OIDC requester or the Vault Session.
-
 See `SECURITY.md` for the short version.
 
 ## How it works
 
 
 ```
-    Trusted GitHub Actions job (trusted bootstrap only)
-                  |
-                  | OIDC requester passed over anonymous stdin pipe
-                  v
-    Broker process (runner-vault-broker Unix UID; memory only)
-       | obtains OIDC token and short-lived Vault Session
-       | keeps Session only in process memory
-       | HTTPS + Session
-       v
-    Cloudflare Vault Worker --------------------> approved upstream
-       | decrypts stored credential in memory
+The authorized GitHub Actions job exposes its OIDC requester capability to the Runner process. The Vault CLI obtains a single-use OIDC JWT, exchanges it with the Worker for a short-lived Session, and uses that Session over HTTPS. The Session exists only in the CLI process memory; no local broker, Unix socket or separate Linux account is involved.
 
-    Agent / RDC process (rdc-agent Unix UID)
-       |
-       | client/vault.mjs: fixed JSON protocol v1
-       | AF_UNIX socket; peer UID checked with SO_PEERCRED
-       +----------------------------------------> Broker
-
-    Owner browser -- GitHub OAuth --> /vault
-                                     requests / register / audit / settings
+```text
+GitHub Actions job (id-token: write)
+        |
+        | OIDC requester variables
+        v
+Runner / Agent process
+        |
+        | Vault CLI: OIDC exchange + HTTPS API
+        v
+Cloudflare Vault Worker --------------------> approved upstream
+        | decrypts stored credential in memory
+        |
+Owner browser -- GitHub OAuth --> /vault
+                                  requests / register / audit / settings
 ```
 
-The trusted bootstrap passes the GitHub OIDC requester capability to the Broker through an anonymous pipe and then scrubs it.
-The Broker runs under its own unprivileged Unix identity and is the only long-lived service process that retains the Vault Session. The Agent uses a fixed, versioned Unix-socket protocol; the
-Broker verifies the peer UID, accepts only reviewed operations, and never exports its Session or OIDC token. If the optional
-Broker is unavailable, Vault CLI operations fail closed; RDC, Tailscale and non-Vault Agent work continue independently.
+The CLI talks directly to the Worker over HTTPS. It does not use a local Broker, Unix socket, separate Linux identity, persistent Session file, or credential cache. A fresh OIDC token is exchanged when the process starts and the resulting Session is memory-only; a long-running local CLI bridge re-exchanges after a rejected/expired Session when the GitHub Actions OIDC requester remains available. If OIDC or the Worker is unavailable, Vault commands fail closed while unrelated Runner services remain independent.
 
 Registering a new credential:
 
@@ -208,13 +199,7 @@ Every call is audited with the worker-observed result, the purpose the agent gav
 
 ## Runner client
 
-`client/vault.mjs` is one zero-dependency file (Node 18+). It talks only to the local version-1 AF_UNIX Broker protocol
-(default socket `/run/runner-vault/broker.sock`, override with `VAULT_BROKER_SOCKET`). It never reads
-`ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN`, never performs direct OIDC or Runner API requests, and has no Session cache or
-fallback. The trusted workflow bootstraps a separate `runner-vault-broker` Unix account; that process obtains OIDC and
-keeps the short-lived Vault Session in memory. The CLI sends only fixed operations and request payloads over the socket.
-The Broker checks the connecting process UID with `SO_PEERCRED` and does not expose Session material. Run the CLI as
-`rdc-agent`; if the Broker is absent or denied, the CLI fails closed while non-Vault Runner work remains available.
+client/vault.mjs is one zero-dependency file (Node 18+). It connects directly to VAULT_URL over HTTPS and uses the GitHub Actions OIDC requester variables (ACTIONS_ID_TOKEN_REQUEST_URL and ACTIONS_ID_TOKEN_REQUEST_TOKEN) to obtain a single-use identity token. It exchanges that token at /api/runner/session, then calls the Runner API with the short-lived Session held only in process memory. No Session is written to disk, and no provider token is returned to the CLI. The workflow must grant permissions: id-token: write; the Worker still verifies the immutable repository/owner identity and exact workflow policy.
 
 ```bash
 export VAULT_URL=https://<your-vault-origin>
@@ -308,7 +293,7 @@ Every merge to `main` that changes `app/**`, `client/**`, or the root pnpm manif
 
 1. Open the Worker URL (`https://<name>.<you>.workers.dev`) and choose *Create the GitHub App* using the personal GitHub account that owns the deployed repository (or matches the explicitly configured owner ID). The app is always named `Runner Vault <your numeric GitHub ID>` — the name is fixed per account, so setup never creates a differently-named app on a later run. If GitHub reports that the name is taken, the app already exists under your account: delete it under **GitHub Settings → Developer settings → GitHub Apps** and run setup again, and it is recreated under the same name.
 2. Sign in to the owner dashboard. No Runner repository form is required: the first valid OIDC run from the owner's `main/.github/workflows/rdc-lab.yml` workflow proves the owner identity and atomically pins the repository ID. Later runs must match the pinned repository, owner, branch, event and workflow. Pull-request events are refused.
-3. Nothing to configure in the Runner Lab: its workflow reads `deployment.json` from this repository and connects automatically — see the [Runner Lab README](https://github.com/aminsh35322088-ctrl/GitHub-Runner-Lab). The trusted workflow provisions separate `rdc-agent` and `runner-vault-broker` Unix identities, passes the OIDC requester to the Broker over an anonymous pipe, and starts the Broker before exposing its socket to the Agent. The Broker keeps the Vault Session in memory; the Agent uses only the fixed Unix-socket CLI protocol. If Vault is not configured or the Broker cannot start, Vault operations remain unavailable without blocking RDC or Tailscale. No runner PAT or manual policy value is needed.
+3. Nothing to configure in the Runner Lab: its workflow reads deployment.json from this repository and connects automatically — see the Runner Lab README (https://github.com/aminsh35322088-ctrl/GitHub-Runner-Lab). The authorized workflow grants id-token: write and passes the Vault URL plus GitHub Actions OIDC requester environment to the Runner process. The CLI exchanges OIDC directly with the Worker over HTTPS; there is no Broker service, Unix socket, extra Linux account or runner PAT. If Vault is not configured or unavailable, Vault operations fail closed without blocking RDC or Tailscale.
 
 ### Where the key lives
 
