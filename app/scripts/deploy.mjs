@@ -7,6 +7,7 @@ import { prepareWorkerEntrypoint } from './prepare-worker-entry.mjs'
 const isWindows = process.platform === 'win32'
 const binPath = (name) => resolve('node_modules', '.bin', name + (isWindows ? '.cmd' : ''))
 const ownerIdPattern = /^[1-9][0-9]{0,15}$/
+const databaseIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function runLocal(name, args, { capture = false, input } = {}) {
   const executable = binPath(name)
@@ -53,7 +54,7 @@ export function parseD1DatabaseList(output) {
 }
 
 export function setD1DatabaseId(config, binding, databaseName, databaseId) {
-  if (!ownerIdPattern.test(databaseId) && !/^[a-f0-9-]{16,64}$/i.test(databaseId)) {
+  if (typeof databaseId !== 'string' || !databaseIdPattern.test(databaseId)) {
     throw new Error('Cloudflare returned an invalid D1 database ID')
   }
   const databases = config.d1_databases

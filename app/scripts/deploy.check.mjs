@@ -98,6 +98,13 @@ test('injects the exact D1 ID into the generated Worker config', () => {
   assert.equal(config.d1_databases[0].database_id, undefined)
 })
 
+test('rejects numeric and malformed values as D1 database IDs', () => {
+  const config = { d1_databases: [{ binding: 'DB', database_name: 'runner-vault-db' }] }
+  for (const value of ['318252513', '1234567890123456', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '8bd6ccde-01d7-47e4-8fd5-92bf99736b8']) {
+    assert.throws(() => setD1DatabaseId(config, 'DB', 'runner-vault-db', value), /invalid D1 database ID/)
+  }
+})
+
 test('the committed Wrangler template does not pin a deployment-specific D1 UUID', () => {
   const source = readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8')
   const binding = [...source.matchAll(/\{[^{}]*\}/g)].map((match) => match[0])
