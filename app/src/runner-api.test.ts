@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest'
 import * as orm from 'drizzle-orm'
 import { getDb, schema } from 'db'
 import { app } from './app.tsx'
-import { loadVaultAccessState, saveVaultAccessEnabled } from './lib/vault-observability.ts'
+import { loadVaultAccessEnabled, loadVaultAccessState, saveVaultAccessEnabled } from './lib/vault-observability.ts'
 import { parseRunnerBody } from './runner-api.ts'
 import { MAX_REQUEST_BODY } from './lib/proxy.ts'
 
@@ -161,6 +161,9 @@ describe('runner HTTP surface', () => {
         target: schema.vaultSetting.key,
         set: { value: 'not-an-integer', updatedAt: Date.now() },
       })
+      // The Runner gate fails closed, but this Owner-side setting read stays
+      // available so the dashboard can recover a malformed epoch.
+      expect(await loadVaultAccessEnabled(db)).toBe(true)
       const res = await app.handle(new Request('https://vault.test/api/runner/registry'))
       expect(res.status).toBe(503)
       expect(res.headers.get('cache-control')).toBe('no-store')
